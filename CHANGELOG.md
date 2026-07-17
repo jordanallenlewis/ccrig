@@ -7,8 +7,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
-- Renamed the project to **Better Status Line**. The repo slug, the `statusline.js`
-  filename, and the install commands are unchanged, so existing installs keep working.
+- Renamed the project to **Claude Code Better Status Line**, and added a note asking
+  people who like it to star the project.
+
+### Note
+- The GitLab project path is being renamed to `claude-code-better-status-line`. GitLab
+  keeps a redirect from the old path, so existing clones and the install one-liner keep
+  working; update your remote at your convenience with `git remote set-url`.
 
 ## [1.4.0] - 2026-07-17
 

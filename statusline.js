@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Better Status Line: a command center for Claude Code
+ * Claude Code Better Status Line: a command center for your terminal
  * ---------------------------------------------------------------------------
  * CREDIT: kickstarted by Hannah Stulberg's guide
  *   "Claude Code for Everything: Your Status Line Is Empty (Let's Fix That)"
