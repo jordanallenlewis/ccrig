@@ -6,6 +6,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Near-limit warning: once session or weekly usage crosses `thresholds.usage.warn`
+  (default 90%), the usage bar turns bold red and a `resumeHint` segment shows that
+  work is auto-saved and how to resume after a rate-limit reset (`claude --continue`).
+
 ## [1.0.0] - 2026-07-17
 
 ### Added

@@ -17,6 +17,10 @@
  * that tracks live terminal resize; effort + inference-mode flags;
  * unpushed/unpulled commits; date-aware reset times; an active-profile badge;
  * one script for many Claude profiles; and an interactive config editor.
+ * Also: a bold ⚠ near-limit warning + resume hint once session/weekly usage
+ * crosses `thresholds.usage.warn` (default 90%). Claude Code already
+ * persists the full transcript, so the hint just names the command
+ * (`claude --continue`) instead of leaving you to remember it mid-crunch.
  * ---------------------------------------------------------------------------
  * SETUP (macOS / Linux / Windows):
  *   1. Save this file somewhere (e.g. ~/.claude/statusline.js).
@@ -46,7 +50,7 @@ const { execSync } = require('child_process');
 // DEFAULTS: generic, safe for anyone. Override in statusline.config.json
 // (next to this file); your overrides deep-merge over these and survive updates.
 // ===========================================================================
-const DEFAULT_ORDER = ['profile', 'folder', 'model', 'effort', 'flags', 'context', 'git', 'caveman', 'billing', 'session', 'weekly', 'cost', 'sessionName'];
+const DEFAULT_ORDER = ['profile', 'folder', 'model', 'effort', 'flags', 'context', 'git', 'caveman', 'billing', 'session', 'weekly', 'resumeHint', 'cost', 'sessionName'];
 const DEFAULTS = {
   order: DEFAULT_ORDER,
   show: {
@@ -61,12 +65,13 @@ const DEFAULTS = {
     billing: true,      // 💳 sub (Claude.ai subscription) vs api (pay-per-token)
     session: true,      // 5-hour plan-usage bar + reset time
     weekly: true,       // 7-day plan-usage bar + reset time
+    resumeHint: true,   // ⚠ shown only past thresholds.usage.warn: how to pick back up after reset
     cost: false,        // session $ + lines +added/-removed
     sessionName: false, // the session's title
   },
   thresholds: {
     context: { green: 50, yellow: 70 }, // % filled → color
-    usage: { green: 50, yellow: 80 },
+    usage: { green: 50, yellow: 80, warn: 90 }, // warn: bold ⚠ banner + resumeHint kick in here
   },
   resetStyle: 'clock',  // 'clock' (10:40a, dated if not today) | 'relative' (2h14m)
   gitCacheMs: 2500,     // cache git state this long so big repos don't slow each render (0 = off)
@@ -122,7 +127,7 @@ function dispWidth(s) {
   for (const ch of s) {
     const cp = ch.codePointAt(0);
     if (cp === 0xFE0F || cp === 0x200D) continue;               // variation selector / ZWJ = 0
-    if (cp >= 0x1F000 || cp === 0x26A1 || cp === 0x2600) w += 2; // emoji + ⚡ ☀
+    if (cp >= 0x1F000 || cp === 0x26A1 || cp === 0x2600 || cp === 0x26A0) w += 2; // emoji + ⚡ ☀ ⚠
     else w += 1;
   }
   return w;
@@ -197,9 +202,26 @@ function fmtReset(epochSec) {
   const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
   return sameDay ? clock : `${d.getMonth() + 1}/${d.getDate()} ${clock}`;
 }
-const usageSeg = (label, pct, reset) =>
-  `${c(K.dim, label)} ${bar(pct, 8, CONFIG.thresholds.usage)} ${c(K.dim, Math.round(pct) + '%')}` +
-  (reset ? c(K.dim, ' ↺' + fmtReset(reset)) : '');
+const cBold = (n, s) => `\x1b[1m\x1b[38;5;${n}m${s}\x1b[0m`;
+function warnAtOf(t) { return t.warn != null ? t.warn : 90; }
+const usageSeg = (label, pct, reset) => {
+  const t = CONFIG.thresholds.usage;
+  const near = pct >= warnAtOf(t);
+  const lbl = near ? cBold(K.red, '⚠ ' + label) : c(K.dim, label);
+  const val = near ? cBold(K.red, Math.round(pct) + '%') : c(K.dim, Math.round(pct) + '%');
+  return `${lbl} ${bar(pct, 8, t)} ${val}` + (reset ? c(K.dim, ' ↺' + fmtReset(reset)) : '');
+};
+// Shown once when session OR weekly usage crosses thresholds.usage.warn. Claude Code already
+// persists the full transcript on disk, so nothing is actually at risk. This just names the
+// command so you don't have to remember it mid-crunch: `claude --continue` resumes the most
+// recent conversation in this directory right where it left off.
+function resumeHintSeg(sPct, wPct) {
+  const t = CONFIG.thresholds.usage;
+  const warnAt = warnAtOf(t);
+  const near = (sPct != null && sPct >= warnAt) || (wPct != null && wPct >= warnAt);
+  if (!near) return '';
+  return cBold(K.red, '⚠ near limit') + c(K.dim, ': auto-saved, resume with ') + c(K.yellow, 'claude --continue');
+}
 
 // context %: prefer Claude Code's own number, fall back to the transcript tail
 function contextPct(input) {
@@ -373,6 +395,7 @@ function collectSegments(input, width, gitOverride) {
   const sPct = pctOf(rl.five_hour), wPct = pctOf(rl.seven_day);
   out.session = sPct != null ? usageSeg('session', sPct, resetOf(rl.five_hour)) : '';
   out.weekly = wPct != null ? usageSeg('weekly', wPct, resetOf(rl.seven_day)) : '';
+  out.resumeHint = resumeHintSeg(sPct, wPct);
 
   const cost = input.cost;
   if (cost && typeof cost.total_cost_usd === 'number') {
@@ -407,7 +430,7 @@ function demoInput() {
     cost: { total_cost_usd: 2.17, total_lines_added: 214, total_lines_removed: 38 },
     rate_limits: {
       five_hour: { used_percentage: 63, resets_at: now + 2 * 3600 },
-      seven_day: { used_percentage: 88, resets_at: now + 5 * 86400 },
+      seven_day: { used_percentage: 93, resets_at: now + 5 * 86400 }, // crosses warn(90): demos the ⚠ + resumeHint
     },
   };
 }
@@ -463,6 +486,10 @@ if (argv.includes('--selftest')) {
       effort: { level: 'xhigh' }, context_window: { used_percentage: 99 },
       fast_mode: false, thinking: { enabled: false },
       rate_limits: { five_hour: { used_percentage: 10, resets_at: now + 3600 }, seven_day: { used_percentage: 50, resets_at: now + 3 * 86400 } },
+    },
+    'near-limit': {
+      model: { display_name: 'Sonnet 5' },
+      rate_limits: { five_hour: { used_percentage: 96, resets_at: now + 900 }, seven_day: { used_percentage: 40, resets_at: now + 4 * 86400 } },
     },
   };
   let ok = true;

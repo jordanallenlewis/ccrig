@@ -49,6 +49,7 @@ Restart Claude Code once. After that, edits apply live. Works on macOS, Linux, a
 - **🌿 git**: branch, uncommitted count, unpushed `↑` and unpulled `↓` vs upstream.
 - **💳 billing**: `sub` for a Claude.ai subscription, `api` for pay-per-token. Claude Code sends rate-limit data only to subscribers, which is how this is detected.
 - **session / weekly**: 5-hour and 7-day plan-usage bars, each with its reset time (a clock time today, dated when it's days out).
+- **⚠ near-limit hint**: once session or weekly usage crosses the warn threshold (90% by default), the bar turns bold red and a hint shows that your work is auto-saved and how to pick it back up (`claude --continue`).
 - **cost / session name**: session spend and the session's title. Off by default.
 
 ## Customize
