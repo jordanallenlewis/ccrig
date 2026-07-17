@@ -78,6 +78,18 @@ node statusline.js --config
 
 It shows a live preview, lets you toggle any segment, and writes your choices to `statusline.config.json` next to the script. You can also hand-edit that file (copy `statusline.config.example.json` to start) to change colors, thresholds, segment order, reset style, and profile labels. Your config is a separate file, so updating `statusline.js` never wipes it.
 
+## Display modes
+
+Three densities, switchable in one command (applies live in a couple of seconds):
+
+```bash
+node statusline.js --mode minimal    # quiet: profile, folder, model, context, git
+node statusline.js --mode normal     # the default set of segments
+node statusline.js --mode expanded   # everything with data, including cost and session name
+```
+
+The near-limit warning always shows through, even in minimal mode. In the `--config` editor, press `m` to cycle modes with a live preview. `normal` respects your per-segment toggles; `minimal` and `expanded` override them.
+
 ## Multiple Claude accounts
 
 A profile is an isolated `CLAUDE_CONFIG_DIR` with its own login, settings, and history. The default profile is `~/.claude`, and a named profile lives in `~/.claude-<name>`. Source the helper from your shell:

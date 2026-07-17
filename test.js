@@ -271,6 +271,67 @@ test('non-numeric thresholds fall back: context bar is not red at 42%', () => {
 });
 
 // ===========================================================================
+// display modes
+// ===========================================================================
+test('--mode writes config; minimal hides extras, expanded shows cost + name', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir);
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const input = baseInput({
+    fast_mode: true, thinking: { enabled: false }, session_name: 'Task X',
+    cost: { total_cost_usd: 1.5, total_lines_added: 10, total_lines_removed: 2 },
+    rate_limits: { five_hour: { used_percentage: 40 }, seven_day: { used_percentage: 30 } },
+  });
+  const mode = (m) => { const r = run(['--mode', m], { env, script }); assert.strictEqual(r.code, 0, m); return strip(render(input, { env, script, cols: '200' }).out); };
+
+  const min = mode('minimal');
+  assert.match(min, /📂/); assert.match(min, /Opus/); assert.match(min, /ctx/);
+  assert.ok(!min.includes('💳'), 'minimal hides billing');
+  assert.ok(!min.includes('session'), 'minimal hides usage bars');
+  assert.ok(!min.includes('⚡'), 'minimal hides effort');
+  assert.ok(!min.includes('Task X'), 'minimal hides session name');
+
+  const exp = mode('expanded');
+  assert.match(exp, /💳/); assert.match(exp, /session/);
+  assert.match(exp, /\$1\.50/, 'expanded shows cost'); assert.match(exp, /Task X/, 'expanded shows session name');
+
+  const norm = mode('normal');
+  assert.match(norm, /💳/); assert.match(norm, /session/);
+  assert.ok(!norm.includes('$1.50'), 'normal hides cost by default');
+  assert.ok(!norm.includes('Task X'), 'normal hides session name by default');
+});
+
+test('minimal mode still surfaces the near-limit warning', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { mode: 'minimal' });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const out = strip(render(baseInput({ rate_limits: { five_hour: { used_percentage: 95 } } }), { env, script, cols: '200' }).out);
+  assert.match(out, /near limit/);
+});
+
+test('--mode rejects an invalid mode', () => {
+  const r = run(['--mode', 'huge']);
+  assert.strictEqual(r.code, 1);
+  assert.match(r.out, /minimal\|normal\|expanded/);
+});
+
+test('an invalid mode in config falls back to normal', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { mode: 'ludicrous' });
+  const out = strip(render(baseInput({ rate_limits: { five_hour: { used_percentage: 40 } } }), { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, script }).out);
+  assert.match(out, /session/); // normal behavior restored
+});
+
+test('--config m cycles the mode and saves it', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { mode: 'normal' });
+  const r = run(['--config'], { stdin: 'm\ns\n', env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, script });
+  assert.strictEqual(r.code, 0);
+  const cfg = JSON.parse(fs.readFileSync(path.join(sb.dir, 'statusline.config.json'), 'utf8'));
+  assert.strictEqual(cfg.mode, 'expanded'); // normal -> expanded (cycle order minimal,normal,expanded)
+});
+
+// ===========================================================================
 // CLI: install / uninstall / doctor / misc
 // ===========================================================================
 test('--version and --help', () => {

@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-17
+
+### Added
+- Display modes: `node statusline.js --mode minimal | normal | expanded` sets how
+  much the status line shows, saved to config and applied live. `minimal` keeps the
+  quiet essentials (profile, folder, model, context, git); `expanded` shows every
+  segment with data (including cost and session name); `normal` respects your
+  per-segment toggles. The near-limit warning always shows through, even in minimal.
+  In `--config`, press `m` to cycle modes with a live preview. An invalid `mode` in
+  config falls back to `normal`.
+
 ## [1.1.0] - 2026-07-17
 
 ### Added
@@ -78,6 +89,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an API key means pay-per-token.
 - `install.sh` installer and CI (`--selftest` + shellcheck).
 
-[Unreleased]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/compare/v1.1.0...HEAD
+[Unreleased]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/compare/v1.2.0...HEAD
+[1.2.0]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/compare/v1.1.0...v1.2.0
 [1.1.0]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/compare/v1.0.0...v1.1.0
 [1.0.0]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/tags/v1.0.0

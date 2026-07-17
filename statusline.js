@@ -35,6 +35,7 @@
  *   node statusline.js --install            wire Claude Code to this file (backs up settings)
  *   node statusline.js --uninstall          remove the status line from settings
  *   node statusline.js --doctor             diagnose a broken or missing status line
+ *   node statusline.js --mode <m>           display density: minimal | normal | expanded
  *   node statusline.js --config             interactive segment/preview editor
  *   node statusline.js --demo [--cols N]    render sample data (great for screenshots)
  *   node statusline.js --selftest           sanity-check rendering on edge inputs
@@ -47,14 +48,20 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 
 // ===========================================================================
 // DEFAULTS: generic, safe for anyone. Override in statusline.config.json
 // (next to this file); your overrides deep-merge over these and survive updates.
 // ===========================================================================
 const DEFAULT_ORDER = ['profile', 'folder', 'model', 'effort', 'flags', 'context', 'git', 'caveman', 'billing', 'session', 'weekly', 'resumeHint', 'cost', 'sessionName'];
+// what survives in minimal mode; the ⚠ resumeHint stays on purpose (safety info)
+const MINIMAL_KEEP = ['profile', 'folder', 'model', 'context', 'git', 'resumeHint'];
+const MODES = ['minimal', 'normal', 'expanded'];
 const DEFAULTS = {
+  // minimal: the quiet essentials | normal: your `show` flags | expanded: everything with content
+  // switch anytime: node statusline.js --mode <minimal|normal|expanded>  (applies live)
+  mode: 'normal',
   order: DEFAULT_ORDER,
   show: {
     profile: 'auto',    // 👤 active Claude profile. 'auto' = only when >1 profile exists; true = always; false = never
@@ -122,6 +129,7 @@ function loadConfig() {
     if (typeof merged.color[k] !== 'number') merged.color[k] = DEFAULTS.color[k];
   }
   if (!Array.isArray(merged.order) || !merged.order.length) merged.order = clone(DEFAULT_ORDER);
+  if (!MODES.includes(merged.mode)) merged.mode = 'normal';
   return merged;
 }
 let CONFIG = loadConfig();
@@ -476,7 +484,13 @@ function collectSegments(input, width, gitOverride) {
   out.sessionName = name ? c(K.dim, name.length > 28 ? name.slice(0, 27) + '…' : name) : '';
 
   const order = Array.isArray(CONFIG.order) ? CONFIG.order : DEFAULT_ORDER;
-  return order.filter((n) => S[n] && out[n]).map((n) => out[n]);
+  const mode = CONFIG.mode || 'normal';
+  return order.filter((n) => {
+    if (!out[n]) return false;                              // no content -> never show
+    if (mode === 'minimal') return MINIMAL_KEEP.includes(n); // quiet: essentials only (+ the ⚠ hint)
+    if (mode === 'expanded') return true;                    // everything with content, incl. cost + name
+    return S[n];                                             // normal: honor the per-segment show flags
+  }).map((n) => out[n]);
 }
 
 function render(input, width, gitOverride) {
@@ -514,7 +528,8 @@ function helpText() {
     '  --install           wire Claude Code to this file (backs up settings.json first)',
     '  --uninstall         remove the status line from settings.json',
     '  --doctor            diagnose a broken or missing status line',
-    '  --config            interactive editor (toggle segments, live preview, save)',
+    '  --mode <m>          set display density: minimal | normal | expanded',
+    '  --config            interactive editor (segments, mode, live preview, save)',
     '  --demo [--cols N]    preview with sample data',
     '  --selftest          run edge-case render checks',
     '  --version           print the version',
@@ -668,6 +683,18 @@ if (picked.length > 1) {
   process.exit(1);
 }
 
+// ---- --mode <minimal|normal|expanded>: one-command display density, saved to config ----
+if (argv.includes('--mode')) {
+  const want = argv[argv.indexOf('--mode') + 1];
+  if (!MODES.includes(want)) {
+    process.stdout.write('usage: --mode <' + MODES.join('|') + '>' + (want ? '  (got "' + want + '")' : '') + '\n');
+    process.exit(1);
+  }
+  CONFIG.mode = want;
+  if (saveConfig()) process.stdout.write('ok  display mode -> ' + want + '  (' + CONFIG_PATH + ')\nPreview:  node "' + __filename + '" --demo\n');
+  process.exit(0);
+}
+
 if (argv.includes('--install')) runInstall();
 if (argv.includes('--uninstall')) runUninstall();
 if (argv.includes('--doctor')) {
@@ -763,11 +790,14 @@ async function runConfigEditor() {
       const box = (v === false) ? '[ ]' : '[x]';
       out += `  ${String(i + 1).padStart(2)}) ${box} ${n}${n === 'profile' ? ` (mode: ${v})` : ''}\n`;
     });
-    out += `\n   r) reset-time style: ${CONFIG.resetStyle}\n   s) save & quit    q) quit without saving\n`;
+    out += `\n   m) mode: ${CONFIG.mode}  (minimal / normal / expanded)\n`;
+    out += `   r) reset-time style: ${CONFIG.resetStyle}\n   s) save & quit    q) quit without saving\n`;
+    if (CONFIG.mode !== 'normal') out += `   note: mode is ${CONFIG.mode}, so the segment toggles above only take effect in normal mode.\n`;
     process.stdout.write(out);
     const a = (await ask('\n> ')).trim().toLowerCase();
     if (a === 'q' || a === '') { process.stdout.write('No changes saved.\n'); break; }
     if (a === 's') { if (saveConfig()) process.stdout.write(`Saved → ${CONFIG_PATH}\n`); break; }
+    if (a === 'm') { CONFIG.mode = MODES[(MODES.indexOf(CONFIG.mode) + 1) % MODES.length]; continue; }
     if (a === 'r') { CONFIG.resetStyle = CONFIG.resetStyle === 'clock' ? 'relative' : 'clock'; continue; }
     if (/^\d+$/.test(a)) {
       const n = order[parseInt(a, 10) - 1];
