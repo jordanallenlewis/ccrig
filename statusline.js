@@ -2,43 +2,37 @@
 /*
  * Claude Code status line — a terminal command center
  * ---------------------------------------------------------------------------
- * CREDIT: This was kickstarted by Hannah Stulberg's guide
+ * CREDIT: kickstarted by Hannah Stulberg's guide
  *   "Claude Code for Everything: Your Status Line Is Empty (Let's Fix That)"
- *   (In the Weeds) — https://hannahstulberg.substack.com/p/claude-code-for-everything-your-status-line-is-empty
+ *   https://hannahstulberg.substack.com/p/claude-code-for-everything-your-status-line-is-empty
+ * Reused: the status-line-as-command-center idea; the color-coded context bar
+ * (green<50 / yellow<70 / red); the folder/model/git/usage segments; and the
+ * portable "write it as a Node script" approach. A comment on that article (by
+ * AstroHan) noted the plan-usage numbers are already in stdin — the basis for
+ * this version dropping the API call.
  *
- * Reused from that article: the status-line-as-command-center idea; the
- * color-coded context bar with green<50 / yellow<70 / red thresholds; the
- * folder + model + git + plan-usage segments; and the portable
- * "write it as a Node script at ~/.claude/statusline.js" approach (edits apply
- * live, works the same on Windows).
- *
- * Enhanced here (what's different): every value comes from Claude Code's OWN
- * stdin JSON (rate_limits, context_window, effort, fast_mode, thinking) — so
- * this is ZERO-network: no OAuth token, no keychain read, no /api/oauth/usage
- * call, no 429s, always fresh. Plus: line-wrapping that tracks live terminal
- * resize; an effort segment; inference-mode flags (fast / no-think);
- * unpushed/unpulled commits vs upstream; date-aware limit-reset times; one
- * script serving multiple Claude profiles via CLAUDE_CONFIG_DIR; and a single
- * git call per render.
+ * Enhanced here: every value comes from Claude Code's OWN stdin JSON
+ * (rate_limits, context_window, effort, fast_mode, thinking), so it's
+ * ZERO-network (no token, no keychain, no 429s, always fresh). Plus: wrapping
+ * that tracks live terminal resize; effort + inference-mode flags;
+ * unpushed/unpulled commits; date-aware reset times; an active-profile badge;
+ * one script for many Claude profiles; and an interactive config editor.
  * ---------------------------------------------------------------------------
- * SETUP (Mac / Linux / Windows):
- *   1. Save this file (e.g. ~/.claude/statusline.js).
+ * SETUP (macOS / Linux / Windows):
+ *   1. Save this file somewhere (e.g. ~/.claude/statusline.js).
  *   2. In ~/.claude/settings.json add:
- *        "statusLine": {
- *          "type": "command",
- *          "command": "node \"/ABSOLUTE/PATH/TO/statusline.js\""
- *        }
- *      If `node` isn't found when the status line runs, use an absolute node
- *      path (e.g. the output of `which node` / `where node`).
- *   3. Restart Claude Code once. After that, edits to this file apply live.
+ *        "statusLine": { "type": "command", "command": "node \"/ABSOLUTE/PATH/statusline.js\"" }
+ *      Use an absolute node path if `node` isn't on the status line's PATH.
+ *   3. Restart Claude Code once. Edits apply live afterward.
  *
- * CUSTOMIZE: edit the CONFIG block below — toggle segments, tune thresholds,
- * change colors (256-color codes: https://www.ditig.com/256-colors-cheat-sheet).
+ * CUSTOMIZE: run `node statusline.js --config` for an interactive editor, or
+ * hand-edit `statusline.config.json` next to this file (see statusline.config.example.json).
+ * Your config lives in that separate file, so updating this script never wipes it.
  *
- * PREVIEW / TEST (these run only when you invoke the file by hand; Claude Code
- * always calls it with JSON on stdin and no args):
- *   node statusline.js --demo [--cols N]   render sample data (great for screenshots)
- *   node statusline.js --selftest          sanity-check rendering on edge inputs
+ * CLI (manual only — Claude Code calls this with JSON on stdin and no args):
+ *   node statusline.js --config            interactive segment/preview editor
+ *   node statusline.js --demo [--cols N]    render sample data (great for screenshots)
+ *   node statusline.js --selftest           sanity-check rendering on edge inputs
  *   node statusline.js --help
  */
 
@@ -49,40 +43,63 @@ const path = require('path');
 const { execSync } = require('child_process');
 
 // ===========================================================================
-// CONFIG — the "make it yours" block
+// DEFAULTS — generic, safe for anyone. Override in statusline.config.json
+// (next to this file); your overrides deep-merge over these and survive updates.
 // ===========================================================================
-const CONFIG = {
-  // Segments render in this order; flip any to false to hide it.
+const DEFAULT_ORDER = ['profile', 'folder', 'model', 'effort', 'flags', 'context', 'git', 'caveman', 'billing', 'session', 'weekly', 'cost', 'sessionName'];
+const DEFAULTS = {
+  order: DEFAULT_ORDER,
   show: {
-    profile: 'auto',    // 👤 active Claude profile. 'auto' = show only if you run >1 profile (hidden for single-profile users); true = always; false = never
+    profile: 'auto',    // 👤 active Claude profile. 'auto' = only when >1 profile exists; true = always; false = never
     folder: true,       // 📂 current project (repo-relative)
-    model: true,        // ★ model name + [1m] when on a 1M-context model
+    model: true,        // ★ model name + [1m] on a 1M-context model
     effort: true,       // ⚡ reasoning effort (low…max)
     flags: true,        // fast (when on) / no-think (when thinking is off)
     context: true,      // ctx: color-coded context-window bar
     git: true,          // 🌿 branch ●uncommitted ↑unpushed ↓unpulled
     caveman: true,      // [CAVEMAN] badge if the caveman plugin is active
+    billing: true,      // 💳 sub (Claude.ai subscription) vs api (pay-per-token)
     session: true,      // 5-hour plan-usage bar + reset time
     weekly: true,       // 7-day plan-usage bar + reset time
-    cost: false,        // session $ + lines +added/-removed (off by default)
-    sessionName: false, // the session's title (off by default)
+    cost: false,        // session $ + lines +added/-removed
+    sessionName: false, // the session's title
   },
   thresholds: {
     context: { green: 50, yellow: 70 }, // % filled → color
     usage: { green: 50, yellow: 80 },
   },
   resetStyle: 'clock',  // 'clock' (10:40a, dated if not today) | 'relative' (2h14m)
-  // profile badge: map a Claude config-dir name to a label. Unlisted dirs derive
-  // their label from the name (e.g. .claude-foo -> "foo"). Rename these to taste.
-  profileLabels: { '.claude': 'work', '.claude-personal': 'personal' },
+  gitCacheMs: 2500,     // cache git state this long so big repos don't slow each render (0 = off)
   reserveCols: 1,       // safety margin subtracted from terminal width
-  // 256-color codes (see cheat sheet linked above)
+  // Map a Claude config-dir name to a profile label. Unlisted dirs derive their
+  // label from the name (e.g. .claude-work -> "work"). Leave {} for pure auto.
+  profileLabels: {},
+  // 256-color codes: https://www.ditig.com/256-colors-cheat-sheet
   color: {
     dim: 245, folder: 75, model: 111, effort: 179, flag: 45, caveman: 172,
     green: 78, yellow: 214, red: 203, sky: 75,
-    work: 39, personal: 213, // profile badge: distinct hues so the account is obvious
+    profileDefault: 39, profilePersonal: 213, // profile badge hues
   },
 };
+
+// ---- config loading: deep-merge statusline.config.json over DEFAULTS ----
+const CONFIG_PATH = path.join(__dirname, 'statusline.config.json');
+function clone(x) { return (x && typeof x === 'object') ? JSON.parse(JSON.stringify(x)) : x; }
+function deepMerge(base, over) {
+  const out = clone(base);
+  if (over && typeof over === 'object' && !Array.isArray(over)) {
+    for (const k of Object.keys(over)) {
+      out[k] = (out[k] && typeof out[k] === 'object' && !Array.isArray(out[k]) && over[k] && typeof over[k] === 'object' && !Array.isArray(over[k]))
+        ? deepMerge(out[k], over[k]) : clone(over[k]);
+    }
+  }
+  return out;
+}
+function loadConfig() {
+  try { return deepMerge(DEFAULTS, JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))); }
+  catch { return clone(DEFAULTS); }
+}
+let CONFIG = loadConfig();
 
 // ===========================================================================
 // low-level helpers
@@ -104,7 +121,7 @@ function dispWidth(s) {
   let w = 0;
   for (const ch of s) {
     const cp = ch.codePointAt(0);
-    if (cp === 0xFE0F || cp === 0x200D) continue;              // variation selector / ZWJ = 0
+    if (cp === 0xFE0F || cp === 0x200D) continue;               // variation selector / ZWJ = 0
     if (cp >= 0x1F000 || cp === 0x26A1 || cp === 0x2600) w += 2; // emoji + ⚡ ☀
     else w += 1;
   }
@@ -251,26 +268,37 @@ function claudeProfileCount() {
   } catch { return 1; }
 }
 
-// which Claude Code profile (config dir) is active — from CLAUDE_CONFIG_DIR.
-// Works for everyone: in 'auto' mode it stays hidden for single-profile users
-// (no meaningless label), and labels derive from the dir name unless overridden.
+// active Claude profile badge — generic for anyone. In 'auto' it stays hidden for
+// single-profile users; labels derive from the dir name unless mapped in config.
 function profileSeg() {
   const mode = CONFIG.show.profile;
   if (mode === false) return '';
   const base = path.basename(CFG);
-  // if you're on the default dir and have no other profiles, there's nothing to disambiguate
   if (mode === 'auto' && base === '.claude' && claudeProfileCount() < 2) return '';
   const label = (CONFIG.profileLabels && CONFIG.profileLabels[base]) || base.replace(/^\.?claude-?/, '') || 'default';
-  const col = base === '.claude' ? K.work : base === '.claude-personal' ? K.personal : K.sky;
+  const col = base === '.claude' ? K.profileDefault : (base === '.claude-personal' ? K.profilePersonal : K.sky);
   return c(col, '👤 ' + label);
 }
 
-// git: branch + uncommitted + ahead/behind, in ONE call (porcelain v2 + --branch)
-function gitSeg(cwd) {
+// billing path: `rate_limits` is sent ONLY to Claude.ai subscribers (Pro/Max);
+// an API key means pay-per-token. Unknown (e.g. before the first response) → hide.
+function billingSeg(input) {
+  const rl = input.rate_limits || {};
+  const hasSub = (rl.five_hour && typeof rl.five_hour.used_percentage === 'number') ||
+                 (rl.seven_day && typeof rl.seven_day.used_percentage === 'number');
+  if (hasSub) return c(K.green, '💳 sub');
+  if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) return c(K.yellow, '💳 api');
+  return '';
+}
+
+// git: branch + uncommitted + ahead/behind in ONE call (porcelain v2 + --branch),
+// cached briefly so a large repo doesn't re-shell on every render (official pattern).
+function strHash(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return h.toString(36); }
+function gitProbe(cwd) {
   let out;
   try {
     out = execSync('git status --porcelain=v2 --branch', { cwd, stdio: ['ignore', 'pipe', 'ignore'], timeout: 700, encoding: 'utf8' });
-  } catch { return ''; }
+  } catch { return null; }
   let branch = '', ahead = 0, behind = 0, dirty = 0;
   for (const line of out.split('\n')) {
     if (line.startsWith('# branch.head ')) branch = line.slice(14).trim();
@@ -280,18 +308,32 @@ function gitSeg(cwd) {
       behind = Math.abs(parseInt(ab[1], 10)) || 0;
     } else if (line && !line.startsWith('#')) dirty++;
   }
-  if (!branch) return '';
+  if (!branch) return null;
   if (branch === '(detached)') branch = 'detached';
-  const parts = [c(K.green, branch)];
-  if (dirty > 0) parts.push(c(K.yellow, '●' + dirty));
-  if (ahead > 0) parts.push(c(K.yellow, '↑' + ahead));
-  if (behind > 0) parts.push(c(K.sky, '↓' + behind));
+  return { branch, ahead, behind, dirty };
+}
+function gitSeg(cwd) {
+  const ttl = CONFIG.gitCacheMs || 0;
+  const cacheFile = path.join(os.tmpdir(), 'ccsl-git-' + strHash(cwd) + '.json');
+  let data;
+  if (ttl > 0) {
+    try { if (Date.now() - fs.statSync(cacheFile).mtimeMs < ttl) data = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); } catch {}
+  }
+  if (data === undefined) {
+    data = gitProbe(cwd);
+    if (ttl > 0) { try { fs.writeFileSync(cacheFile, JSON.stringify(data)); } catch {} }
+  }
+  if (!data || !data.branch) return '';
+  const parts = [c(K.green, data.branch)];
+  if (data.dirty > 0) parts.push(c(K.yellow, '●' + data.dirty));
+  if (data.ahead > 0) parts.push(c(K.yellow, '↑' + data.ahead));
+  if (data.behind > 0) parts.push(c(K.sky, '↓' + data.behind));
   return `\u{1F33F} ${parts.join(' ')}`;
 }
 
 // ===========================================================================
 // build the ordered segment list from one input object
-//   `gitOverride` lets --demo / --selftest inject a git string instead of shelling out
+//   `gitOverride` lets --demo / --config / --selftest inject a git string
 // ===========================================================================
 function collectSegments(input, width, gitOverride) {
   const S = CONFIG.show;
@@ -323,6 +365,7 @@ function collectSegments(input, width, gitOverride) {
 
   out.git = gitOverride != null ? gitOverride : gitSeg(cwd);
   out.caveman = cavemanBadge();
+  out.billing = billingSeg(input);
 
   const rl = input.rate_limits || {};
   const pctOf = (o) => (o && typeof o.used_percentage === 'number') ? o.used_percentage : null;
@@ -343,8 +386,7 @@ function collectSegments(input, width, gitOverride) {
   const name = input.session_name;
   out.sessionName = name ? c(K.dim, name.length > 28 ? name.slice(0, 27) + '…' : name) : '';
 
-  // emit in CONFIG order, dropping disabled or empty
-  const order = ['profile', 'folder', 'model', 'effort', 'flags', 'context', 'git', 'caveman', 'session', 'weekly', 'cost', 'sessionName'];
+  const order = Array.isArray(CONFIG.order) ? CONFIG.order : DEFAULT_ORDER;
   return order.filter((n) => S[n] && out[n]).map((n) => out[n]);
 }
 
@@ -352,33 +394,10 @@ function render(input, width, gitOverride) {
   return wrapSegments(collectSegments(input, width, gitOverride), width);
 }
 
-// ===========================================================================
-// CLI modes (manual only — Claude Code passes JSON on stdin with no args)
-// ===========================================================================
-const argv = process.argv.slice(2);
-
-if (argv.includes('--help') || argv.includes('-h')) {
-  process.stdout.write([
-    'Claude Code status line.',
-    'Usage (Claude Code calls this automatically with JSON on stdin):',
-    '  in ~/.claude/settings.json → statusLine.command = node <this file>',
-    '',
-    'Manual:',
-    '  --demo [--cols N]   preview with sample data',
-    '  --selftest          run edge-case render checks',
-    '  --help              this text',
-    '',
-    'Customize the CONFIG block at the top of the file.',
-    '',
-  ].join('\n'));
-  process.exit(0);
-}
-
-if (argv.includes('--demo')) {
-  const ci = argv.indexOf('--cols');
-  const cols = ci >= 0 ? parseInt(argv[ci + 1], 10) : null;
+// representative sample input for --demo / --config preview
+function demoInput() {
   const now = Math.floor(Date.now() / 1000);
-  const demo = {
+  return {
     workspace: { current_dir: '/Users/you/Desktop/my-project', project_dir: '/Users/you/Desktop/my-project' },
     model: { id: 'claude-opus-4-8[1m]', display_name: 'Opus 4.8 (1M context)' },
     effort: { level: 'high' },
@@ -391,14 +410,45 @@ if (argv.includes('--demo')) {
       seven_day: { used_percentage: 88, resets_at: now + 5 * 86400 },
     },
   };
-  const fakeGit = `\u{1F33F} ${c(K.green, 'main')} ${c(K.yellow, '●7')} ${c(K.yellow, '↑2')}`;
+}
+const DEMO_GIT = () => `\u{1F33F} ${c(K.green, 'main')} ${c(K.yellow, '●3')} ${c(K.yellow, '↑1')}`;
+
+// ===========================================================================
+// CLI modes (manual only — Claude Code passes JSON on stdin with no args)
+// ===========================================================================
+const argv = process.argv.slice(2);
+
+if (argv.includes('--help') || argv.includes('-h')) {
+  process.stdout.write([
+    'Claude Code status line.',
+    'Claude Code calls this automatically (JSON on stdin). Manual commands:',
+    '  --config            interactive editor (toggle segments, live preview, save)',
+    '  --demo [--cols N]    preview with sample data',
+    '  --selftest          run edge-case render checks',
+    '  --help              this text',
+    '',
+    'Config lives in statusline.config.json next to this file',
+    '(see statusline.config.example.json). Updating the script never wipes it.',
+    '',
+  ].join('\n'));
+  process.exit(0);
+}
+
+if (argv.includes('--demo')) {
+  const ci = argv.indexOf('--cols');
+  const cols = ci >= 0 ? parseInt(argv[ci + 1], 10) : null;
+  const demo = demoInput();
   const widths = cols ? [cols] : [120, 80, 50];
   for (const w of widths) {
     process.stdout.write(`\n\x1b[2m── ${w} cols ──\x1b[0m\n`);
-    process.stdout.write(render(demo, w - CONFIG.reserveCols, fakeGit) + '\n');
+    process.stdout.write(render(demo, w - CONFIG.reserveCols, DEMO_GIT()) + '\n');
   }
   process.stdout.write('\n');
   process.exit(0);
+}
+
+if (argv.includes('--config')) {
+  runConfigEditor(); // owns the process lifecycle; normal path below is guarded off
 }
 
 if (argv.includes('--selftest')) {
@@ -424,8 +474,6 @@ if (argv.includes('--selftest')) {
         for (const l of r.split('\n')) {
           if (dispWidth(l) > w) {
             tooWide = true;
-            // a line wider than the terminal is only a BUG if it still holds a
-            // separator (wrap could have broken it); a lone unsplittable segment is fine
             if (l.replace(/\x1b\[[0-9;]*m/g, '').includes('│')) wrapBug = true;
           }
         }
@@ -439,9 +487,62 @@ if (argv.includes('--selftest')) {
   process.exit(ok ? 0 : 1);
 }
 
+// ---- interactive config editor: toggle segments, live preview, save ----
+function saveConfig() {
+  try {
+    if (fs.existsSync(CONFIG_PATH)) fs.copyFileSync(CONFIG_PATH, CONFIG_PATH + '.bak');
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(CONFIG, null, 2) + '\n');
+    JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); // validate round-trip
+    return true;
+  } catch (e) { process.stdout.write(`save failed: ${e.message}\n`); return false; }
+}
+async function runConfigEditor() {
+  const readline = require('readline');
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+  // buffer lines so none are lost when a piped stdin delivers them faster than we ask
+  const queue = [], waiters = [];
+  let closed = false;
+  rl.on('line', (l) => { const w = waiters.shift(); if (w) w(l); else queue.push(l); });
+  rl.on('close', () => { closed = true; while (waiters.length) waiters.shift()(''); });
+  const ask = (q) => new Promise((res) => {
+    process.stdout.write(q);
+    if (queue.length) return res(queue.shift());
+    if (closed) return res('');
+    waiters.push(res);
+  });
+  const order = Array.isArray(CONFIG.order) ? CONFIG.order : DEFAULT_ORDER;
+  while (true) {
+    let out = '\n\x1b[1mstatusline config\x1b[0m   (edits go to statusline.config.json)\n\n';
+    out += 'Preview:\n  ' + render(demoInput(), 96, DEMO_GIT()).split('\n').join('\n  ') + '\n\nSegments:\n';
+    order.forEach((n, i) => {
+      const v = CONFIG.show[n];
+      const box = (v === false) ? '[ ]' : '[x]';
+      out += `  ${String(i + 1).padStart(2)}) ${box} ${n}${n === 'profile' ? ` (mode: ${v})` : ''}\n`;
+    });
+    out += `\n   r) reset-time style: ${CONFIG.resetStyle}\n   s) save & quit    q) quit without saving\n`;
+    process.stdout.write(out);
+    const a = (await ask('\n> ')).trim().toLowerCase();
+    if (a === 'q' || a === '') { process.stdout.write('No changes saved.\n'); break; }
+    if (a === 's') { if (saveConfig()) process.stdout.write(`Saved → ${CONFIG_PATH}\n`); break; }
+    if (a === 'r') { CONFIG.resetStyle = CONFIG.resetStyle === 'clock' ? 'relative' : 'clock'; continue; }
+    if (/^\d+$/.test(a)) {
+      const n = order[parseInt(a, 10) - 1];
+      if (!n) { process.stdout.write('No such segment.\n'); continue; }
+      if (n === 'profile') CONFIG.show.profile = CONFIG.show.profile === 'auto' ? true : (CONFIG.show.profile === true ? false : 'auto');
+      else CONFIG.show[n] = !CONFIG.show[n];
+      continue;
+    }
+    process.stdout.write('Enter a segment number, r, s, or q.\n');
+  }
+  rl.close();
+  process.exit(0);
+}
+
 // ===========================================================================
 // normal path: Claude Code pipes the status JSON on stdin
 // ===========================================================================
-let input = {};
-try { input = JSON.parse(fs.readFileSync(0, 'utf8')); } catch {}
-process.stdout.write(render(input, getWidth() - CONFIG.reserveCols));
+if (!argv.includes('--config')) {
+  let input = {};
+  try { input = JSON.parse(fs.readFileSync(0, 'utf8')); } catch {}
+  process.stdout.write(render(input, getWidth() - CONFIG.reserveCols));
+}

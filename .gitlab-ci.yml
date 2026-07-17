@@ -1,0 +1,16 @@
+# Minimal CI: prove the status line renders on edge inputs and the shell tool parses.
+stages: [test]
+
+selftest:
+  stage: test
+  image: node:22
+  script:
+    - node --check statusline.js
+    - node statusline.js --selftest
+
+shellcheck:
+  stage: test
+  image: koalaman/shellcheck-alpine:stable
+  script:
+    - shellcheck claude-profiles.sh install.sh
+  allow_failure: true

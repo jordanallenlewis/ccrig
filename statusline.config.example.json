@@ -1,0 +1,32 @@
+{
+  "_comment": "Copy this to statusline.config.json in the same folder as statusline.js. Your overrides deep-merge over the built-in defaults, so you only need the keys you actually change. Easiest way to edit: `node statusline.js --config`. 256-color codes: https://www.ditig.com/256-colors-cheat-sheet",
+  "order": ["profile", "folder", "model", "effort", "flags", "context", "git", "caveman", "billing", "session", "weekly", "cost", "sessionName"],
+  "show": {
+    "profile": "auto",
+    "folder": true,
+    "model": true,
+    "effort": true,
+    "flags": true,
+    "context": true,
+    "git": true,
+    "caveman": true,
+    "billing": true,
+    "session": true,
+    "weekly": true,
+    "cost": false,
+    "sessionName": false
+  },
+  "thresholds": {
+    "context": { "green": 50, "yellow": 70 },
+    "usage": { "green": 50, "yellow": 80 }
+  },
+  "resetStyle": "clock",
+  "gitCacheMs": 2500,
+  "reserveCols": 1,
+  "profileLabels": { ".claude": "work", ".claude-personal": "personal" },
+  "color": {
+    "dim": 245, "folder": 75, "model": 111, "effort": 179, "flag": 45, "caveman": 172,
+    "green": 78, "yellow": 214, "red": 203, "sky": 75,
+    "profileDefault": 39, "profilePersonal": 213
+  }
+}
