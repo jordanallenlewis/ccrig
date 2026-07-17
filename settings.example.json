@@ -1,0 +1,7 @@
+{
+  "//": "Copy the statusLine block into your ~/.claude/settings.json (merge it with what's already there). Use an absolute node path if `node` is not on the PATH the status line runs in.",
+  "statusLine": {
+    "type": "command",
+    "command": "node \"/absolute/path/to/statusline.js\""
+  }
+}
