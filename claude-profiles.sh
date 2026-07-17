@@ -1,4 +1,4 @@
-# claude-profiles.sh — manage & switch Claude Code account profiles.
+# claude-profiles.sh: manage & switch Claude Code account profiles.
 #
 # Source this from your ~/.bashrc or ~/.zshrc:
 #   source /path/to/claude-profiles.sh
@@ -72,7 +72,7 @@ claude-profile() {
       ;;
     -h|--help|help)
       cat <<'EOF'
-claude-profile — manage Claude Code account profiles (isolated CLAUDE_CONFIG_DIR)
+claude-profile: manage Claude Code account profiles (isolated CLAUDE_CONFIG_DIR)
 
   claude-profile list                list profiles (* = current)
   claude-profile use <name>          switch this shell to a profile, then run `claude`
@@ -84,6 +84,6 @@ claude-profile — manage Claude Code account profiles (isolated CLAUDE_CONFIG_D
 The default profile is ~/.claude; "<name>" lives in ~/.claude-<name>.
 EOF
       ;;
-    *) echo "unknown command '$cmd' — try: claude-profile help"; return 1 ;;
+    *) echo "unknown command '$cmd': try: claude-profile help"; return 1 ;;
   esac
 }

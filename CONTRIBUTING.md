@@ -1,6 +1,6 @@
 # Contributing
 
-Contributions are welcome — bug fixes, new segments, better platform support,
+Contributions are welcome: bug fixes, new segments, better platform support,
 docs. Anyone can contribute; you don't need to be a maintainer. The only rule is
 that every change lands through a merge request that a maintainer approves.
 
@@ -16,7 +16,7 @@ that every change lands through a merge request that a maintainer approves.
 4. Open a **merge request** describing the change and why. Reference an issue if
    one exists.
 5. A maintainer reviews it. **An MR is merged only after a maintainer approves
-   it** — that approval is required, so nothing lands unreviewed.
+   it.** That approval is required, so nothing lands unreviewed.
 
 ## What makes a change likely to be accepted
 

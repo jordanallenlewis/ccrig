@@ -1,6 +1,6 @@
 # Claude Code status line + profile switcher
 
-A small, professional toolkit for [Claude Code](https://claude.com/claude-code):
+A small toolkit for [Claude Code](https://claude.com/claude-code):
 
 1. **A status line** that turns the bar at the bottom of your terminal into a command center: active profile, model, reasoning effort, context-window usage, git state, billing path, and your plan's rate-limit windows.
 2. **A profile switcher** for running multiple Claude accounts side by side.
@@ -16,7 +16,7 @@ The bars are color-coded (green, then yellow, then red) and the line wraps to yo
 
 ## Install
 
-Clone the repo, then run the installer (it points Claude Code at this copy, so `git pull` updates the tool):
+Clone the repo, then run the installer. It points Claude Code at this copy, so `git pull` updates the tool.
 
 ```bash
 git clone https://gitlab.com/jordanallenlewis/claude-code-statusline.git
@@ -24,7 +24,7 @@ cd claude-code-statusline
 ./install.sh
 ```
 
-Or configure it by hand — add this to `~/.claude/settings.json` (use an absolute node path if `node` isn't on the status line's PATH):
+To configure it by hand, add this to `~/.claude/settings.json` (use an absolute node path if `node` isn't on the status line's PATH):
 
 ```json
 {
@@ -40,16 +40,16 @@ Restart Claude Code once. After that, edits apply live. Works on macOS, Linux, a
 
 ## What the status line shows
 
-- **👤 profile** — the active Claude profile, when you run more than one (see below). Hidden if you only have one.
-- **📂 folder** — the current project, as a repo-relative path.
-- **★ model** — the model, with a `[1m]` tag on a 1M-context model.
-- **⚡ effort** — reasoning effort (low through max).
-- **flags** — `fast` when Fast mode is on; `no-think` when extended thinking is off.
-- **ctx** — a context-window bar: green under 50%, yellow under 70%, red above.
-- **🌿 git** — branch, uncommitted count, unpushed `↑` and unpulled `↓` vs upstream.
-- **💳 billing** — `sub` for a Claude.ai subscription, `api` for pay-per-token. (Claude Code sends rate-limit data only to subscribers, which is how this is detected.)
-- **session / weekly** — 5-hour and 7-day plan-usage bars, each with its reset time (a clock time today, dated when it's days out).
-- **cost / session name** — session spend and the session's title. Off by default.
+- **👤 profile**: the active Claude profile, when you run more than one (see below). Hidden if you only have one.
+- **📂 folder**: the current project, as a repo-relative path.
+- **★ model**: the model, with a `[1m]` tag on a 1M-context model.
+- **⚡ effort**: reasoning effort (low through max).
+- **flags**: `fast` when Fast mode is on, `no-think` when extended thinking is off.
+- **ctx**: a context-window bar. Green under 50%, yellow under 70%, red above.
+- **🌿 git**: branch, uncommitted count, unpushed `↑` and unpulled `↓` vs upstream.
+- **💳 billing**: `sub` for a Claude.ai subscription, `api` for pay-per-token. Claude Code sends rate-limit data only to subscribers, which is how this is detected.
+- **session / weekly**: 5-hour and 7-day plan-usage bars, each with its reset time (a clock time today, dated when it's days out).
+- **cost / session name**: session spend and the session's title. Off by default.
 
 ## Customize
 
@@ -59,11 +59,11 @@ Run the interactive editor:
 node statusline.js --config
 ```
 
-It shows a live preview, lets you toggle any segment, and writes your choices to `statusline.config.json` next to the script. You can also hand-edit that file (copy `statusline.config.example.json` to start) to change colors, thresholds, segment order, reset style, and profile labels. Because your config is a separate file, updating `statusline.js` never wipes it.
+It shows a live preview, lets you toggle any segment, and writes your choices to `statusline.config.json` next to the script. You can also hand-edit that file (copy `statusline.config.example.json` to start) to change colors, thresholds, segment order, reset style, and profile labels. Your config is a separate file, so updating `statusline.js` never wipes it.
 
 ## Multiple Claude accounts
 
-A "profile" is an isolated `CLAUDE_CONFIG_DIR` with its own login, settings, and history. The default profile is `~/.claude`; a named profile lives in `~/.claude-<name>`. Source the helper from your shell:
+A profile is an isolated `CLAUDE_CONFIG_DIR` with its own login, settings, and history. The default profile is `~/.claude`, and a named profile lives in `~/.claude-<name>`. Source the helper from your shell:
 
 ```bash
 # in ~/.zshrc or ~/.bashrc
@@ -84,7 +84,7 @@ The status line's `👤` badge shows which profile is active, so you always know
 
 ## Staying responsive
 
-Claude Code refreshes the status line after each message (debounced at 300ms) and, with `refreshInterval` set, on a timer too. The installer sets `refreshInterval: 2`, so time-based segments (reset countdowns, usage) stay current even while a session is idle. Git state is cached briefly (`gitCacheMs`, default 2500ms) so a large repository doesn't slow down every render.
+Claude Code refreshes the status line after each message (debounced at 300ms) and, with `refreshInterval` set, on a timer too. The installer sets `refreshInterval: 2`, so time-based segments like reset countdowns stay current even while a session is idle. Git state is cached briefly (`gitCacheMs`, default 2500ms) so a large repository doesn't slow down every render.
 
 ## Credit
 

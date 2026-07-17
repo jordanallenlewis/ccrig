@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Claude Code status line — a terminal command center
+ * Claude Code status line: a terminal command center
  * ---------------------------------------------------------------------------
  * CREDIT: kickstarted by Hannah Stulberg's guide
  *   "Claude Code for Everything: Your Status Line Is Empty (Let's Fix That)"
@@ -8,7 +8,7 @@
  * Reused: the status-line-as-command-center idea; the color-coded context bar
  * (green<50 / yellow<70 / red); the folder/model/git/usage segments; and the
  * portable "write it as a Node script" approach. A comment on that article (by
- * AstroHan) noted the plan-usage numbers are already in stdin — the basis for
+ * AstroHan) noted the plan-usage numbers are already in stdin: the basis for
  * this version dropping the API call.
  *
  * Enhanced here: every value comes from Claude Code's OWN stdin JSON
@@ -29,7 +29,7 @@
  * hand-edit `statusline.config.json` next to this file (see statusline.config.example.json).
  * Your config lives in that separate file, so updating this script never wipes it.
  *
- * CLI (manual only — Claude Code calls this with JSON on stdin and no args):
+ * CLI (manual only: Claude Code calls this with JSON on stdin and no args):
  *   node statusline.js --config            interactive segment/preview editor
  *   node statusline.js --demo [--cols N]    render sample data (great for screenshots)
  *   node statusline.js --selftest           sanity-check rendering on edge inputs
@@ -43,7 +43,7 @@ const path = require('path');
 const { execSync } = require('child_process');
 
 // ===========================================================================
-// DEFAULTS — generic, safe for anyone. Override in statusline.config.json
+// DEFAULTS: generic, safe for anyone. Override in statusline.config.json
 // (next to this file); your overrides deep-merge over these and survive updates.
 // ===========================================================================
 const DEFAULT_ORDER = ['profile', 'folder', 'model', 'effort', 'flags', 'context', 'git', 'caveman', 'billing', 'session', 'weekly', 'cost', 'sessionName'];
@@ -151,7 +151,7 @@ function bar(pct, width, t) {
   return c(col, '█'.repeat(filled)) + c(K.dim, '░'.repeat(width - filled));
 }
 
-// live terminal width — COLUMNS (Claude Code re-passes it on every resize) first;
+// live terminal width: COLUMNS (Claude Code re-passes it on every resize) first;
 // ioctl / stdout fallbacks for when this runs outside Claude Code.
 function ttyWidth() {
   let fd = null, ws = null;
@@ -172,7 +172,7 @@ function getWidth() {
   return 100;
 }
 
-// truncate a folder path (keep the tail — the most specific dir) to fit
+// truncate a folder path (keep the tail: the most specific dir) to fit
 function truncFolder(f, max) {
   if (max < 2 || f.length <= max) return f;
   return '…' + f.slice(-(max - 1));
@@ -237,7 +237,7 @@ function effortLevel(input) {
   return settingsVal('effortLevel') || '';
 }
 
-// caveman plugin badge — preserved so this composes with existing tooling
+// caveman plugin badge: preserved so this composes with existing tooling
 function cavemanBadge() {
   const flag = path.join(CFG, '.caveman-active');
   try { if (fs.lstatSync(flag).isSymbolicLink()) return ''; } catch { return ''; }
@@ -268,7 +268,7 @@ function claudeProfileCount() {
   } catch { return 1; }
 }
 
-// active Claude profile badge — generic for anyone. In 'auto' it stays hidden for
+// active Claude profile badge: generic for anyone. In 'auto' it stays hidden for
 // single-profile users; labels derive from the dir name unless mapped in config.
 function profileSeg() {
   const mode = CONFIG.show.profile;
@@ -414,7 +414,7 @@ function demoInput() {
 const DEMO_GIT = () => `\u{1F33F} ${c(K.green, 'main')} ${c(K.yellow, '●3')} ${c(K.yellow, '↑1')}`;
 
 // ===========================================================================
-// CLI modes (manual only — Claude Code passes JSON on stdin with no args)
+// CLI modes (manual only: Claude Code passes JSON on stdin with no args)
 // ===========================================================================
 const argv = process.argv.slice(2);
 
@@ -478,7 +478,7 @@ if (argv.includes('--selftest')) {
           }
         }
         const tag = wrapBug ? 'FAIL' : tooWide ? 'note' : 'ok  ';
-        process.stdout.write(`${tag}  ${name} @${w}${tooWide && !wrapBug ? ' (unsplittable segment — expected)' : ''}\n`);
+        process.stdout.write(`${tag}  ${name} @${w}${tooWide && !wrapBug ? ' (unsplittable segment: expected)' : ''}\n`);
         if (wrapBug) ok = false;
       } catch (e) { process.stdout.write(`FAIL  ${name} @${w}: ${e.message}\n`); ok = false; }
     }
