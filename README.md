@@ -11,7 +11,7 @@ The bars are color-coded (green, then yellow, then red). Preview it with sample 
 
 ## What it shows
 
-- 👤 the active Claude profile (work / personal), color-coded, when you run more than one `CLAUDE_CONFIG_DIR`
+- 👤 the active Claude profile, color-coded, shown only when you actually run more than one profile (`CLAUDE_CONFIG_DIR`); hidden otherwise
 - 📂 the current project, as a repo-relative path
 - ★ the model, with a `[1m]` tag on a 1M-context model
 - ⚡ reasoning effort (low through max)

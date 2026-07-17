@@ -54,7 +54,7 @@ const { execSync } = require('child_process');
 const CONFIG = {
   // Segments render in this order; flip any to false to hide it.
   show: {
-    profile: true,      // 👤 which Claude profile is active (work / personal), from CLAUDE_CONFIG_DIR
+    profile: 'auto',    // 👤 active Claude profile. 'auto' = show only if you run >1 profile (hidden for single-profile users); true = always; false = never
     folder: true,       // 📂 current project (repo-relative)
     model: true,        // ★ model name + [1m] when on a 1M-context model
     effort: true,       // ⚡ reasoning effort (low…max)
@@ -72,6 +72,9 @@ const CONFIG = {
     usage: { green: 50, yellow: 80 },
   },
   resetStyle: 'clock',  // 'clock' (10:40a, dated if not today) | 'relative' (2h14m)
+  // profile badge: map a Claude config-dir name to a label. Unlisted dirs derive
+  // their label from the name (e.g. .claude-foo -> "foo"). Rename these to taste.
+  profileLabels: { '.claude': 'work', '.claude-personal': 'personal' },
   reserveCols: 1,       // safety margin subtracted from terminal width
   // 256-color codes (see cheat sheet linked above)
   color: {
@@ -235,13 +238,31 @@ function cavemanBadge() {
   return c(K.caveman, badge);
 }
 
-// which Claude Code profile (config dir) is active — from CLAUDE_CONFIG_DIR
+// how many Claude profiles exist on this machine (~/.claude + ~/.claude-*)
+function claudeProfileCount() {
+  try {
+    let n = 0;
+    for (const e of fs.readdirSync(HOME)) {
+      if (e === '.claude' || e.startsWith('.claude-')) {
+        try { if (fs.statSync(path.join(HOME, e)).isDirectory() && ++n >= 2) return n; } catch {}
+      }
+    }
+    return n;
+  } catch { return 1; }
+}
+
+// which Claude Code profile (config dir) is active — from CLAUDE_CONFIG_DIR.
+// Works for everyone: in 'auto' mode it stays hidden for single-profile users
+// (no meaningless label), and labels derive from the dir name unless overridden.
 function profileSeg() {
+  const mode = CONFIG.show.profile;
+  if (mode === false) return '';
   const base = path.basename(CFG);
-  if (base === '.claude') return c(K.work, '👤 work');
-  if (base === '.claude-personal') return c(K.personal, '👤 personal');
-  const name = base.replace(/^\.?claude-?/, '') || base; // e.g. .claude-foo → foo
-  return c(K.sky, '👤 ' + name);
+  // if you're on the default dir and have no other profiles, there's nothing to disambiguate
+  if (mode === 'auto' && base === '.claude' && claudeProfileCount() < 2) return '';
+  const label = (CONFIG.profileLabels && CONFIG.profileLabels[base]) || base.replace(/^\.?claude-?/, '') || 'default';
+  const col = base === '.claude' ? K.work : base === '.claude-personal' ? K.personal : K.sky;
+  return c(col, '👤 ' + label);
 }
 
 // git: branch + uncommitted + ahead/behind, in ONE call (porcelain v2 + --branch)
