@@ -11,9 +11,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   people who like it to star the project.
 
 ### Note
-- The GitLab project path is being renamed to `claude-code-better-status-line`. GitLab
-  keeps a redirect from the old path, so existing clones and the install one-liner keep
-  working; update your remote at your convenience with `git remote set-url`.
+- The GitLab project path was renamed to `claude-code-better-status-line`. GitLab keeps
+  a redirect from the old path, so existing clones and the install one-liner keep working;
+  update your remote at your convenience with `git remote set-url`.
 
 ## [1.4.0] - 2026-07-17
 
@@ -124,9 +124,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an API key means pay-per-token.
 - `install.sh` installer and CI (`--selftest` + shellcheck).
 
-[Unreleased]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/compare/v1.4.0...HEAD
-[1.4.0]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/compare/v1.3.0...v1.4.0
-[1.3.0]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/compare/v1.2.0...v1.3.0
-[1.2.0]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/compare/v1.1.0...v1.2.0
-[1.1.0]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/compare/v1.0.0...v1.1.0
-[1.0.0]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/tags/v1.0.0
+[Unreleased]: https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/compare/v1.4.0...HEAD
+[1.4.0]: https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/compare/v1.3.0...v1.4.0
+[1.3.0]: https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/compare/v1.2.0...v1.3.0
+[1.2.0]: https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/compare/v1.1.0...v1.2.0
+[1.1.0]: https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/compare/v1.0.0...v1.1.0
+[1.0.0]: https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/tags/v1.0.0

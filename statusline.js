@@ -536,7 +536,7 @@ const argv = process.argv.slice(2);
 
 function helpText() {
   return [
-    'claude-code-statusline v' + VERSION,
+    'claude-code-better-status-line v' + VERSION,
     'Claude Code calls this automatically (JSON on stdin). Manual commands:',
     '  --install           wire Claude Code to this file (backs up settings.json first)',
     '  --uninstall         remove the status line from settings.json',
@@ -560,7 +560,7 @@ if (argv.includes('--help') || argv.includes('-h')) {
 }
 
 if (argv.includes('--version') || argv.includes('-v')) {
-  process.stdout.write('claude-code-statusline v' + VERSION + '\n');
+  process.stdout.write('claude-code-better-status-line v' + VERSION + '\n');
   process.exit(0);
 }
 
@@ -570,7 +570,7 @@ function runOptions() {
   const S = CONFIG.show, tu = CONFIG.thresholds.usage, tc = CONFIG.thresholds.context;
   const order = Array.isArray(CONFIG.order) ? CONFIG.order : DEFAULT_ORDER;
   const labels = CONFIG.profileLabels || {};
-  let o = 'claude-code-statusline v' + VERSION + ' options\n';
+  let o = 'claude-code-better-status-line v' + VERSION + ' options\n';
   o += 'config file: ' + CONFIG_PATH + (fs.existsSync(CONFIG_PATH) ? '' : '  (not present: using defaults)') + '\n\n';
   o += 'display mode:   ' + CONFIG.mode + '        choices: ' + MODES.join(' | ') + '\n';
   o += 'reset style:    ' + CONFIG.resetStyle + '        choices: clock | relative\n';
@@ -622,7 +622,7 @@ function writeSlashCommand() {
       'argument-hint: [optional: a change to apply directly, e.g. "minimal mode"]',
       '---',
       '',
-      'Open an INTERACTIVE MENU so the user configures their claude-code-statusline by',
+      'Open an INTERACTIVE MENU so the user configures their claude-code-better-status-line by',
       'picking options, not by typing free text. The script is:',
       '',
       '    ' + sl,
@@ -724,7 +724,7 @@ function runDoctor() {
   const ok = (m) => process.stdout.write('  ok    ' + m + '\n');
   const bad = (m, fix) => { fails++; process.stdout.write('  FAIL  ' + m + (fix ? '\n        fix: ' + fix : '') + '\n'); };
   const info = (m) => process.stdout.write('  --    ' + m + '\n');
-  process.stdout.write('claude-code-statusline v' + VERSION + ' doctor\n');
+  process.stdout.write('claude-code-better-status-line v' + VERSION + ' doctor\n');
   process.stdout.write('  script:  ' + __filename + '\n  profile: ' + CFG + '\n\n');
 
   const major = parseInt(process.versions.node, 10);

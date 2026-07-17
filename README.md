@@ -21,13 +21,13 @@ The bars are color-coded (green, then yellow, then red) and the line wraps to yo
 One line on macOS / Linux:
 
 ```bash
-mkdir -p ~/.claude && curl -fsSL https://gitlab.com/jordanallenlewis/claude-code-statusline/-/raw/main/statusline.js -o ~/.claude/statusline.js && node ~/.claude/statusline.js --install
+mkdir -p ~/.claude && curl -fsSL https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/raw/main/statusline.js -o ~/.claude/statusline.js && node ~/.claude/statusline.js --install
 ```
 
 One line on Windows (PowerShell):
 
 ```powershell
-mkdir -Force $HOME\.claude | Out-Null; iwr https://gitlab.com/jordanallenlewis/claude-code-statusline/-/raw/main/statusline.js -OutFile $HOME\.claude\statusline.js; node $HOME\.claude\statusline.js --install
+mkdir -Force $HOME\.claude | Out-Null; iwr https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/raw/main/statusline.js -OutFile $HOME\.claude\statusline.js; node $HOME\.claude\statusline.js --install
 ```
 
 The installer wires your `~/.claude/settings.json` (or the active `CLAUDE_CONFIG_DIR` profile, if you run several: re-run it per profile), backing the file up first. It uses the exact node binary it was run with and is safe to re-run. If `node` isn't on your PATH, run the same commands with an absolute path to any Node 18+ binary. Restart Claude Code once; after that, edits apply live. Run `node statusline.js --help` for the full flag list.
@@ -35,8 +35,8 @@ The installer wires your `~/.claude/settings.json` (or the active `CLAUDE_CONFIG
 Prefer a clone? It keeps you on `git pull` updates and includes the profile switcher:
 
 ```bash
-git clone https://gitlab.com/jordanallenlewis/claude-code-statusline.git
-cd claude-code-statusline
+git clone https://gitlab.com/jordanallenlewis/claude-code-better-status-line.git
+cd claude-code-better-status-line
 ./install.sh        # or: node statusline.js --install
 ```
 
@@ -104,7 +104,7 @@ A profile is an isolated `CLAUDE_CONFIG_DIR` with its own login, settings, and h
 
 ```bash
 # in ~/.zshrc or ~/.bashrc
-source /path/to/claude-code-statusline/claude-profiles.sh
+source /path/to/claude-code-better-status-line/claude-profiles.sh
 ```
 
 Then:

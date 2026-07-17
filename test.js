@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Test suite for claude-code-statusline. Zero dependencies: Node's built-in
+ * Test suite for claude-code-better-status-line. Zero dependencies: Node's built-in
  * test runner (node:test, Node 18+). Run:
  *   node --test test.js        (or: node test.js)
  *
@@ -356,7 +356,7 @@ test('--config m cycles the mode and saves it', () => {
 // CLI: install / uninstall / doctor / misc
 // ===========================================================================
 test('--version and --help', () => {
-  assert.match(run(['--version']).out, /claude-code-statusline v\d+\.\d+\.\d+/);
+  assert.match(run(['--version']).out, /claude-code-better-status-line v\d+\.\d+\.\d+/);
   const h = run(['--help']);
   assert.strictEqual(h.code, 0);
   for (const flag of ['--install', '--uninstall', '--doctor', '--config', '--demo', '--selftest']) assert.ok(h.out.includes(flag), flag + ' in help');
