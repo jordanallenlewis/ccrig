@@ -1,6 +1,6 @@
-# Claude Code status line + profile switcher
+# Better Status Line
 
-A small toolkit for [Claude Code](https://claude.com/claude-code):
+Better Status Line is a small toolkit for [Claude Code](https://claude.com/claude-code):
 
 1. **A status line** that turns the bar at the bottom of your terminal into a command center: active profile, model, reasoning effort, context-window usage, git state, billing path, and your plan's rate-limit windows.
 2. **A profile switcher** for running multiple Claude accounts side by side.
