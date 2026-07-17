@@ -70,13 +70,19 @@ If anything looks wrong, `node statusline.js --doctor` diagnoses the usual suspe
 
 ## Customize
 
-Run the interactive editor:
+Three ways, easiest first.
+
+**From a Claude Code session** (installed by `--install`): run `/statusline-config`. It shows every option and lets you change settings in plain language ("switch to minimal", "turn off billing", "set the warn threshold to 85"). `node statusline.js --options` prints the same option list in a terminal.
+
+**Interactive terminal editor:**
 
 ```bash
 node statusline.js --config
 ```
 
-It shows a live preview, lets you toggle any segment, and writes your choices to `statusline.config.json` next to the script. You can also hand-edit that file (copy `statusline.config.example.json` to start) to change colors, thresholds, segment order, reset style, and profile labels. Your config is a separate file, so updating `statusline.js` never wipes it.
+It shows a live preview, lets you toggle any segment, cycle the mode (`m`), and writes your choices to `statusline.config.json` next to the script.
+
+**By hand:** copy `statusline.config.example.json` to `statusline.config.json` and edit colors, thresholds, segment order, reset style, and profile labels. Your config is a separate file, so updating `statusline.js` never wipes it.
 
 ## Display modes
 

@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-17
+
+### Added
+- In-session configuration: `--install` now also writes a `/statusline-config`
+  slash command (to the profile's `commands/` dir). Running it in a Claude Code
+  session shows every option and lets you change settings in plain language.
+  `--uninstall` removes the command.
+- `--options`: prints every current setting and its choices (display mode,
+  segments with state, thresholds, reset style, resume tickets, git cache,
+  profile labels) in a human- and agent-readable form.
+
+### Fixed
+- A reset time that passes while the session is idle no longer lingers as a stale
+  past time. Claude Code only refreshes `rate_limits` on the next message, so a
+  window whose `resets_at` is now in the past shows `↺now`, and its near-limit
+  warning and resume ticket are cleared (the window already refreshed). Fresh
+  numbers arrive on the next message. Re-evaluated every render against the clock.
+
 ## [1.2.0] - 2026-07-17
 
 ### Added
@@ -89,7 +107,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an API key means pay-per-token.
 - `install.sh` installer and CI (`--selftest` + shellcheck).
 
-[Unreleased]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/compare/v1.2.0...HEAD
+[Unreleased]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/compare/v1.3.0...HEAD
+[1.3.0]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/compare/v1.2.0...v1.3.0
 [1.2.0]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/compare/v1.1.0...v1.2.0
 [1.1.0]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/compare/v1.0.0...v1.1.0
 [1.0.0]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/tags/v1.0.0

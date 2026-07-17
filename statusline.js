@@ -27,9 +27,12 @@
  * It wires your Claude Code settings.json (with a backup) and prints next steps.
  * Restart Claude Code once; edits apply live afterward. `--uninstall` undoes it.
  *
- * CUSTOMIZE: run `node statusline.js --config` for an interactive editor, or
- * hand-edit `statusline.config.json` next to this file (see statusline.config.example.json).
- * Your config lives in that separate file, so updating this script never wipes it.
+ * CUSTOMIZE: in a Claude Code session run `/statusline-config` (installed by
+ * --install) to see every option and change settings conversationally. Or run
+ * `node statusline.js --config` for an interactive terminal editor, or hand-edit
+ * `statusline.config.json` next to this file (see statusline.config.example.json).
+ * `--options` prints the current settings. Config is a separate file, so updating
+ * this script never wipes it.
  *
  * CLI (manual only: Claude Code calls this with JSON on stdin and no args):
  *   node statusline.js --install            wire Claude Code to this file (backs up settings)
@@ -48,7 +51,7 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 
 // ===========================================================================
 // DEFAULTS: generic, safe for anyone. Override in statusline.config.json
@@ -212,8 +215,15 @@ function truncFolder(f, max) {
   return '…' + f.slice(-(max - 1));
 }
 
+function nowSec() { return Math.floor(Date.now() / 1000); }
+// a window is still counting against you only while its reset is in the future;
+// a reset in the past means the window already refreshed (fresh numbers arrive on
+// your next message), so we stop showing a stale time and a stale warning.
+function windowActive(reset) { return reset == null || reset > nowSec(); }
+
 // reset time: absolute clock (dated when not today) or relative countdown
 function fmtReset(epochSec) {
+  if (epochSec <= nowSec()) return 'now'; // reset time has passed; quota refreshes on the next message
   if (CONFIG.resetStyle === 'relative') {
     let s = epochSec - Math.floor(Date.now() / 1000);
     if (s <= 0) return 'now';
@@ -235,7 +245,7 @@ const cBold = (n, s) => `\x1b[1m\x1b[38;5;${n}m${s}\x1b[0m`;
 function warnAtOf(t) { return t.warn != null ? t.warn : 90; }
 const usageSeg = (label, pct, reset) => {
   const t = CONFIG.thresholds.usage;
-  const near = pct >= warnAtOf(t);
+  const near = pct >= warnAtOf(t) && windowActive(reset); // a passed reset means the window refreshed: no warning
   const lbl = near ? cBold(K.red, '⚠ ' + label) : c(K.dim, label);
   const val = near ? cBold(K.red, Math.round(pct) + '%') : c(K.dim, Math.round(pct) + '%');
   return `${lbl} ${bar(pct, 8, t)} ${val}` + (reset ? c(K.dim, ' ↺' + fmtReset(reset)) : '');
@@ -286,11 +296,14 @@ function resumeHintSeg(input, sPct, wPct, sReset, wReset) {
   const t = CONFIG.thresholds.usage;
   const warnAt = warnAtOf(t);
   const critAt = t.critical != null ? t.critical : 98;
-  const worst = Math.max(sPct != null ? sPct : -1, wPct != null ? wPct : -1);
-  if (worst < warnAt) return '';
-  if (CONFIG.resumeTickets !== false && worst >= critAt) {
-    const which = (sPct != null && sPct >= critAt) ? 'session' : 'weekly';
-    const saved = writeResumeTicket(input, worst, which, which === 'session' ? sReset : wReset);
+  // only an ACTIVE window (reset still in the future) counts; a passed reset refreshed it
+  const near = (p, r) => p != null && p >= warnAt && windowActive(r);
+  const sOn = near(sPct, sReset), wOn = near(wPct, wReset);
+  if (!sOn && !wOn) return '';
+  const sCrit = sOn && sPct >= critAt, wCrit = wOn && wPct >= critAt;
+  if (CONFIG.resumeTickets !== false && (sCrit || wCrit)) {
+    const which = sCrit ? 'session' : 'weekly';
+    const saved = writeResumeTicket(input, sCrit ? sPct : wPct, which, sCrit ? sReset : wReset);
     return cBold(K.red, '⚠ limit imminent') +
       c(K.dim, saved ? ': resume ticket saved, pick up with ' : ': resume with ') + c(K.yellow, 'claude --resume');
   }
@@ -529,6 +542,7 @@ function helpText() {
     '  --uninstall         remove the status line from settings.json',
     '  --doctor            diagnose a broken or missing status line',
     '  --mode <m>          set display density: minimal | normal | expanded',
+    '  --options           print every current setting and its choices',
     '  --config            interactive editor (segments, mode, live preview, save)',
     '  --demo [--cols N]    preview with sample data',
     '  --selftest          run edge-case render checks',
@@ -550,6 +564,34 @@ if (argv.includes('--version') || argv.includes('-v')) {
   process.exit(0);
 }
 
+// ---- --options: print every current setting + its choices (human + agent readable) ----
+function runOptions() {
+  const box = (v) => (v === false ? '[ ]' : (v === 'auto' ? '[a]' : '[x]'));
+  const S = CONFIG.show, tu = CONFIG.thresholds.usage, tc = CONFIG.thresholds.context;
+  const order = Array.isArray(CONFIG.order) ? CONFIG.order : DEFAULT_ORDER;
+  const labels = CONFIG.profileLabels || {};
+  let o = 'claude-code-statusline v' + VERSION + ' options\n';
+  o += 'config file: ' + CONFIG_PATH + (fs.existsSync(CONFIG_PATH) ? '' : '  (not present: using defaults)') + '\n\n';
+  o += 'display mode:   ' + CONFIG.mode + '        choices: ' + MODES.join(' | ') + '\n';
+  o += 'reset style:    ' + CONFIG.resetStyle + '        choices: clock | relative\n';
+  o += 'resume tickets: ' + (CONFIG.resumeTickets === false ? 'off' : 'on') + '\n';
+  o += 'git cache:      ' + (CONFIG.gitCacheMs || 0) + 'ms\n\n';
+  o += 'segments  ([x] on  [ ] off  [a] auto;  normal mode honors these, minimal/expanded override):\n';
+  for (const n of order) o += '  ' + box(S[n]) + ' ' + n + '\n';
+  o += '\nthresholds (percent of the window used):\n';
+  o += '  context: green<=' + tc.green + '  yellow<=' + tc.yellow + '  (else red)\n';
+  o += '  usage:   green<=' + tu.green + '  yellow<=' + tu.yellow + '  warn>=' + (tu.warn != null ? tu.warn : 90) + '  critical>=' + (tu.critical != null ? tu.critical : 98) + '\n';
+  o += '\nprofile labels: ' + (Object.keys(labels).length ? JSON.stringify(labels) : '(none set; derived from dir names)') + '\n';
+  o += '\nchange it:\n';
+  o += '  in a Claude Code session:   /statusline-config\n';
+  o += '  set a mode:                 node "' + __filename + '" --mode <' + MODES.join('|') + '>\n';
+  o += '  interactive (a terminal):   node "' + __filename + '" --config\n';
+  o += '  or edit:                    ' + CONFIG_PATH + '\n';
+  process.stdout.write(o);
+  process.exit(0);
+}
+if (argv.includes('--options')) runOptions();
+
 // ---- push-button install: wire settings.json to this file, backup first ----
 function settingsPathOf() { return path.join(CFG, 'settings.json'); }
 function isPlainObject(x) { return !!x && typeof x === 'object' && !Array.isArray(x); }
@@ -565,6 +607,41 @@ function backupSettings() {
   const sp = settingsPathOf();
   if (fs.existsSync(sp)) { fs.copyFileSync(sp, sp + '.bak'); return sp + '.bak'; }
   return null;
+}
+// the in-session command: writing it to CFG/commands makes `/statusline-config`
+// available in Claude Code sessions on this profile. The script path is baked in.
+function slashCommandPath() { return path.join(CFG, 'commands', 'statusline-config.md'); }
+function writeSlashCommand() {
+  try {
+    const p = slashCommandPath();
+    const sl = __filename;
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, [
+      '---',
+      'description: See every claude-code-statusline option and update your status line',
+      'argument-hint: [what to change, e.g. "minimal mode" or "turn off billing"]',
+      '---',
+      '',
+      'Configure the user\'s claude-code-statusline. The script is:',
+      '',
+      '    ' + sl,
+      '',
+      '1. Run `node "' + sl + '" --options` and show the user the full output, then run',
+      '   `node "' + sl + '" --demo` and show the preview.',
+      '2. If arguments were given below, apply that change. Otherwise ask what they want to change.',
+      '3. Apply the change:',
+      '   - Display mode: `node "' + sl + '" --mode <minimal|normal|expanded>`',
+      '   - Anything else (segments on/off, thresholds, resetStyle, resumeTickets, gitCacheMs,',
+      '     colors, profileLabels, order): edit statusline.config.json next to the script, deep-',
+      '     merging only the keys being changed and keeping it valid JSON. Never edit statusline.js.',
+      '4. Verify with `node "' + sl + '" --doctor` (it must pass) and show a fresh `node "' + sl + '" --demo`.',
+      '5. Tell the user what changed. Changes apply live within a couple seconds; no restart.',
+      '',
+      '$ARGUMENTS',
+      '',
+    ].join('\n'));
+    return p;
+  } catch { return null; }
 }
 function runInstall() {
   try {
@@ -590,6 +667,8 @@ function runInstall() {
     fs.writeFileSync(sp, JSON.stringify(settings, null, 2) + '\n');
     JSON.parse(fs.readFileSync(sp, 'utf8')); // round-trip validate
     process.stdout.write('ok  status line wired in ' + sp + (bak ? '\nok  previous settings backed up to ' + bak : '') + '\n');
+    const cmdPath = writeSlashCommand();
+    if (cmdPath) process.stdout.write('ok  in-session command installed: run /statusline-config in Claude Code to see and change options\n');
     const helper = path.join(__dirname, 'claude-profiles.sh');
     if (fs.existsSync(helper)) {
       process.stdout.write('--  multiple Claude accounts? add to your shell rc:  source "' + helper + '"\n');
@@ -614,6 +693,7 @@ function runUninstall() {
     const bak = backupSettings();
     delete settings.statusLine;
     fs.writeFileSync(sp, JSON.stringify(settings, null, 2) + '\n');
+    try { const cp = slashCommandPath(); if (fs.existsSync(cp)) fs.unlinkSync(cp); } catch {}
     process.stdout.write('ok  statusLine removed from ' + sp + (bak ? ' (backup: ' + bak + ')' : '') + '\n');
     process.stdout.write('--  this file and statusline.config.json were left in place; delete them if you want.\n');
     process.exit(0);

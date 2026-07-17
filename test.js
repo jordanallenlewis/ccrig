@@ -241,6 +241,27 @@ test('a session_id with path characters is refused (no traversal)', () => {
   assert.ok(!fs.existsSync(path.join(sb.cfg, 'evil.md')));
 });
 
+test('a passed reset time shows "now" and clears the stale warning', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const past = Math.floor(Date.now() / 1000) - 300;   // reset was 5 min ago
+  const future = Math.floor(Date.now() / 1000) + 3600;
+  // window was at 96% but its reset has passed: no warning, reset reads "now"
+  const passed = strip(render(baseInput({
+    session_id: 'sx', rate_limits: { five_hour: { used_percentage: 96, resets_at: past } },
+  }), { env }).out);
+  assert.match(passed, /session .*96% ↺now/);
+  assert.ok(!passed.includes('near limit'), 'no stale near-limit warning after reset passed');
+  assert.ok(!passed.includes('⚠'), 'no stale warning glyph');
+  // no resume ticket written for a window whose reset already passed
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'resume-tickets', 'sx.md')));
+  // a still-active window at the same % keeps the warning
+  const active = strip(render(baseInput({
+    rate_limits: { five_hour: { used_percentage: 96, resets_at: future } },
+  }), { env }).out);
+  assert.match(active, /near limit/);
+});
+
 // ===========================================================================
 // hostile configs never crash the render
 // ===========================================================================
@@ -466,6 +487,31 @@ test('--doctor flags an invalid statusline.config.json', () => {
   const r = run(['--doctor'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, script });
   assert.strictEqual(r.code, 1);
   assert.match(r.out, /config\.json is invalid/);
+});
+
+test('--options prints modes, segments, thresholds and exits 0', () => {
+  const r = run(['--options']);
+  assert.strictEqual(r.code, 0);
+  assert.match(r.out, /display mode:/);
+  assert.match(r.out, /choices: minimal \| normal \| expanded/);
+  assert.match(r.out, /segments/);
+  assert.match(r.out, /thresholds/);
+  assert.match(r.out, /\/statusline-config/);
+});
+
+test('--install writes the /statusline-config command; --uninstall removes it', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir);
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  run(['--install'], { env, script });
+  const cmd = path.join(sb.cfg, 'commands', 'statusline-config.md');
+  assert.ok(fs.existsSync(cmd), 'command written');
+  const body = fs.readFileSync(cmd, 'utf8');
+  assert.match(body, /description:/);
+  assert.match(body, /\$ARGUMENTS/);
+  assert.ok(body.includes(script), 'bakes the script path');
+  run(['--uninstall'], { env, script });
+  assert.ok(!fs.existsSync(cmd), 'command removed on uninstall');
 });
 
 test('mutually exclusive flags are rejected', () => {
