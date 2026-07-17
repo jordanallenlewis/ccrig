@@ -6,10 +6,50 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-17
+
 ### Added
 - Near-limit warning: once session or weekly usage crosses `thresholds.usage.warn`
   (default 90%), the usage bar turns bold red and a `resumeHint` segment shows that
   work is auto-saved and how to resume after a rate-limit reset (`claude --continue`).
+- Built-in cross-platform installer: `node statusline.js --install` wires
+  `settings.json` (with a backup) using the exact node binary it was run with;
+  safe to re-run. `--uninstall` removes it. Enables the one-line install in the
+  README, and works on Windows where `install.sh` can't.
+- `--doctor`: diagnoses the common failure modes (unwired settings, a node path
+  broken by a version-manager upgrade, invalid settings or config JSON, a render
+  error) with a fix hint per finding. Exits 1 when something is wrong.
+- `--version`, and running the file bare in a terminal now prints help instead of
+  blocking on stdin.
+- Resume tickets: at critical usage (`thresholds.usage.critical`, default 98%) the
+  status line saves `resume-tickets/<session>.md` in the Claude config dir with the
+  project path and the exact `claude --resume <session-id>` command, so a session
+  interrupted by a limit is findable days later. One ticket per session, 14-day
+  retention, off with `"resumeTickets": false`.
+- A test suite: `node --test test.js`, zero dependencies, 44 tests covering
+  rendering, wrapping, profiles, tickets, hostile configs, git, and every CLI mode,
+  run in CI. Regression tests encode bugs found by adversarial review.
+
+### Fixed
+- A crash guard around rendering: on any error the status line prints a short
+  hint and logs the stack to `statusline-error.log` instead of dying silently.
+- A hand-edited config that nulls out a whole section (`"color": null`,
+  `"show": "x"`, an empty `order`) no longer crashes the script; the broken
+  section falls back to defaults. Non-numeric threshold values fall back too
+  (they silently broke bar colors).
+- Found by adversarial review, each with a regression test: `--install` against a
+  settings.json holding a JSON array or bare value reported success while
+  installing nothing (now refused); `--doctor` missed a dead script path, false-
+  failed valid wrapper commands, and crashed on a non-string `command` (now checks
+  every quoted absolute path and diagnoses type errors); `--uninstall` dumped a raw
+  stack trace on a read-only settings.json (now a clean failure message).
+- Passing two mode flags at once (`--install --uninstall`) now errors instead of
+  silently running only the first.
+- `os.homedir()` throwing (arbitrary-UID containers) no longer kills the script
+  before the crash guard.
+
+### Changed
+- `install.sh` now delegates to the built-in Node installer.
 
 ## [1.0.0] - 2026-07-17
 
@@ -38,5 +78,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an API key means pay-per-token.
 - `install.sh` installer and CI (`--selftest` + shellcheck).
 
-[Unreleased]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/compare/v1.0.0...HEAD
+[Unreleased]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/compare/v1.1.0...HEAD
+[1.1.0]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/compare/v1.0.0...v1.1.0
 [1.0.0]: https://gitlab.com/jordanallenlewis/claude-code-statusline/-/tags/v1.0.0

@@ -19,9 +19,10 @@
   },
   "thresholds": {
     "context": { "green": 50, "yellow": 70 },
-    "usage": { "green": 50, "yellow": 80, "warn": 90 }
+    "usage": { "green": 50, "yellow": 80, "warn": 90, "critical": 98 }
   },
   "resetStyle": "clock",
+  "resumeTickets": true,
   "gitCacheMs": 2500,
   "reserveCols": 1,
   "profileLabels": { ".claude": "work", ".claude-personal": "personal" },

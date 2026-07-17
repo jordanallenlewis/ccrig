@@ -1,12 +1,13 @@
 # Minimal CI: prove the status line renders on edge inputs and the shell tool parses.
 stages: [test]
 
-selftest:
+test:
   stage: test
   image: node:22
   script:
     - node --check statusline.js
     - node statusline.js --selftest
+    - node --test test.js
 
 shellcheck:
   stage: test

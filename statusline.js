@@ -22,22 +22,23 @@
  * persists the full transcript, so the hint just names the command
  * (`claude --continue`) instead of leaving you to remember it mid-crunch.
  * ---------------------------------------------------------------------------
- * SETUP (macOS / Linux / Windows):
- *   1. Save this file somewhere (e.g. ~/.claude/statusline.js).
- *   2. In ~/.claude/settings.json add:
- *        "statusLine": { "type": "command", "command": "node \"/ABSOLUTE/PATH/statusline.js\"" }
- *      Use an absolute node path if `node` isn't on the status line's PATH.
- *   3. Restart Claude Code once. Edits apply live afterward.
+ * SETUP (macOS / Linux / Windows): save this file anywhere, then run
+ *   node statusline.js --install
+ * It wires your Claude Code settings.json (with a backup) and prints next steps.
+ * Restart Claude Code once; edits apply live afterward. `--uninstall` undoes it.
  *
  * CUSTOMIZE: run `node statusline.js --config` for an interactive editor, or
  * hand-edit `statusline.config.json` next to this file (see statusline.config.example.json).
  * Your config lives in that separate file, so updating this script never wipes it.
  *
  * CLI (manual only: Claude Code calls this with JSON on stdin and no args):
- *   node statusline.js --config            interactive segment/preview editor
+ *   node statusline.js --install            wire Claude Code to this file (backs up settings)
+ *   node statusline.js --uninstall          remove the status line from settings
+ *   node statusline.js --doctor             diagnose a broken or missing status line
+ *   node statusline.js --config             interactive segment/preview editor
  *   node statusline.js --demo [--cols N]    render sample data (great for screenshots)
  *   node statusline.js --selftest           sanity-check rendering on edge inputs
- *   node statusline.js --help
+ *   node statusline.js --version | --help
  */
 
 'use strict';
@@ -45,6 +46,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
+
+const VERSION = '1.1.0';
 
 // ===========================================================================
 // DEFAULTS: generic, safe for anyone. Override in statusline.config.json
@@ -71,9 +74,10 @@ const DEFAULTS = {
   },
   thresholds: {
     context: { green: 50, yellow: 70 }, // % filled → color
-    usage: { green: 50, yellow: 80, warn: 90 }, // warn: bold ⚠ banner + resumeHint kick in here
+    usage: { green: 50, yellow: 80, warn: 90, critical: 98 }, // warn: ⚠ + resumeHint; critical: resume ticket
   },
   resetStyle: 'clock',  // 'clock' (10:40a, dated if not today) | 'relative' (2h14m)
+  resumeTickets: true,  // at critical usage, save resume-tickets/<session>.md with the exact pick-up command
   gitCacheMs: 2500,     // cache git state this long so big repos don't slow each render (0 = off)
   reserveCols: 1,       // safety margin subtracted from terminal width
   // Map a Claude config-dir name to a profile label. Unlisted dirs derive their
@@ -101,15 +105,32 @@ function deepMerge(base, over) {
   return out;
 }
 function loadConfig() {
-  try { return deepMerge(DEFAULTS, JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))); }
-  catch { return clone(DEFAULTS); }
+  let merged;
+  try { merged = deepMerge(DEFAULTS, JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))); }
+  catch { merged = clone(DEFAULTS); }
+  // a hand-edited config can null out a whole section; restore anything critical
+  for (const k of ['show', 'thresholds', 'color', 'profileLabels']) {
+    if (!merged[k] || typeof merged[k] !== 'object' || Array.isArray(merged[k])) merged[k] = clone(DEFAULTS[k]);
+  }
+  for (const k of ['context', 'usage']) {
+    if (!merged.thresholds[k] || typeof merged.thresholds[k] !== 'object' || Array.isArray(merged.thresholds[k])) merged.thresholds[k] = clone(DEFAULTS.thresholds[k]);
+    for (const key of Object.keys(DEFAULTS.thresholds[k])) { // non-numeric values break bar colors silently
+      if (typeof merged.thresholds[k][key] !== 'number') merged.thresholds[k][key] = DEFAULTS.thresholds[k][key];
+    }
+  }
+  for (const k of Object.keys(DEFAULTS.color)) {
+    if (typeof merged.color[k] !== 'number') merged.color[k] = DEFAULTS.color[k];
+  }
+  if (!Array.isArray(merged.order) || !merged.order.length) merged.order = clone(DEFAULT_ORDER);
+  return merged;
 }
 let CONFIG = loadConfig();
 
 // ===========================================================================
 // low-level helpers
 // ===========================================================================
-const HOME = os.homedir();
+// os.homedir() can throw (arbitrary-UID containers with no passwd entry); never die for it
+let HOME; try { HOME = os.homedir(); } catch { HOME = process.env.HOME || process.env.USERPROFILE || os.tmpdir(); }
 const CFG = process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
 const K = CONFIG.color;
 const c = (n, s) => `\x1b[38;5;${n}m${s}\x1b[0m`;
@@ -211,15 +232,60 @@ const usageSeg = (label, pct, reset) => {
   const val = near ? cBold(K.red, Math.round(pct) + '%') : c(K.dim, Math.round(pct) + '%');
   return `${lbl} ${bar(pct, 8, t)} ${val}` + (reset ? c(K.dim, ' ↺' + fmtReset(reset)) : '');
 };
-// Shown once when session OR weekly usage crosses thresholds.usage.warn. Claude Code already
-// persists the full transcript on disk, so nothing is actually at risk. This just names the
-// command so you don't have to remember it mid-crunch: `claude --continue` resumes the most
-// recent conversation in this directory right where it left off.
-function resumeHintSeg(sPct, wPct) {
+// At >= thresholds.usage.critical (default 98%), drop a resume ticket: a tiny file
+// with the exact command to reopen THIS session after the limit resets. Claude Code
+// already saves the transcript continuously, so nothing is at risk; the ticket is
+// findability. Days later, after a weekly reset, `claude --continue` may resume the
+// wrong (a newer) session. The ticket names the precise one.
+function writeResumeTicket(input, pct, windowName, resetEpoch) {
+  const sid = input.session_id;
+  if (!sid || !/^[A-Za-z0-9-]+$/.test(sid)) return false;
+  try {
+    const dir = path.join(CFG, 'resume-tickets');
+    const file = path.join(dir, sid + '.md');
+    if (fs.existsSync(file)) return true; // one ticket per session; written once
+    fs.mkdirSync(dir, { recursive: true });
+    const cwd = (input.workspace && input.workspace.current_dir) || input.cwd || process.cwd();
+    const name = input.session_name || '(unnamed session)';
+    const when = resetEpoch ? fmtReset(resetEpoch) : 'the next window';
+    fs.writeFileSync(file, [
+      '# Claude Code resume ticket',
+      '',
+      'Saved by the status line at ' + new Date().toISOString() + ' (' + windowName + ' usage ' + Math.round(pct) + '%, resets ' + when + ').',
+      'Claude Code saves the transcript continuously, so nothing was lost. This ticket is the pointer back.',
+      '',
+      'Session: "' + name + '"',
+      'Project: ' + cwd,
+      '',
+      'Pick up exactly where you left off:',
+      '',
+      '    cd "' + cwd + '"',
+      '    claude --resume ' + sid,
+      '',
+      'Or run `claude --continue` in that directory for its most recent session.',
+      '',
+    ].join('\n'));
+    for (const f of fs.readdirSync(dir)) { // keep the drawer tidy: 14-day retention
+      try { const p = path.join(dir, f); if (Date.now() - fs.statSync(p).mtimeMs > 14 * 86400 * 1000) fs.unlinkSync(p); } catch {}
+    }
+    return true;
+  } catch { return false; }
+}
+
+// Shown once session OR weekly usage crosses thresholds.usage.warn. Escalates at
+// critical: the resume ticket is written and the hint names it.
+function resumeHintSeg(input, sPct, wPct, sReset, wReset) {
   const t = CONFIG.thresholds.usage;
   const warnAt = warnAtOf(t);
-  const near = (sPct != null && sPct >= warnAt) || (wPct != null && wPct >= warnAt);
-  if (!near) return '';
+  const critAt = t.critical != null ? t.critical : 98;
+  const worst = Math.max(sPct != null ? sPct : -1, wPct != null ? wPct : -1);
+  if (worst < warnAt) return '';
+  if (CONFIG.resumeTickets !== false && worst >= critAt) {
+    const which = (sPct != null && sPct >= critAt) ? 'session' : 'weekly';
+    const saved = writeResumeTicket(input, worst, which, which === 'session' ? sReset : wReset);
+    return cBold(K.red, '⚠ limit imminent') +
+      c(K.dim, saved ? ': resume ticket saved, pick up with ' : ': resume with ') + c(K.yellow, 'claude --resume');
+  }
   return cBold(K.red, '⚠ near limit') + c(K.dim, ': auto-saved, resume with ') + c(K.yellow, 'claude --continue');
 }
 
@@ -395,7 +461,7 @@ function collectSegments(input, width, gitOverride) {
   const sPct = pctOf(rl.five_hour), wPct = pctOf(rl.seven_day);
   out.session = sPct != null ? usageSeg('session', sPct, resetOf(rl.five_hour)) : '';
   out.weekly = wPct != null ? usageSeg('weekly', wPct, resetOf(rl.seven_day)) : '';
-  out.resumeHint = resumeHintSeg(sPct, wPct);
+  out.resumeHint = resumeHintSeg(input, sPct, wPct, resetOf(rl.five_hour), resetOf(rl.seven_day));
 
   const cost = input.cost;
   if (cost && typeof cost.total_cost_usd === 'number') {
@@ -441,20 +507,171 @@ const DEMO_GIT = () => `\u{1F33F} ${c(K.green, 'main')} ${c(K.yellow, '●3')} $
 // ===========================================================================
 const argv = process.argv.slice(2);
 
-if (argv.includes('--help') || argv.includes('-h')) {
-  process.stdout.write([
-    'Claude Code status line.',
+function helpText() {
+  return [
+    'claude-code-statusline v' + VERSION,
     'Claude Code calls this automatically (JSON on stdin). Manual commands:',
+    '  --install           wire Claude Code to this file (backs up settings.json first)',
+    '  --uninstall         remove the status line from settings.json',
+    '  --doctor            diagnose a broken or missing status line',
     '  --config            interactive editor (toggle segments, live preview, save)',
     '  --demo [--cols N]    preview with sample data',
     '  --selftest          run edge-case render checks',
+    '  --version           print the version',
     '  --help              this text',
     '',
     'Config lives in statusline.config.json next to this file',
     '(see statusline.config.example.json). Updating the script never wipes it.',
     '',
-  ].join('\n'));
+  ].join('\n');
+}
+if (argv.includes('--help') || argv.includes('-h')) {
+  process.stdout.write(helpText());
   process.exit(0);
+}
+
+if (argv.includes('--version') || argv.includes('-v')) {
+  process.stdout.write('claude-code-statusline v' + VERSION + '\n');
+  process.exit(0);
+}
+
+// ---- push-button install: wire settings.json to this file, backup first ----
+function settingsPathOf() { return path.join(CFG, 'settings.json'); }
+function isPlainObject(x) { return !!x && typeof x === 'object' && !Array.isArray(x); }
+// state: 'missing' | 'invalid' (unparseable) | 'notObject' (an array/number/null) | 'ok'
+function readSettingsRaw() {
+  const sp = settingsPathOf();
+  if (!fs.existsSync(sp)) return { state: 'missing', value: null };
+  let v;
+  try { v = JSON.parse(fs.readFileSync(sp, 'utf8')); } catch { return { state: 'invalid', value: null }; }
+  return isPlainObject(v) ? { state: 'ok', value: v } : { state: 'notObject', value: null };
+}
+function backupSettings() {
+  const sp = settingsPathOf();
+  if (fs.existsSync(sp)) { fs.copyFileSync(sp, sp + '.bak'); return sp + '.bak'; }
+  return null;
+}
+function runInstall() {
+  try {
+    fs.mkdirSync(CFG, { recursive: true });
+    const sp = settingsPathOf();
+    const raw = readSettingsRaw();
+    if (raw.state === 'invalid') {
+      process.stdout.write('!! ' + sp + ' exists but is not valid JSON. Fix it first (or delete it), then re-run --install.\n');
+      process.exit(1);
+    }
+    if (raw.state === 'notObject') {
+      process.stdout.write('!! ' + sp + ' parses but is not a JSON object (an array or a bare value). Fix it first, then re-run --install.\n');
+      process.exit(1);
+    }
+    const settings = raw.value || {};
+    const bak = backupSettings();
+    // process.execPath = the node running this installer: absolute, exists, cross-platform
+    settings.statusLine = {
+      type: 'command',
+      command: `"${process.execPath}" "${__filename}"`,
+      refreshInterval: 2,
+    };
+    fs.writeFileSync(sp, JSON.stringify(settings, null, 2) + '\n');
+    JSON.parse(fs.readFileSync(sp, 'utf8')); // round-trip validate
+    process.stdout.write('ok  status line wired in ' + sp + (bak ? '\nok  previous settings backed up to ' + bak : '') + '\n');
+    const helper = path.join(__dirname, 'claude-profiles.sh');
+    if (fs.existsSync(helper)) {
+      process.stdout.write('--  multiple Claude accounts? add to your shell rc:  source "' + helper + '"\n');
+    }
+    process.stdout.write('\nRestart Claude Code once. After that, edits to this file apply live.\n');
+    process.stdout.write('Preview now:  node "' + __filename + '" --demo\n');
+    process.exit(0);
+  } catch (e) {
+    process.stdout.write('install failed: ' + e.message + '\n');
+    process.exit(1);
+  }
+}
+function runUninstall() {
+  try {
+    const sp = settingsPathOf();
+    const raw = readSettingsRaw();
+    if (raw.state !== 'ok' || !raw.value.statusLine) {
+      process.stdout.write('nothing to remove: no statusLine in ' + sp + '\n');
+      process.exit(0);
+    }
+    const settings = raw.value;
+    const bak = backupSettings();
+    delete settings.statusLine;
+    fs.writeFileSync(sp, JSON.stringify(settings, null, 2) + '\n');
+    process.stdout.write('ok  statusLine removed from ' + sp + (bak ? ' (backup: ' + bak + ')' : '') + '\n');
+    process.stdout.write('--  this file and statusline.config.json were left in place; delete them if you want.\n');
+    process.exit(0);
+  } catch (e) {
+    process.stdout.write('uninstall failed: ' + e.message + '\n');
+    process.exit(1);
+  }
+}
+
+// ---- doctor: diagnose the failure modes users actually hit ----
+function runDoctor() {
+  let fails = 0;
+  const ok = (m) => process.stdout.write('  ok    ' + m + '\n');
+  const bad = (m, fix) => { fails++; process.stdout.write('  FAIL  ' + m + (fix ? '\n        fix: ' + fix : '') + '\n'); };
+  const info = (m) => process.stdout.write('  --    ' + m + '\n');
+  process.stdout.write('claude-code-statusline v' + VERSION + ' doctor\n');
+  process.stdout.write('  script:  ' + __filename + '\n  profile: ' + CFG + '\n\n');
+
+  const major = parseInt(process.versions.node, 10);
+  if (major >= 18) ok('node ' + process.versions.node); else bad('node ' + process.versions.node + ' is too old', 'use Node 18 or newer');
+
+  const sp = settingsPathOf();
+  const raw = readSettingsRaw();
+  if (raw.state === 'missing') bad('no settings.json at ' + sp, 'run: node "' + __filename + '" --install');
+  else if (raw.state === 'invalid') bad('settings.json is not valid JSON', 'fix or delete it, then re-run --install');
+  else if (raw.state === 'notObject') bad('settings.json parses but is not a JSON object', 'fix it, then re-run --install');
+  else ok('settings.json parses');
+  if (raw.state === 'ok') {
+    const sl = isPlainObject(raw.value.statusLine) ? raw.value.statusLine : {};
+    const cmd = typeof sl.command === 'string' ? sl.command : '';
+    if (raw.value.statusLine && !isPlainObject(raw.value.statusLine)) bad('statusLine is not an object', 're-run: node "' + __filename + '" --install');
+    else if (sl.command != null && typeof sl.command !== 'string') bad('statusLine.command is not a string', 're-run: node "' + __filename + '" --install');
+    else if (!cmd) bad('statusLine is not configured', 'run: node "' + __filename + '" --install');
+    else {
+      ok('statusLine is configured');
+      if (!cmd.includes(__filename)) info('statusLine points at a different script: ' + cmd);
+      // check every quoted absolute path in the command (node binary AND script);
+      // non-path tokens (sh -c bodies, env values) are ignored on purpose
+      const pathish = [...cmd.matchAll(/"([^"]+)"/g)].map((m) => m[1]).filter((t) => path.isAbsolute(t));
+      const missing = pathish.filter((t) => !fs.existsSync(t));
+      if (missing.length) bad('path(s) in the statusLine command do not exist: ' + missing.join(', ') + ' (moved? node upgrade?)', 're-run: node "' + __filename + '" --install');
+      else if (pathish.length) ok('command paths exist (' + pathish.length + ' checked)');
+      else info('no quoted absolute paths in the command to check');
+      if (sl.refreshInterval) ok('refreshInterval: ' + sl.refreshInterval + 's'); else info('refreshInterval not set: bars update only on session events');
+    }
+  }
+  if (fs.existsSync(CONFIG_PATH)) {
+    try { JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); ok('statusline.config.json parses'); }
+    catch (e) { bad('statusline.config.json is invalid JSON (' + e.message + '); defaults are in use', 'fix it or delete it'); }
+  } else info('no statusline.config.json: defaults in use (customize with --config)');
+  try { execSync('git --version', { stdio: 'ignore', timeout: 2000 }); ok('git found'); }
+  catch { info('git not found: the git segment stays hidden'); }
+  try { render(demoInput(), 80, DEMO_GIT()); ok('test render'); }
+  catch (e) { bad('rendering throws: ' + e.message, 'update this file, or report it'); }
+  const elog = path.join(CFG, 'statusline-error.log');
+  if (fs.existsSync(elog)) info('a previous run errored; see ' + elog + ' (delete it to clear this note)');
+
+  process.stdout.write(fails ? '\n' + fails + ' problem(s) found.\n' : '\nAll checks passed.\n');
+  process.exit(fails ? 1 : 0);
+}
+
+// one mode at a time: silently ignoring the second flag misleads the user
+const EXCLUSIVE = ['--install', '--uninstall', '--doctor', '--config', '--demo', '--selftest'];
+const picked = EXCLUSIVE.filter((m) => argv.includes(m));
+if (picked.length > 1) {
+  process.stdout.write('pick one of: ' + picked.join(', ') + '\n');
+  process.exit(1);
+}
+
+if (argv.includes('--install')) runInstall();
+if (argv.includes('--uninstall')) runUninstall();
+if (argv.includes('--doctor')) {
+  try { runDoctor(); } catch (e) { process.stdout.write('doctor crashed: ' + e.message + '\n'); process.exit(1); }
 }
 
 if (argv.includes('--demo')) {
@@ -569,7 +786,18 @@ async function runConfigEditor() {
 // normal path: Claude Code pipes the status JSON on stdin
 // ===========================================================================
 if (!argv.includes('--config')) {
-  let input = {};
-  try { input = JSON.parse(fs.readFileSync(0, 'utf8')); } catch {}
-  process.stdout.write(render(input, getWidth() - CONFIG.reserveCols));
+  if (process.stdin.isTTY) {
+    // a human ran this bare in a terminal: don't block on stdin, show help
+    process.stdout.write(helpText());
+    process.exit(0);
+  }
+  try {
+    let input = {};
+    try { input = JSON.parse(fs.readFileSync(0, 'utf8')); } catch {}
+    process.stdout.write(render(input, getWidth() - CONFIG.reserveCols));
+  } catch (e) {
+    // the status line must never die silently: leave a trail and a next step
+    try { fs.writeFileSync(path.join(CFG, 'statusline-error.log'), new Date().toISOString() + '\n' + (e.stack || e.message) + '\n'); } catch {}
+    process.stdout.write(c(K.dim, 'statusline error: run node statusline.js --doctor'));
+  }
 }

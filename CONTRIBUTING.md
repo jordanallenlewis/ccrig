@@ -10,9 +10,11 @@ that every change lands through a merge request that a maintainer approves.
 2. Keep it **zero-dependency**: `statusline.js` runs on the Node that ships with
    Claude Code, with no npm install. The shell tooling targets bash and zsh.
 3. Test locally before opening the MR:
-   - `node statusline.js --selftest` (rendering on edge inputs)
+   - `node --test test.js` (the full suite: rendering, CLI, install/uninstall/doctor, regressions)
+   - `node statusline.js --selftest` (quick rendering check on edge inputs)
    - `node statusline.js --demo` (eyeball the result)
    - `shellcheck claude-profiles.sh install.sh` if you touched the shell files
+   A bug fix should come with a regression test in `test.js`.
 4. Open a **merge request** describing the change and why. Reference an issue if
    one exists.
 5. A maintainer reviews it. **An MR is merged only after a maintainer approves

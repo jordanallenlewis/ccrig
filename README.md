@@ -12,19 +12,33 @@ Everything the status line shows is read from the JSON Claude Code already hands
 session █████░░░ 63% ↺8:53a │ weekly ███████░ 88% ↺7/22 6:53a
 ```
 
-The bars are color-coded (green, then yellow, then red) and the line wraps to your terminal width. Preview it with sample data before installing anything: `node statusline.js --demo`.
+The bars are color-coded (green, then yellow, then red) and the line wraps to your terminal width. Once you have the file (download or clone below), you can preview it with sample data before wiring anything: `node statusline.js --demo`.
 
 ## Install
 
-Clone the repo, then run the installer. It points Claude Code at this copy, so `git pull` updates the tool.
+One line on macOS / Linux:
+
+```bash
+mkdir -p ~/.claude && curl -fsSL https://gitlab.com/jordanallenlewis/claude-code-statusline/-/raw/main/statusline.js -o ~/.claude/statusline.js && node ~/.claude/statusline.js --install
+```
+
+One line on Windows (PowerShell):
+
+```powershell
+mkdir -Force $HOME\.claude | Out-Null; iwr https://gitlab.com/jordanallenlewis/claude-code-statusline/-/raw/main/statusline.js -OutFile $HOME\.claude\statusline.js; node $HOME\.claude\statusline.js --install
+```
+
+The installer wires your `~/.claude/settings.json` (or the active `CLAUDE_CONFIG_DIR` profile, if you run several: re-run it per profile), backing the file up first. It uses the exact node binary it was run with and is safe to re-run. If `node` isn't on your PATH, run the same commands with an absolute path to any Node 18+ binary. Restart Claude Code once; after that, edits apply live. Run `node statusline.js --help` for the full flag list.
+
+Prefer a clone? It keeps you on `git pull` updates and includes the profile switcher:
 
 ```bash
 git clone https://gitlab.com/jordanallenlewis/claude-code-statusline.git
 cd claude-code-statusline
-./install.sh
+./install.sh        # or: node statusline.js --install
 ```
 
-To configure it by hand, add this to `~/.claude/settings.json` (use an absolute node path if `node` isn't on the status line's PATH):
+To wire it by hand instead, add this to `~/.claude/settings.json` (use an absolute node path if `node` isn't on the status line's PATH):
 
 ```json
 {
@@ -36,7 +50,7 @@ To configure it by hand, add this to `~/.claude/settings.json` (use an absolute 
 }
 ```
 
-Restart Claude Code once. After that, edits apply live. Works on macOS, Linux, and Windows.
+If anything looks wrong, `node statusline.js --doctor` diagnoses the usual suspects (unwired settings, a node path broken by a version manager upgrade, invalid config). `node statusline.js --uninstall` removes it cleanly.
 
 ## What the status line shows
 
@@ -50,6 +64,8 @@ Restart Claude Code once. After that, edits apply live. Works on macOS, Linux, a
 - **💳 billing**: `sub` for a Claude.ai subscription, `api` for pay-per-token. Claude Code sends rate-limit data only to subscribers, which is how this is detected.
 - **session / weekly**: 5-hour and 7-day plan-usage bars, each with its reset time (a clock time today, dated when it's days out).
 - **⚠ near-limit hint**: once session or weekly usage crosses the warn threshold (90% by default), the bar turns bold red and a hint shows that your work is auto-saved and how to pick it back up (`claude --continue`).
+- **resume tickets**: at critical usage (98% by default) it also saves `resume-tickets/<session>.md` in your Claude config dir, holding the project path and the exact `claude --resume <session-id>` command. Claude Code already saves the transcript continuously, so nothing is lost at a limit; the ticket is for days later, after a weekly reset, when `claude --continue` would resume the wrong (a newer) session. Turn off with `"resumeTickets": false`.
+- **[CAVEMAN]**: the mode badge for the third-party caveman plugin, shown only if you use that plugin; everyone else never sees it.
 - **cost / session name**: session spend and the session's title. Off by default.
 
 ## Customize
@@ -79,13 +95,14 @@ claude-profile use work         # switch this shell to it, then run `claude`
 claude-profile run work         # or launch claude with it in one shot
 claude-profile list             # list profiles (* = current)
 claude-profile current          # show the active one
+claude-profile remove work      # delete a profile (asks first; won't touch the default)
 ```
 
 The status line's `👤` badge shows which profile is active, so you always know which account you're in.
 
 ## Staying responsive
 
-Claude Code refreshes the status line after each message (debounced at 300ms) and, with `refreshInterval` set, on a timer too. The installer sets `refreshInterval: 2`, so time-based segments like reset countdowns stay current even while a session is idle. Git state is cached briefly (`gitCacheMs`, default 2500ms) so a large repository doesn't slow down every render.
+Claude Code refreshes the status line after each message (debounced at 300ms) and, since Claude Code 2.1.97, `refreshInterval` re-runs it on a timer too (see the [status line docs](https://code.claude.com/docs/en/statusline)). The installer sets `refreshInterval: 2`, so time-based segments like reset countdowns stay current even while a session is idle; on an older Claude Code the key is ignored harmlessly. Git state is cached briefly (`gitCacheMs`, default 2500ms) so a large repository doesn't slow down every render.
 
 ## Credit
 
