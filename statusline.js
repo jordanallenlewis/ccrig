@@ -54,6 +54,7 @@ const { execSync } = require('child_process');
 const CONFIG = {
   // Segments render in this order; flip any to false to hide it.
   show: {
+    profile: true,      // 👤 which Claude profile is active (work / personal), from CLAUDE_CONFIG_DIR
     folder: true,       // 📂 current project (repo-relative)
     model: true,        // ★ model name + [1m] when on a 1M-context model
     effort: true,       // ⚡ reasoning effort (low…max)
@@ -76,6 +77,7 @@ const CONFIG = {
   color: {
     dim: 245, folder: 75, model: 111, effort: 179, flag: 45, caveman: 172,
     green: 78, yellow: 214, red: 203, sky: 75,
+    work: 39, personal: 213, // profile badge: distinct hues so the account is obvious
   },
 };
 
@@ -233,6 +235,15 @@ function cavemanBadge() {
   return c(K.caveman, badge);
 }
 
+// which Claude Code profile (config dir) is active — from CLAUDE_CONFIG_DIR
+function profileSeg() {
+  const base = path.basename(CFG);
+  if (base === '.claude') return c(K.work, '👤 work');
+  if (base === '.claude-personal') return c(K.personal, '👤 personal');
+  const name = base.replace(/^\.?claude-?/, '') || base; // e.g. .claude-foo → foo
+  return c(K.sky, '👤 ' + name);
+}
+
 // git: branch + uncommitted + ahead/behind, in ONE call (porcelain v2 + --branch)
 function gitSeg(cwd) {
   let out;
@@ -264,6 +275,8 @@ function gitSeg(cwd) {
 function collectSegments(input, width, gitOverride) {
   const S = CONFIG.show;
   const out = {};
+
+  out.profile = profileSeg();
 
   const cwd = (input.workspace && input.workspace.current_dir) || input.cwd || process.cwd();
   const projectDir = (input.workspace && input.workspace.project_dir) || cwd;
@@ -310,7 +323,7 @@ function collectSegments(input, width, gitOverride) {
   out.sessionName = name ? c(K.dim, name.length > 28 ? name.slice(0, 27) + '…' : name) : '';
 
   // emit in CONFIG order, dropping disabled or empty
-  const order = ['folder', 'model', 'effort', 'flags', 'context', 'git', 'caveman', 'session', 'weekly', 'cost', 'sessionName'];
+  const order = ['profile', 'folder', 'model', 'effort', 'flags', 'context', 'git', 'caveman', 'session', 'weekly', 'cost', 'sessionName'];
   return order.filter((n) => S[n] && out[n]).map((n) => out[n]);
 }
 
