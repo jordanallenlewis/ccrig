@@ -509,6 +509,7 @@ test('--install writes the /statusline-config command; --uninstall removes it', 
   const body = fs.readFileSync(cmd, 'utf8');
   assert.match(body, /description:/);
   assert.match(body, /\$ARGUMENTS/);
+  assert.match(body, /AskUserQuestion/, 'drives an interactive menu');
   assert.ok(body.includes(script), 'bakes the script path');
   run(['--uninstall'], { env, script });
   assert.ok(!fs.existsSync(cmd), 'command removed on uninstall');

@@ -51,7 +51,7 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 
 // ===========================================================================
 // DEFAULTS: generic, safe for anyone. Override in statusline.config.json
@@ -618,24 +618,39 @@ function writeSlashCommand() {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, [
       '---',
-      'description: See every claude-code-statusline option and update your status line',
-      'argument-hint: [what to change, e.g. "minimal mode" or "turn off billing"]',
+      'description: Open an interactive menu to configure your status line',
+      'argument-hint: [optional: a change to apply directly, e.g. "minimal mode"]',
       '---',
       '',
-      'Configure the user\'s claude-code-statusline. The script is:',
+      'Open an INTERACTIVE MENU so the user configures their claude-code-statusline by',
+      'picking options, not by typing free text. The script is:',
       '',
       '    ' + sl,
       '',
-      '1. Run `node "' + sl + '" --options` and show the user the full output, then run',
-      '   `node "' + sl + '" --demo` and show the preview.',
-      '2. If arguments were given below, apply that change. Otherwise ask what they want to change.',
-      '3. Apply the change:',
-      '   - Display mode: `node "' + sl + '" --mode <minimal|normal|expanded>`',
-      '   - Anything else (segments on/off, thresholds, resetStyle, resumeTickets, gitCacheMs,',
-      '     colors, profileLabels, order): edit statusline.config.json next to the script, deep-',
-      '     merging only the keys being changed and keeping it valid JSON. Never edit statusline.js.',
-      '4. Verify with `node "' + sl + '" --doctor` (it must pass) and show a fresh `node "' + sl + '" --demo`.',
-      '5. Tell the user what changed. Changes apply live within a couple seconds; no restart.',
+      'Drive every choice with the AskUserQuestion tool (it renders as a selectable menu',
+      'in the Claude Code CLI). Do not dump walls of text; surface values inside the menus.',
+      '',
+      '1. Read the current settings: run `node "' + sl + '" --options` (parse it, do not paste it all).',
+      '2. If arguments were given below, apply that directly and skip to step 5. Otherwise open the',
+      '   MAIN MENU with AskUserQuestion, header "Status line", question "What do you want to change?",',
+      '   options (put the current value in each description):',
+      '     - Display mode        (minimal / normal / expanded)',
+      '     - Toggle a segment    (turn any segment on or off)',
+      '     - Reset time style    (clock / relative)',
+      '     - Resume tickets      (on / off)',
+      '     - Thresholds          (warn %, critical %, color cutoffs)',
+      '     - Show current + preview',
+      '   (AskUserQuestion always adds an "Other" free-text choice; the user can use it.)',
+      '3. Drill in with a follow-up AskUserQuestion menu for the pick, e.g. mode -> minimal/normal/expanded;',
+      '   "Toggle a segment" -> a menu of the segments with their on/off state, then which way to set it.',
+      '4. Apply the change:',
+      '     - Display mode: `node "' + sl + '" --mode <minimal|normal|expanded>`',
+      '     - Anything else: edit statusline.config.json next to the script, deep-merging ONLY the keys',
+      '       being changed and keeping valid JSON. Never edit statusline.js.',
+      '5. Verify with `node "' + sl + '" --doctor` (must pass) and show a fresh `node "' + sl + '" --demo`.',
+      '6. Ask with AskUserQuestion "Change something else?" (Yes -> back to the main menu; Done -> stop).',
+      '   Loop until the user is done.',
+      '7. Briefly summarize what changed. Changes apply live within a couple seconds; no restart.',
       '',
       '$ARGUMENTS',
       '',

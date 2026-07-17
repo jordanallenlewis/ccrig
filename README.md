@@ -72,7 +72,7 @@ If anything looks wrong, `node statusline.js --doctor` diagnoses the usual suspe
 
 Three ways, easiest first.
 
-**From a Claude Code session** (installed by `--install`): run `/statusline-config`. It shows every option and lets you change settings in plain language ("switch to minimal", "turn off billing", "set the warn threshold to 85"). `node statusline.js --options` prints the same option list in a terminal.
+**From a Claude Code session** (installed by `--install`): run `/statusline-config`. It opens an interactive menu right in the CLI (pick display mode, toggle a segment, reset style, thresholds, and so on), applies your choice, shows a fresh preview, and asks if you want to change anything else. You can also just say what you want ("switch to minimal", "turn off billing"). `node statusline.js --options` prints the option list in a terminal.
 
 **Interactive terminal editor:**
 
