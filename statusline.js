@@ -67,7 +67,7 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 
 // where updates come from: the public GitLab repo's main branch (raw files).
 // Override the base with CCBSL_UPDATE_BASE (used by tests to point at a local dir).
@@ -1154,17 +1154,38 @@ function cavemanBadge() {
   return c(K.caveman, badge);
 }
 
-// how many Claude profiles exist on this machine (~/.claude + ~/.claude-*)
-function claudeProfileCount() {
+// dirs that MATCH the ~/.claude-* profile shape but are OUR OWN state, never profiles.
+const NON_PROFILE_DIRS = new Set(['.claude-usage-ledger', '.claude-rig-sessions']);
+// Every Claude profile config dir on this machine. A "profile" is an isolated
+// CLAUDE_CONFIG_DIR; by convention they live at ~/.claude (default) and ~/.claude-<name>.
+// The active CFG is always included (it may be a custom path outside HOME, and it's the
+// one the user is explicitly targeting) and created if missing; every other ~/.claude*
+// dir is included only if it already exists. This is what lets ONE --install cover a
+// heavy user's work + personal profiles instead of silently wiring only the active one.
+function detectProfiles() {
+  const seen = new Set();
+  const out = [];
+  const add = (d) => { if (d && !seen.has(d)) { seen.add(d); out.push(d); } };
+  add(CFG); // the explicit target: always, even if it doesn't exist yet
   try {
-    let n = 0;
-    for (const e of fs.readdirSync(HOME)) {
+    for (const e of fs.readdirSync(HOME).sort()) {
+      if (NON_PROFILE_DIRS.has(e)) continue;
       if (e === '.claude' || e.startsWith('.claude-')) {
-        try { if (fs.statSync(path.join(HOME, e)).isDirectory() && ++n >= 2) return n; } catch {}
+        const p = path.join(HOME, e);
+        try { if (fs.statSync(p).isDirectory()) add(p); } catch {}
       }
     }
-    return n;
-  } catch { return 1; }
+  } catch {}
+  return out;
+}
+// a short human label for a profile dir: ~/.claude -> "default", ~/.claude-personal -> "personal"
+function profileLabel(dir) {
+  const b = path.basename(dir);
+  return b === '.claude' ? 'default' : (b.replace(/^\.claude-/, '') || b);
+}
+// how many Claude profiles exist on this machine (for the auto-hide profile badge)
+function claudeProfileCount() {
+  try { return detectProfiles().length; } catch { return 1; }
 }
 
 // active Claude profile badge: generic for anyone. In 'auto' it stays hidden for
@@ -1358,10 +1379,11 @@ function helpText() {
   return [
     'ccrig v' + VERSION,
     'Claude Code calls this automatically (JSON on stdin). Manual commands:',
-    '  --install            wire Claude Code to this file (backs up settings.json first)',
-    '  --install-guardian   also wire the guardian: keep-working + auto-resume at limits',
-    '  --uninstall          remove the status line (and any guardian hooks)',
-    '  --uninstall-guardian remove only the guardian hooks; keep the status line',
+    '  --install            wire Claude Code to this file, for ALL your profiles (backs up settings.json first)',
+    '  --install-guardian   also wire the guardian: keep-working + auto-resume at limits (all profiles)',
+    '  --uninstall          remove the status line + any guardian hooks (all profiles)',
+    '  --uninstall-guardian remove only the guardian hooks; keep the status line (all profiles)',
+    '  --this-profile       with any install/uninstall command: scope it to the active profile only',
     '  --doctor             diagnose a broken or missing status line + guardian',
     '  --mode <m>           set display density: minimal | normal | expanded',
     '  --autopilot <m>      limit behaviour: off | notify | resume',
@@ -1752,27 +1774,27 @@ function runOptions() {
 if (argv.includes('--options')) runOptions();
 
 // ---- push-button install: wire settings.json to this file, backup first ----
-function settingsPathOf() { return path.join(CFG, 'settings.json'); }
+function settingsPathOf(dir = CFG) { return path.join(dir, 'settings.json'); }
 function isPlainObject(x) { return !!x && typeof x === 'object' && !Array.isArray(x); }
 // state: 'missing' | 'invalid' (unparseable) | 'notObject' (an array/number/null) | 'ok'
-function readSettingsRaw() {
-  const sp = settingsPathOf();
+function readSettingsRaw(dir = CFG) {
+  const sp = settingsPathOf(dir);
   if (!fs.existsSync(sp)) return { state: 'missing', value: null };
   let v;
   try { v = JSON.parse(fs.readFileSync(sp, 'utf8')); } catch { return { state: 'invalid', value: null }; }
   return isPlainObject(v) ? { state: 'ok', value: v } : { state: 'notObject', value: null };
 }
-function backupSettings() {
-  const sp = settingsPathOf();
+function backupSettings(dir = CFG) {
+  const sp = settingsPathOf(dir);
   if (fs.existsSync(sp)) { fs.copyFileSync(sp, sp + '.bak'); return sp + '.bak'; }
   return null;
 }
-// the in-session command: writing it to CFG/commands makes `/statusline-config`
-// available in Claude Code sessions on this profile. The script path is baked in.
-function slashCommandPath() { return path.join(CFG, 'commands', 'statusline-config.md'); }
-function writeSlashCommand() {
+// the in-session command: writing it to <dir>/commands makes `/statusline-config`
+// available in Claude Code sessions on that profile. The script path is baked in.
+function slashCommandPath(dir = CFG) { return path.join(dir, 'commands', 'statusline-config.md'); }
+function writeSlashCommand(dir = CFG) {
   try {
-    const p = slashCommandPath();
+    const p = slashCommandPath(dir);
     const sl = __filename;
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, [
@@ -1817,49 +1839,55 @@ function writeSlashCommand() {
     return p;
   } catch { return null; }
 }
-function runInstall() {
+// wire ONE profile. Returns a result the caller reports; never exits, never throws for a
+// bad settings.json (so one broken profile can't block the others).
+function installStatusLineInto(dir) {
   try {
-    fs.mkdirSync(CFG, { recursive: true });
-    const sp = settingsPathOf();
-    const raw = readSettingsRaw();
-    if (raw.state === 'invalid') {
-      process.stdout.write('!! ' + sp + ' exists but is not valid JSON. Fix it first (or delete it), then re-run --install.\n');
-      process.exit(1);
-    }
-    if (raw.state === 'notObject') {
-      process.stdout.write('!! ' + sp + ' parses but is not a JSON object (an array or a bare value). Fix it first, then re-run --install.\n');
-      process.exit(1);
-    }
+    fs.mkdirSync(dir, { recursive: true });
+    const sp = settingsPathOf(dir);
+    const raw = readSettingsRaw(dir);
+    if (raw.state === 'invalid') return { dir, sp, err: 'settings.json is not valid JSON (fix or delete it, then re-run)' };
+    if (raw.state === 'notObject') return { dir, sp, err: 'settings.json is not a JSON object (fix it, then re-run)' };
     const settings = raw.value || {};
-    const bak = backupSettings();
+    const bak = backupSettings(dir);
     // process.execPath = the node running this installer: absolute, exists, cross-platform
-    settings.statusLine = {
-      type: 'command',
-      command: `"${process.execPath}" "${__filename}"`,
-      refreshInterval: 2,
-    };
+    settings.statusLine = { type: 'command', command: `"${process.execPath}" "${__filename}"`, refreshInterval: 2 };
     fs.writeFileSync(sp, JSON.stringify(settings, null, 2) + '\n');
     JSON.parse(fs.readFileSync(sp, 'utf8')); // round-trip validate
-    process.stdout.write('ok  status line wired in ' + sp + (bak ? '\nok  previous settings backed up to ' + bak : '') + '\n');
-    const cmdPath = writeSlashCommand();
-    if (cmdPath) process.stdout.write('ok  in-session command installed: run /statusline-config in Claude Code to see and change options\n');
-    const helper = path.join(__dirname, 'claude-profiles.sh');
-    if (fs.existsSync(helper)) {
-      process.stdout.write('--  multiple Claude accounts? add to your shell rc:  source "' + helper + '"\n');
-    }
-    process.stdout.write('\nRestart Claude Code once. After that, edits to this file apply live.\n');
-    process.stdout.write('Preview now:  node "' + __filename + '" --demo\n');
-    process.stdout.write('Never lose work to a limit? Wire the guardian:  node "' + __filename + '" --install-guardian\n');
-    // honest disclosure: the render is zero-network, but a once-a-day check is not
-    process.stdout.write('\nUpdate checks: once a day this contacts the public GitLab repo to see if a newer\n');
-    process.stdout.write('statusline.js exists, and shows a small ⬆ badge. The status-line render itself makes\n');
-    process.stdout.write('NO network calls; nothing is ever downloaded or run until you type `--update`.\n');
-    process.stdout.write('Turn it off with "updateCheck": false (or NO_UPDATE_NOTIFIER=1).\n');
-    process.exit(0);
-  } catch (e) {
-    process.stdout.write('install failed: ' + e.message + '\n');
-    process.exit(1);
+    const cmd = writeSlashCommand(dir);
+    return { dir, sp, bak, cmd };
+  } catch (e) { return { dir, sp: settingsPathOf(dir), err: e.message }; }
+}
+function runInstall() {
+  // By default wire EVERY profile on this machine, so a work + personal setup never ends
+  // up with the bar on only one. --this-profile scopes it to the active CLAUDE_CONFIG_DIR.
+  const thisOnly = argv.includes('--this-profile');
+  const profiles = thisOnly ? [CFG] : detectProfiles();
+  const results = profiles.map(installStatusLineInto);
+  const okd = results.filter((r) => !r.err);
+  const failed = results.filter((r) => r.err);
+  for (const r of okd) {
+    process.stdout.write('ok  status line wired for ' + profileLabel(r.dir) + '  (' + r.sp + ')'
+      + (r.bak ? '  [backup: ' + r.bak + ']' : '') + '\n');
   }
+  if (okd.some((r) => r.cmd)) process.stdout.write('ok  in-session command installed: run /statusline-config in Claude Code to see and change options\n');
+  for (const r of failed) process.stdout.write('!! skipped ' + profileLabel(r.dir) + ' (' + r.sp + '): ' + r.err + '\n');
+  if (!okd.length) { process.stdout.write('install failed: no profile could be wired.\n'); process.exit(1); }
+  if (!thisOnly && profiles.length > 1) {
+    process.stdout.write('\n' + okd.length + ' profile(s) wired' + (failed.length ? ', ' + failed.length + ' skipped' : '')
+      + ' — all your Claude profiles now show the bar. (Scope to one with --this-profile.)\n');
+  }
+  const helper = path.join(__dirname, 'claude-profiles.sh');
+  if (fs.existsSync(helper)) process.stdout.write('--  switch accounts from your shell:  source "' + helper + '"\n');
+  process.stdout.write('\nRestart Claude Code once. After that, edits to this file apply live.\n');
+  process.stdout.write('Preview now:  node "' + __filename + '" --demo\n');
+  process.stdout.write('Never lose work to a limit? Wire the guardian:  node "' + __filename + '" --install-guardian\n');
+  // honest disclosure: the render is zero-network, but a once-a-day check is not
+  process.stdout.write('\nUpdate checks: once a day this contacts the public GitLab repo to see if a newer\n');
+  process.stdout.write('statusline.js exists, and shows a small ⬆ badge. The status-line render itself makes\n');
+  process.stdout.write('NO network calls; nothing is ever downloaded or run until you type `--update`.\n');
+  process.stdout.write('Turn it off with "updateCheck": false (or NO_UPDATE_NOTIFIER=1).\n');
+  process.exit(0);
 }
 
 // ---- guardian: wire the Stop / SessionStart / PreCompact hooks (Features 1, 2, 5) ----
@@ -1889,15 +1917,16 @@ function stripGuardianHooks(hooks) {
   }
   return { hooks: Object.keys(hooks).length ? hooks : undefined, removed };
 }
-function runInstallGuardian() {
+// wire the guardian hooks into ONE profile. Returns a result; never exits/throws.
+function installGuardianInto(dir) {
   try {
-    fs.mkdirSync(CFG, { recursive: true });
-    const sp = settingsPathOf();
-    const raw = readSettingsRaw();
-    if (raw.state === 'invalid') { process.stdout.write('!! ' + sp + ' is not valid JSON. Fix it first, then re-run.\n'); process.exit(1); }
-    if (raw.state === 'notObject') { process.stdout.write('!! ' + sp + ' is not a JSON object. Fix it first, then re-run.\n'); process.exit(1); }
+    fs.mkdirSync(dir, { recursive: true });
+    const sp = settingsPathOf(dir);
+    const raw = readSettingsRaw(dir);
+    if (raw.state === 'invalid') return { dir, sp, err: 'settings.json is not valid JSON (fix it, then re-run)' };
+    if (raw.state === 'notObject') return { dir, sp, err: 'settings.json is not a JSON object (fix it, then re-run)' };
     const settings = raw.value || {};
-    const bak = backupSettings();
+    const bak = backupSettings(dir);
     if (!isPlainObject(settings.statusLine) || typeof settings.statusLine.command !== 'string') {
       settings.statusLine = { type: 'command', command: `"${process.execPath}" "${__filename}"`, refreshInterval: 2 };
     }
@@ -1910,43 +1939,73 @@ function runInstallGuardian() {
     }
     fs.writeFileSync(sp, JSON.stringify(settings, null, 2) + '\n');
     JSON.parse(fs.readFileSync(sp, 'utf8')); // round-trip validate
-    writeSlashCommand();
-    const want = argv.includes('--auto') ? 'resume' : (cfgAutopilot() === 'off' ? 'notify' : cfgAutopilot());
-    CONFIG.keepWorking = true;
-    CONFIG.autopilot = want;
-    saveConfig();
-    process.stdout.write('ok  guardian hooks (Stop, SessionStart, PreCompact) wired in ' + sp + (bak ? '\nok  previous settings backed up to ' + bak : '') + '\n');
-    process.stdout.write('ok  Relentless mode ON: the session keeps working while todos remain\n');
-    process.stdout.write('ok  Limit Autopilot: ' + want + (want === 'resume'
-      ? '  (auto-relaunches claude --resume the moment the window resets)'
-      : '  (checkpoint + desktop ping; add --auto for hands-free relaunch)') + '\n');
-    process.stdout.write('\nRestart Claude Code once for the hooks to load.\n');
-    process.stdout.write('Dial it:   --autopilot <off|notify|resume>   --keep-working <on|off>\n');
-    process.stdout.write('Remove it: node "' + __filename + '" --uninstall-guardian\n');
-    process.exit(0);
-  } catch (e) { process.stdout.write('guardian install failed: ' + e.message + '\n'); process.exit(1); }
+    writeSlashCommand(dir);
+    return { dir, sp, bak };
+  } catch (e) { return { dir, sp: settingsPathOf(dir), err: e.message }; }
 }
-function runUninstallGuardian() {
+function runInstallGuardian() {
+  const thisOnly = argv.includes('--this-profile');
+  const profiles = thisOnly ? [CFG] : detectProfiles();
+  const results = profiles.map(installGuardianInto);
+  const okd = results.filter((r) => !r.err);
+  const failed = results.filter((r) => r.err);
+  for (const r of okd) {
+    process.stdout.write('ok  guardian hooks (Stop, SessionStart, PreCompact) wired for ' + profileLabel(r.dir) + '  (' + r.sp + ')'
+      + (r.bak ? '  [backup: ' + r.bak + ']' : '') + '\n');
+  }
+  for (const r of failed) process.stdout.write('!! skipped ' + profileLabel(r.dir) + ' (' + r.sp + '): ' + r.err + '\n');
+  if (!okd.length) { process.stdout.write('guardian install failed: no profile could be wired.\n'); process.exit(1); }
+  // config (keep-working + autopilot) is shared across profiles — set it once
+  const want = argv.includes('--auto') ? 'resume' : (cfgAutopilot() === 'off' ? 'notify' : cfgAutopilot());
+  CONFIG.keepWorking = true;
+  CONFIG.autopilot = want;
+  saveConfig();
+  if (!thisOnly && profiles.length > 1) {
+    process.stdout.write('\n' + okd.length + ' profile(s) guarded' + (failed.length ? ', ' + failed.length + ' skipped' : '')
+      + '. (Scope to one with --this-profile.)\n');
+  }
+  process.stdout.write('ok  Relentless mode ON: the session keeps working while todos remain\n');
+  process.stdout.write('ok  Limit Autopilot: ' + want + (want === 'resume'
+    ? '  (auto-relaunches claude --resume the moment the window resets)'
+    : '  (checkpoint + desktop ping; add --auto for hands-free relaunch)') + '\n');
+  process.stdout.write('\nRestart Claude Code once for the hooks to load.\n');
+  process.stdout.write('Dial it:   --autopilot <off|notify|resume>   --keep-working <on|off>\n');
+  process.stdout.write('Remove it: node "' + __filename + '" --uninstall-guardian\n');
+  process.exit(0);
+}
+// remove the guardian hooks from ONE profile. Returns a result; never exits/throws.
+function uninstallGuardianFrom(dir) {
   try {
-    const sp = settingsPathOf();
-    const raw = readSettingsRaw();
-    if (raw.state !== 'ok') { process.stdout.write('nothing to remove: no usable settings at ' + sp + '\n'); process.exit(0); }
+    const sp = settingsPathOf(dir);
+    const raw = readSettingsRaw(dir);
+    if (raw.state !== 'ok') return { dir, sp, removed: 0 };
     const settings = raw.value;
     const res = stripGuardianHooks(settings.hooks);
-    if (!res.removed) { process.stdout.write('nothing to remove: no guardian hooks in ' + sp + '\n'); process.exit(0); }
-    const bak = backupSettings();
+    if (!res.removed) return { dir, sp, removed: 0 };
+    const bak = backupSettings(dir);
     if (res.hooks === undefined) delete settings.hooks; else settings.hooks = res.hooks;
     fs.writeFileSync(sp, JSON.stringify(settings, null, 2) + '\n');
-    CONFIG.keepWorking = false; CONFIG.autopilot = 'off'; saveConfig();
-    process.stdout.write('ok  removed ' + res.removed + ' guardian hook(s) from ' + sp + (bak ? ' (backup: ' + bak + ')' : '') + '\n');
-    process.stdout.write('ok  Relentless mode + Autopilot turned off in config; the status line stays\n');
-    process.exit(0);
-  } catch (e) { process.stdout.write('guardian uninstall failed: ' + e.message + '\n'); process.exit(1); }
+    return { dir, sp, removed: res.removed, bak };
+  } catch (e) { return { dir, sp: settingsPathOf(dir), removed: 0, err: e.message }; }
 }
-function runUninstall() {
+function runUninstallGuardian() {
+  const thisOnly = argv.includes('--this-profile');
+  const profiles = thisOnly ? [CFG] : detectProfiles();
+  const results = profiles.map(uninstallGuardianFrom);
+  const removedAny = results.filter((r) => r.removed);
+  for (const r of removedAny) process.stdout.write('ok  removed ' + r.removed + ' guardian hook(s) from ' + profileLabel(r.dir) + '  (' + r.sp + ')' + (r.bak ? '  [backup: ' + r.bak + ']' : '') + '\n');
+  for (const r of results.filter((r) => r.err)) process.stdout.write('!! ' + profileLabel(r.dir) + ': ' + r.err + '\n');
+  if (!removedAny.length) { process.stdout.write('nothing to remove: no guardian hooks on any profile.\n'); process.exit(0); }
+  CONFIG.keepWorking = false; CONFIG.autopilot = 'off'; saveConfig();
+  process.stdout.write('ok  Relentless mode + Autopilot turned off in config; the status line stays\n');
+  process.exit(0);
+}
+// remove OUR status line (+ guardian hooks + slash command) from ONE profile. Never
+// touches a third-party status line. Returns a result; never exits/throws.
+function uninstallFrom(dir) {
   try {
-    const sp = settingsPathOf();
-    const raw = readSettingsRaw();
+    const sp = settingsPathOf(dir);
+    const raw = readSettingsRaw(dir);
     const gres = raw.state === 'ok' ? stripGuardianHooks(raw.value.hooks) : { removed: 0 };
     // only remove a statusLine that is THIS script's, so we never delete a third-party
     // status line the user switched to (a statusLine with no readable command is treated
@@ -1954,28 +2013,37 @@ function runUninstall() {
     const sl = raw.state === 'ok' ? raw.value.statusLine : undefined;
     const slCmd = isPlainObject(sl) && typeof sl.command === 'string' ? sl.command : (sl ? '' : null);
     const ownsStatusLine = slCmd != null && (slCmd === '' || slCmd.includes(__filename) || slCmd.includes('statusline.js'));
-    const foreign = sl && !ownsStatusLine;
-    if (raw.state !== 'ok' || (!ownsStatusLine && !gres.removed)) {
-      process.stdout.write('nothing to remove: no ' + (foreign ? 'status line of ours' : 'statusLine') + ' or guardian hooks in ' + sp + '\n');
-      if (foreign) process.stdout.write('--  the statusLine in settings points at a different tool; left untouched.\n');
-      process.exit(0);
-    }
+    const foreign = !!(sl && !ownsStatusLine);
+    if (raw.state !== 'ok' || (!ownsStatusLine && !gres.removed)) return { dir, sp, removedSL: false, removedHooks: 0, foreign };
     const settings = raw.value;
-    const bak = backupSettings();
+    const bak = backupSettings(dir);
     if (ownsStatusLine) delete settings.statusLine;
     if (gres.removed) { if (gres.hooks === undefined) delete settings.hooks; else settings.hooks = gres.hooks; }
     fs.writeFileSync(sp, JSON.stringify(settings, null, 2) + '\n');
-    try { const cp = slashCommandPath(); if (fs.existsSync(cp)) fs.unlinkSync(cp); } catch {}
-    try { fs.unlinkSync(updateCacheFile()); } catch {} // clean uninstall: drop the update cache too
-    if (ownsStatusLine) process.stdout.write('ok  statusLine removed from ' + sp + (bak ? ' (backup: ' + bak + ')' : '') + '\n');
-    else if (foreign) process.stdout.write('--  left a third-party statusLine in ' + sp + ' untouched\n');
-    if (gres.removed) process.stdout.write('ok  ' + gres.removed + ' guardian hook(s) removed' + (bak && !ownsStatusLine ? ' (backup: ' + bak + ')' : '') + '\n');
-    process.stdout.write('--  this file and statusline.config.json were left in place; delete them if you want.\n');
-    process.exit(0);
-  } catch (e) {
-    process.stdout.write('uninstall failed: ' + e.message + '\n');
-    process.exit(1);
+    try { const cp = slashCommandPath(dir); if (fs.existsSync(cp)) fs.unlinkSync(cp); } catch {}
+    try { fs.unlinkSync(path.join(dir, '.ccbsl-update.json')); } catch {} // drop this profile's update cache
+    return { dir, sp, removedSL: ownsStatusLine, removedHooks: gres.removed, foreign, bak };
+  } catch (e) { return { dir, sp: settingsPathOf(dir), err: e.message }; }
+}
+function runUninstall() {
+  const thisOnly = argv.includes('--this-profile');
+  const profiles = thisOnly ? [CFG] : detectProfiles();
+  const results = profiles.map(uninstallFrom);
+  const errs = results.filter((r) => r.err);
+  let touched = 0;
+  for (const r of results) {
+    if (r.err) { process.stdout.write('!! uninstall failed for ' + profileLabel(r.dir) + ': ' + r.err + '\n'); continue; }
+    if (r.removedSL) { process.stdout.write('ok  status line removed from ' + profileLabel(r.dir) + '  (' + r.sp + ')' + (r.bak ? '  [backup: ' + r.bak + ']' : '') + '\n'); touched++; }
+    else if (r.foreign) process.stdout.write('--  ' + profileLabel(r.dir) + ': a third-party status line was left untouched\n');
+    if (r.removedHooks) { process.stdout.write('ok  ' + r.removedHooks + ' guardian hook(s) removed from ' + profileLabel(r.dir) + '\n'); touched++; }
   }
+  if (!touched) {
+    if (errs.length) process.exit(1); // a real permission/IO failure, not a clean no-op
+    process.stdout.write('nothing to remove: no status line of ours or guardian hooks on any profile.\n');
+    process.exit(0);
+  }
+  process.stdout.write('--  this file and statusline.config.json were left in place; delete them if you want.\n');
+  process.exit(errs.length ? 1 : 0);
 }
 
 // ---- doctor: diagnose the failure modes users actually hit ----
