@@ -5,7 +5,7 @@ This is a single, dependency-free Node file you can read end to end before you r
 ## What it reads, writes, and transmits
 
 - **Reads:** the JSON Claude Code pipes to the status line on stdin; your Claude Code `settings.json` and this tool's `statusline.config.json`; your session transcript files under `$CLAUDE_CONFIG_DIR/projects/**` (read-only, best-effort, only the tail); `git status` in the current repo.
-- **Writes (local only):** checkpoints, resume tickets, watcher PID files, and loop counters under `$CLAUDE_CONFIG_DIR/guardian/`; an update cache at `$CLAUDE_CONFIG_DIR/.ccbsl-update.json`; burn-rate samples in your temp dir; if you opt into the ledger, `~/.claude-usage-ledger/`. Delete all of it with `node statusline.js --purge`.
+- **Writes (local only):** checkpoints, resume tickets, watcher PID files, loop counters, and per-session model-tier state under `$CLAUDE_CONFIG_DIR/guardian/`; an update cache at `$CLAUDE_CONFIG_DIR/.ccbsl-update.json`; burn-rate and subagent-count caches in your temp dir; and — only if you opt in — the cross-profile usage ledger at `~/.claude-usage-ledger/` and the session board at `~/.claude-rig-sessions/`. Delete all of it with `node statusline.js --purge`.
 - **Transmits:** nothing during rendering. The **only** network call anywhere is the optional once-a-day update check (`updateCheck`, default on) — an unauthenticated GET to the public repo to read the latest version. It sends no telemetry, no identifiers, no usage data. Turn it off with `"updateCheck": false` or `NO_UPDATE_NOTIFIER=1`.
 
 Nothing this tool reads ever leaves your machine.
