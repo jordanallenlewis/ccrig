@@ -16,15 +16,15 @@ that every change lands through a merge request that a maintainer approves.
    - `shellcheck claude-profiles.sh install.sh` if you touched the shell files
 
    There are two layers, both run in CI on every push:
-   - **`test-unit.js`** — fast unit tests of the pure helpers (version compare, model
+   - **`test-unit.js`**: fast unit tests of the pure helpers (version compare, model
      tier, changelog/version parsing, transcript parsing, wrapping/bars). It `require()`s
      `statusline.js`, which exports its internals only when required (the CLI never runs).
-   - **`test.js`** — black-box regression/integration tests that spawn the real script as
+   - **`test.js`**: black-box regression/integration tests that spawn the real script as
      a subprocess against a throwaway `HOME`/`CLAUDE_CONFIG_DIR` sandbox, covering
      rendering, wrapping, the guardian hooks, auto-resume, updates, and every CLI mode.
-     Tests prefixed `REGRESSION:` encode a specific bug found in review — keep them passing.
+     Tests prefixed `REGRESSION:` encode a specific bug found in review. Keep them passing.
 
-   **A bug fix must ship with a test** — a unit test in `test-unit.js` if the logic is
+   **A bug fix must ship with a test:** a unit test in `test-unit.js` if the logic is
    pure, a `REGRESSION:` test in `test.js` if it's behavioral. A new feature ships with
    tests for the happy path and the failure/edge cases.
 4. Open a **merge request** describing the change and why. Reference an issue if

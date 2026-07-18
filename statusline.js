@@ -592,7 +592,7 @@ function resumePromptFromCheckpoint(cp, crossAccount, unattended) {
   // cross-account failover starts a FRESH session (no prior transcript); a same-account
   // --resume has the full transcript. Say the true thing so the model doesn't hallucinate.
   const transcriptLine = crossAccount
-    ? ' You are continuing on a different profile, so the earlier transcript is NOT here — rely on the checkpoint below and the working tree, and run `git status` first.'
+    ? ' You are continuing on a different profile, so the earlier transcript is NOT here. Rely on the checkpoint below and the working tree, and run `git status` first.'
     : ' The full transcript above is intact, so do NOT redo anything already finished.';
   const L = [why + transcriptLine];
   if (cp.last_request) L.push('', 'Original request: ' + cp.last_request);
@@ -605,7 +605,7 @@ function resumePromptFromCheckpoint(cp, crossAccount, unattended) {
   const agents = Array.isArray(cp.agents) ? cp.agents.filter(Boolean) : [];
   if (agents.length) {
     L.push('', 'NOTE: ' + agents.length + ' subagent(s)/workflow(s) were running when the limit hit and did NOT survive it: ' +
-      agents.slice(0, 6).join('; ') + '. They are not auto-resumed — re-dispatch or re-run whichever are still needed.');
+      agents.slice(0, 6).join('; ') + '. They are not auto-resumed. Re-dispatch or re-run whichever are still needed.');
   }
   // unattended-safety: ONLY when a scheduler relaunched us headless (not on an attended
   // compaction or a manual resume, where a human is present and this would mislead).
@@ -1032,7 +1032,7 @@ function runUpdate() {
   if (isOurGitClone()) {
     // the pinned-key signature gate only applies to the download path; git integrity here
     // rests on the remote + transport, so be honest that the key is not enforced on a pull.
-    if (updatePubkey()) process.stdout.write('note: updatePubkey is set but this is a git clone — `git pull` integrity rests on your git remote, not the .sig signature. For signature-enforced updates, install as a standalone copy.\n');
+    if (updatePubkey()) process.stdout.write('note: updatePubkey is set but this is a git clone. `git pull` integrity rests on your git remote, not the .sig signature. For signature-enforced updates, install as a standalone copy.\n');
     try {
       const { execFileSync } = require('child_process');
       const out = execFileSync('git', ['-C', __dirname, 'pull', '--ff-only'], { encoding: 'utf8', timeout: 60000 });
@@ -1549,7 +1549,7 @@ function relaunchResume(cp, profileDir) {
     child.on('error', (e) => { watchLog(sid, 'spawn error: ' + e.message + ' (checkpoint kept for manual resume)'); process.exit(1); });
     child.on('exit', (code) => {
       watchLog(sid, 'resume process exited code=' + code);
-      notify('Claude Code auto-resumed', (cp.session_name || sid) + ' — ' + (profileDir ? 'continued on another profile' : 'resumed after the reset'));
+      notify('Claude Code auto-resumed', (cp.session_name || sid) + ': ' + (profileDir ? 'continued on another profile' : 'resumed after the reset'));
       process.exit(0);
     });
   } catch (e) { watchLog(sid, 'relaunch failed: ' + e.message); process.exit(1); }
@@ -1610,7 +1610,7 @@ function isOurWatcher(pid, sid) {
 }
 // --status: list armed auto-resume watchers (nothing is a hidden daemon)
 function runStatus() {
-  process.stdout.write('ccrig v' + VERSION + ' — guardian status\n  profile: ' + CFG + '\n\n');
+  process.stdout.write('ccrig v' + VERSION + ': guardian status\n  profile: ' + CFG + '\n\n');
   let any = false;
   try {
     for (const f of fs.readdirSync(guardDir())) {
@@ -1674,8 +1674,8 @@ function runBoard() {
   const critAt = CONFIG.thresholds.usage.critical != null ? CONFIG.thresholds.usage.critical : 98;
   const warnAt = warnAtOf(CONFIG.thresholds.usage);
   const liveList = entries.filter((e) => now - e.ts < 600000).sort((a, b) => b.ts - a.ts); // updated in last 10 min
-  process.stdout.write('ccrig v' + VERSION + ' — session board\n');
-  if (CONFIG.sessionBoard !== true) process.stdout.write('  (sessionBoard is off — set "sessionBoard": true in config so sessions publish here)\n');
+  process.stdout.write('ccrig v' + VERSION + ': session board\n');
+  if (CONFIG.sessionBoard !== true) process.stdout.write('  (sessionBoard is off. Set "sessionBoard": true in config so sessions publish here)\n');
   process.stdout.write('\n');
   if (!liveList.length) { process.stdout.write('  no live sessions.\n'); process.exit(0); }
   for (const e of liveList) {
@@ -1706,7 +1706,7 @@ function runSessions() {
     }
   } catch {}
   rows.sort((a, b) => b.mtime - a.mtime);
-  process.stdout.write('ccrig v' + VERSION + ' — recent sessions in ' + CFG + '\n\n');
+  process.stdout.write('ccrig v' + VERSION + ': recent sessions in ' + CFG + '\n\n');
   if (!rows.length) { process.stdout.write('  none found under ' + base + '\n'); process.exit(0); }
   const now = Date.now();
   for (const r of rows.slice(0, 15)) {
@@ -1875,7 +1875,7 @@ function runInstall() {
   if (!okd.length) { process.stdout.write('install failed: no profile could be wired.\n'); process.exit(1); }
   if (!thisOnly && profiles.length > 1) {
     process.stdout.write('\n' + okd.length + ' profile(s) wired' + (failed.length ? ', ' + failed.length + ' skipped' : '')
-      + ' — all your Claude profiles now show the bar. (Scope to one with --this-profile.)\n');
+      + '. All your Claude profiles now show the bar. (Scope to one with --this-profile.)\n');
   }
   const helper = path.join(__dirname, 'claude-profiles.sh');
   if (fs.existsSync(helper)) process.stdout.write('--  switch accounts from your shell:  source "' + helper + '"\n');
@@ -2112,8 +2112,8 @@ function runDoctor() {
   else {
     const u = readUpdateInfo();
     if (!u) info('update check: on (not run yet; a daily background check will populate it)');
-    else if (u.latest && semverGt(u.latest, VERSION)) info('update check: on — v' + u.latest + ' available (run --update); you have v' + VERSION);
-    else info('update check: on — up to date (v' + VERSION + ')');
+    else if (u.latest && semverGt(u.latest, VERSION)) info('update check: on, v' + u.latest + ' available (run --update); you have v' + VERSION);
+    else info('update check: on, up to date (v' + VERSION + ')');
   }
   try { render(demoInput(), 80, DEMO_GIT()); ok('test render'); }
   catch (e) { bad('rendering throws: ' + e.message, 'update this file, or report it'); }
