@@ -534,6 +534,28 @@ test('mutually exclusive flags are rejected', () => {
   assert.match(r.out, /pick one of/);
 });
 
+test('REGRESSION: a value-setter combined with an action flag is rejected, not silently run', () => {
+  const r = run(['--install', '--mode', 'minimal']);
+  assert.strictEqual(r.code, 1);
+  assert.match(r.out, /pick one of/);
+});
+
+test('REGRESSION: folder appends a true sub-dir but not a mere string-prefix', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const sub = strip(render(baseInput({ workspace: { project_dir: '/work/proj', current_dir: '/work/proj/api' } }), { env }).out);
+  assert.match(sub, /proj\/api/);
+  const pre = strip(render(baseInput({ workspace: { project_dir: '/work/proj', current_dir: '/work/proj-x' } }), { env }).out);
+  assert.ok(!pre.includes('proj-x'), '/work/proj-x is not a child of /work/proj');
+});
+
+test('REGRESSION: context % label is clamped to 100', () => {
+  const sb = sandbox();
+  const out = strip(render(baseInput({ context_window: { used_percentage: 150 } }), { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } }).out);
+  assert.match(out, /ctx .*100%/);
+  assert.ok(!out.includes('150%'));
+});
+
 test('--demo renders three widths and leaves no side effects', () => {
   const sb = sandbox();
   const script = scriptCopy(sb.dir);
