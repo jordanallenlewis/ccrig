@@ -12,8 +12,10 @@
  * this version dropping the API call.
  *
  * Enhanced here: every value comes from Claude Code's OWN stdin JSON
- * (rate_limits, context_window, effort, fast_mode, thinking), so it's
- * ZERO-network (no token, no keychain, no 429s, always fresh). Plus: wrapping
+ * (rate_limits, context_window, effort, fast_mode, thinking), so the RENDER is
+ * zero-network (no token, no keychain, no 429s, always fresh). The only network
+ * call anywhere is an optional once-a-day update check (updateCheck, off with one
+ * flag); the guardian is fully local. Plus: wrapping
  * that tracks live terminal resize; effort + inference-mode flags;
  * unpushed/unpulled commits; date-aware reset times; an active-profile badge;
  * one script for many Claude profiles; and an interactive config editor.
@@ -34,11 +36,25 @@
  * `--options` prints the current settings. Config is a separate file, so updating
  * this script never wipes it.
  *
+ * THE GUARDIAN (opt-in, wired by --install-guardian): the first status line that
+ * acts on your limits instead of only showing them. (1) Auto-pause + auto-resume:
+ * at critical usage it checkpoints the exact work state (todos, last request, git
+ * HEAD/dirty) and, in autopilot "resume", a detached sleep-safe watcher relaunches
+ * `claude --resume <id> -p` at the reset with a prompt that continues the next step
+ * and repeats nothing. (2) Keep-working: a Stop hook that refuses to pause while
+ * todos remain (loop-guarded, yields to real questions). (3) Time-to-limit forecast
+ * in the bar. (4) Cross-profile failover via a shared usage ledger. (5) Compaction-
+ * proof checkpoints (PreCompact). All zero-network, opt-in, reversible.
+ * ---------------------------------------------------------------------------
  * CLI (manual only: Claude Code calls this with JSON on stdin and no args):
  *   node statusline.js --install            wire Claude Code to this file (backs up settings)
- *   node statusline.js --uninstall          remove the status line from settings
- *   node statusline.js --doctor             diagnose a broken or missing status line
+ *   node statusline.js --install-guardian   also wire keep-working + auto-resume (add --auto for hands-free)
+ *   node statusline.js --uninstall          remove the status line (and any guardian hooks)
+ *   node statusline.js --uninstall-guardian remove only the guardian hooks
+ *   node statusline.js --doctor             diagnose a broken or missing status line + guardian
  *   node statusline.js --mode <m>           display density: minimal | normal | expanded
+ *   node statusline.js --autopilot <m>      limit behaviour: off | notify | resume
+ *   node statusline.js --keep-working <b>   keep working while todos remain: on | off
  *   node statusline.js --config             interactive segment/preview editor
  *   node statusline.js --demo [--cols N]    render sample data (great for screenshots)
  *   node statusline.js --selftest           sanity-check rendering on edge inputs
@@ -51,15 +67,28 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const VERSION = '1.4.0';
+const VERSION = '2.3.0';
+
+// where updates come from: the public GitLab repo's main branch (raw files).
+// Override the base with CCBSL_UPDATE_BASE (used by tests to point at a local dir).
+const UPDATE_BASE = process.env.CCBSL_UPDATE_BASE ||
+  'https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/raw/main';
+const UPDATE_SCRIPT_URL = UPDATE_BASE + '/statusline.js';
+const UPDATE_CHANGELOG_URL = UPDATE_BASE + '/CHANGELOG.md';
+// Supply-chain: paste an Ed25519 PUBLIC key (PEM) here (or set "updatePubkey" in config)
+// to REQUIRE that every downloaded update carries a matching statusline.js.sig signature.
+// Empty = updates rest on HTTPS/TLS + validation + manual apply (see SECURITY.md). To enable:
+//   openssl genpkey -algorithm ed25519 -out key.pem && openssl pkey -in key.pem -pubout
+//   sign each release:  openssl pkeyutl -sign -inkey key.pem -rawin -in statusline.js | base64 > statusline.js.sig
+const UPDATE_PUBKEY = '';
 
 // ===========================================================================
 // DEFAULTS: generic, safe for anyone. Override in statusline.config.json
 // (next to this file); your overrides deep-merge over these and survive updates.
 // ===========================================================================
-const DEFAULT_ORDER = ['profile', 'folder', 'model', 'effort', 'flags', 'context', 'git', 'caveman', 'billing', 'session', 'weekly', 'resumeHint', 'cost', 'sessionName'];
-// what survives in minimal mode; the ⚠ resumeHint stays on purpose (safety info)
-const MINIMAL_KEEP = ['profile', 'folder', 'model', 'context', 'git', 'resumeHint'];
+const DEFAULT_ORDER = ['profile', 'update', 'folder', 'model', 'downgrade', 'effort', 'flags', 'context', 'git', 'agents', 'caveman', 'billing', 'session', 'weekly', 'forecast', 'resumeHint', 'cost', 'sessionName'];
+// what survives in minimal mode; the safety/attention segments stay on purpose
+const MINIMAL_KEEP = ['profile', 'update', 'folder', 'model', 'downgrade', 'context', 'git', 'agents', 'forecast', 'resumeHint'];
 const MODES = ['minimal', 'normal', 'expanded'];
 const DEFAULTS = {
   // minimal: the quiet essentials | normal: your `show` flags | expanded: everything with content
@@ -68,26 +97,55 @@ const DEFAULTS = {
   order: DEFAULT_ORDER,
   show: {
     profile: 'auto',    // 👤 active Claude profile. 'auto' = only when >1 profile exists; true = always; false = never
+    update: true,       // ⬆ shown only when a newer version is available (see updateCheck)
     folder: true,       // 📂 current project (repo-relative)
     model: true,        // ★ model name + [1m] on a 1M-context model
+    downgrade: true,    // ⬇ loud alert if the model silently drops tier (Opus → Sonnet) mid-session
     effort: true,       // ⚡ reasoning effort (low…max)
     flags: true,        // fast (when on) / no-think (when thinking is off)
     context: true,      // ctx: color-coded context-window bar
+    agents: true,       // 🤖 count of subagents/Task running right now (workflow + subagent support)
     git: true,          // 🌿 branch ●uncommitted ↑unpushed ↓unpulled
     caveman: true,      // [CAVEMAN] badge if the caveman plugin is active
     billing: true,      // 💳 sub (Claude.ai subscription) vs api (pay-per-token)
     session: true,      // 5-hour plan-usage bar + reset time
     weekly: true,       // 7-day plan-usage bar + reset time
+    forecast: true,     // ⏳ predictive time-to-limit + pace verdict (Feature 3), shown only when it has something to say
     resumeHint: true,   // ⚠ shown only past thresholds.usage.warn: how to pick back up after reset
     cost: false,        // session $ + lines +added/-removed
     sessionName: false, // the session's title
   },
   thresholds: {
     context: { green: 50, yellow: 70 }, // % filled → color
-    usage: { green: 50, yellow: 80, warn: 90, critical: 98 }, // warn: ⚠ + resumeHint; critical: resume ticket
+    usage: { green: 50, yellow: 80, warn: 90, critical: 98 }, // warn: ⚠ + resumeHint; critical: resume ticket + autopilot
   },
   resetStyle: 'clock',  // 'clock' (10:40a, dated if not today) | 'relative' (2h14m)
   resumeTickets: true,  // at critical usage, save resume-tickets/<session>.md with the exact pick-up command
+  // ---- Guardian: keep working through soft stops, and survive the hard limit wall ----
+  // Feature 2 (Relentless mode): a Stop hook keeps the session working while todos remain.
+  //   false | true | { maxContinues: 25, maxStuck: 3 }.  Needs `--install-guardian` to wire the hook.
+  keepWorking: false,
+  // Feature 1 (Limit Autopilot): what to do when a window crosses `thresholds.usage.critical`.
+  //   'off'    do nothing beyond the resume ticket
+  //   'notify' desktop notification + a rich checkpoint, once per session
+  //   'resume' also relaunch `claude --resume <id>` automatically when the window resets
+  // Default 'off' so a plain --install never spawns a notification or writes a checkpoint;
+  // --install-guardian sets it to 'notify' (or 'resume' with --auto).
+  autopilot: 'off',
+  autopilotBuffer: 45,       // seconds to wait past resets_at before an auto-resume relaunch
+  autopilotWeekly: false,    // also auto-relaunch for the 7-day window (days-long waits are less reliable; off by default)
+  autopilotFailover: false,  // Feature 4: prefer a profile that still has headroom over waiting for the reset
+  claudeBin: 'claude',       // how to invoke Claude Code from the watcher (absolute path if not on PATH)
+  // Feature 3 (time-to-limit forecast): predictive burn-rate ETA + pace verdict in the bar.
+  forecast: true,
+  // Feature 4 (cross-profile hint): OFF by default — it writes to a shared ~/.claude-usage-ledger
+  // outside your config dir, and cross-account use is a per-user judgement. Opt in with "ledger": true.
+  ledger: false,
+  downgradeAlert: true,      // ⬇ warn when the model silently downgrades tier mid-session (Opus→Sonnet)
+  // Update notifications: a once-a-day background check pings the public GitLab repo for a
+  // newer version and shows an ⬆ badge. The RENDER stays zero-network (it only reads a local
+  // cache the background check wrote). A single unauthenticated GET; set false to disable.
+  updateCheck: true,
   gitCacheMs: 2500,     // cache git state this long so big repos don't slow each render (0 = off)
   reserveCols: 1,       // safety margin subtracted from terminal width
   // Map a Claude config-dir name to a profile label. Unlisted dirs derive their
@@ -96,7 +154,7 @@ const DEFAULTS = {
   // 256-color codes: https://www.ditig.com/256-colors-cheat-sheet
   color: {
     dim: 245, folder: 75, model: 111, effort: 179, flag: 45, caveman: 172,
-    green: 78, yellow: 214, red: 203, sky: 75,
+    green: 78, yellow: 214, red: 203, sky: 75, update: 220, agents: 141, // update badge (gold), agents (purple)
     profileDefault: 39, profilePersonal: 213, // profile badge hues
   },
 };
@@ -132,6 +190,19 @@ function loadConfig() {
     if (typeof merged.color[k] !== 'number') merged.color[k] = DEFAULTS.color[k];
   }
   if (!Array.isArray(merged.order) || !merged.order.length) merged.order = clone(DEFAULT_ORDER);
+  else {
+    // MIGRATION: a saved/example `order` from an older version is missing segments added
+    // since (update, downgrade, agents, ...). Union them in next to their default neighbour,
+    // so new segments (incl. the downgrade safety alert) surface instead of silently vanishing.
+    // Visibility is still governed by each segment's `show` flag; this only fixes `order`.
+    for (let i = 0; i < DEFAULT_ORDER.length; i++) {
+      const name = DEFAULT_ORDER[i];
+      if (merged.order.includes(name)) continue;
+      let at = merged.order.length;
+      for (let j = i - 1; j >= 0; j--) { const idx = merged.order.indexOf(DEFAULT_ORDER[j]); if (idx !== -1) { at = idx + 1; break; } }
+      merged.order.splice(at, 0, name);
+    }
+  }
   if (!MODES.includes(merged.mode)) merged.mode = 'normal';
   return merged;
 }
@@ -159,7 +230,8 @@ function dispWidth(s) {
   for (const ch of s) {
     const cp = ch.codePointAt(0);
     if (cp === 0xFE0F || cp === 0x200D) continue;               // variation selector / ZWJ = 0
-    if (cp >= 0x1F000 || cp === 0x26A1 || cp === 0x2600 || cp === 0x26A0) w += 2; // emoji + ⚡ ☀ ⚠
+    // emoji + ⚡ ☀ ⚠ ⏳ (⏳ U+23F3 is Emoji_Presentation, 2 cells; ⬆/⬇ are text-presentation, 1 cell)
+    if (cp >= 0x1F000 || cp === 0x26A1 || cp === 0x2600 || cp === 0x26A0 || cp === 0x23F3) w += 2;
     else w += 1;
   }
   return w;
@@ -290,9 +362,410 @@ function writeResumeTicket(input, pct, windowName, resetEpoch) {
   } catch { return false; }
 }
 
+// ===========================================================================
+// GUARDIAN: keep a session working through soft stops, and survive the hard
+// rate-limit wall with a checkpoint + auto-resume. Everything below reads the
+// same stdin/transcript Claude Code already produces: still zero-network.
+// ===========================================================================
+
+// --- config getters that tolerate a hand-edited config (scalar or object) ---
+function cfgAutopilot() { const m = CONFIG.autopilot; return (m === 'off' || m === 'notify' || m === 'resume') ? m : 'notify'; }
+function cfgKeepWorking() {
+  const k = CONFIG.keepWorking;
+  if (k === true) return { maxContinues: 25, maxStuck: 3 };
+  if (k && typeof k === 'object' && !Array.isArray(k)) {
+    return { maxContinues: (k.maxContinues > 0 ? k.maxContinues : 25), maxStuck: (k.maxStuck > 0 ? k.maxStuck : 3) };
+  }
+  return null; // disabled
+}
+function claudeBin() { return (typeof CONFIG.claudeBin === 'string' && CONFIG.claudeBin) || 'claude'; }
+// process-spawning side effects (desktop notify, the watcher) are gated so the
+// test suite and CI never launch anything; file side effects (checkpoints) are not.
+function actAllowed() { return !process.env.CCBSL_NO_ACT; }
+const SID_RE = /^[A-Za-z0-9-]+$/;
+function guardDir() { return path.join(CFG, 'guardian'); }
+
+// read the last `bytes` of a transcript as parsed JSONL lines (newest work is at the tail)
+function readTranscriptTail(tp, bytes) {
+  if (!tp) return [];
+  try {
+    const fd = fs.openSync(tp, 'r');
+    const size = fs.fstatSync(fd).size;
+    const span = Math.min(size, bytes || 524288);
+    const buf = Buffer.alloc(span);
+    fs.readSync(fd, buf, 0, span, size - span);
+    fs.closeSync(fd);
+    return buf.toString('utf8').split('\n').filter(Boolean);
+  } catch { return []; }
+}
+function scanTodos(lines) {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let o; try { o = JSON.parse(lines[i]); } catch { continue; }
+    const content = o && o.message && o.message.content;
+    if (!Array.isArray(content)) continue;
+    for (const b of content) {
+      if (b && b.type === 'tool_use' && b.name === 'TodoWrite' && b.input && Array.isArray(b.input.todos)) return b.input.todos;
+    }
+  }
+  return null;
+}
+// the most recent TodoWrite state: [{content,status,activeForm}] or null. `fullScan` (used
+// by the Stop hook, off the hot path) re-reads the whole file if a big tool_result pushed
+// the last TodoWrite out of the tail window — so keep-working doesn't wrongly see "no todos".
+function latestTodos(tp, fullScan) {
+  let todos = scanTodos(readTranscriptTail(tp, 524288));
+  if (todos === null && fullScan && tp) {
+    try { if (fs.statSync(tp).size > 524288) todos = scanTodos(fs.readFileSync(tp, 'utf8').split('\n').filter(Boolean)); } catch {}
+  }
+  return todos;
+}
+// the most recent human request text (skips tool_result-only user turns)
+function latestUserText(tp) {
+  const lines = readTranscriptTail(tp, 524288);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let o; try { o = JSON.parse(lines[i]); } catch { continue; }
+    if (!o || o.type !== 'user' || !o.message) continue;
+    const cnt = o.message.content;
+    if (typeof cnt === 'string') { if (cnt.trim()) return cnt.trim().slice(0, 500); continue; }
+    if (Array.isArray(cnt)) {
+      const txt = cnt.filter((x) => x && x.type === 'text' && typeof x.text === 'string').map((x) => x.text).join(' ').trim();
+      if (txt) return txt.slice(0, 500);
+    }
+  }
+  return '';
+}
+// the trailing assistant text (used to detect "Claude is asking the user a question")
+function latestAssistantText(tp) {
+  const lines = readTranscriptTail(tp, 262144);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let o; try { o = JSON.parse(lines[i]); } catch { continue; }
+    if (!o || o.type !== 'assistant' || !o.message) continue;
+    const cnt = o.message.content;
+    if (typeof cnt === 'string') return cnt.trim();
+    if (Array.isArray(cnt)) {
+      const txt = cnt.filter((x) => x && x.type === 'text' && typeof x.text === 'string').map((x) => x.text).join(' ').trim();
+      return txt;
+    }
+  }
+  return '';
+}
+// in-flight orchestration: Task/Agent subagents whose tool_use has no matching tool_result
+// yet = running right now. Foreground Task subagents show live; Workflows ack immediately
+// (background) so they read as done here, which is correct.
+// Cached by transcript SIZE: transcripts are append-only, so an unchanged size means the
+// result is unchanged — this keeps the 768KB read off the hot path on idle refreshes.
+function inflightAgents(tp) {
+  if (!tp) return [];
+  let size;
+  try { size = fs.statSync(tp).size; } catch { return []; }
+  const cacheFile = path.join(os.tmpdir(), 'ccbsl-agents-' + strHash(tp) + '.json');
+  try { const c = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); if (c && c.size === size && Array.isArray(c.list)) return c.list; } catch {}
+  const list = computeInflightAgents(tp);
+  try { fs.writeFileSync(cacheFile, JSON.stringify({ size, list })); } catch {}
+  return list;
+}
+function computeInflightAgents(tp) {
+  const lines = readTranscriptTail(tp, 786432);
+  const results = new Set();
+  const uses = [];
+  for (const l of lines) {
+    let o; try { o = JSON.parse(l); } catch { continue; }
+    const cnt = o && o.message && o.message.content;
+    if (!Array.isArray(cnt)) continue;
+    for (const b of cnt) {
+      if (!b || typeof b !== 'object') continue;
+      if (b.type === 'tool_result' && b.tool_use_id) results.add(b.tool_use_id);
+      else if (b.type === 'tool_use' && (b.name === 'Task' || b.name === 'Agent') && b.id) {
+        uses.push({ id: b.id, desc: (b.input && (b.input.description || b.input.subagent_type)) || 'subagent' });
+      }
+    }
+  }
+  return uses.filter((u) => !results.has(u.id));
+}
+// 🤖 segment: how many subagents are running right now
+let DEMO_AGENTS = 0; // set by --demo to showcase the segment
+function agentsSeg(input) {
+  const n = DEMO_AGENTS || inflightAgents(input.transcript_path).length;
+  if (!n) return '';
+  return c(K.agents, '🤖 ' + n + (n === 1 ? ' agent' : ' agents'));
+}
+// ⬇ segment: Claude Code silently drops Opus → Sonnet when you approach the Opus cap.
+// Track the highest model tier seen this session and shout if the current one is lower.
+function modelTier(name) { const n = (name || '').toLowerCase(); return /opus/.test(n) ? 3 : /sonnet/.test(n) ? 2 : /haiku/.test(n) ? 1 : 0; }
+let DEMO_DOWNGRADE = null; // [fromName, toName] set by --demo
+function downgradeSeg(input, live) {
+  if (CONFIG.downgradeAlert === false) return '';
+  if (DEMO_DOWNGRADE) return cBold(K.red, '⬇ ' + DEMO_DOWNGRADE[1]) + c(K.dim, ' (was ' + DEMO_DOWNGRADE[0] + ')');
+  const sid = input.session_id;
+  const cur = (input.model && (input.model.display_name || input.model.id)) || '';
+  const tier = modelTier(cur);
+  if (!tier || !sid || !SID_RE.test(sid)) return '';
+  const f = path.join(guardDir(), sid + '.model');
+  let top = 0, topName = '';
+  try { const o = JSON.parse(fs.readFileSync(f, 'utf8')); top = o.tier || 0; topName = o.name || ''; } catch {}
+  if (tier >= top) { // an equal-or-higher tier is the session's ceiling: record it
+    if (live && tier > top) { try { fs.mkdirSync(guardDir(), { recursive: true }); fs.writeFileSync(f, JSON.stringify({ tier, name: cur })); sweepGuardDir(); } catch {} }
+    return '';
+  }
+  // A drop below the ceiling. Only shout when usage is ELEVATED — that's when Claude Code
+  // silently downgrades; a low-usage change is almost always a deliberate /model switch.
+  const rl = input.rate_limits || {};
+  const pctOf = (o) => (o && typeof o.used_percentage === 'number') ? o.used_percentage : 0;
+  if (Math.max(pctOf(rl.five_hour), pctOf(rl.seven_day)) < 50) return '';
+  const shortName = (s) => s.split(/[\s(]/)[0];
+  return cBold(K.red, '⬇ ' + shortName(cur)) + c(K.dim, ' (was ' + shortName(topName) + ')');
+}
+
+// --- checkpoint: a rich, machine-readable snapshot of exactly where work stands.
+// Feeds both the auto-resume relaunch and the SessionStart re-injection, so a
+// resumed session neither loses progress nor repeats finished work.
+function checkpointPath(sid) { return path.join(guardDir(), sid + '.checkpoint.json'); }
+function inputCwd(input) { return (input.workspace && input.workspace.current_dir) || input.cwd || process.cwd(); }
+// a cheap git fingerprint so a resumed run can RECONCILE (not blindly continue):
+// HEAD sha + whether the tree was dirty when we checkpointed.
+function gitSnapshot(cwd) {
+  try {
+    const head = execSync('git rev-parse HEAD', { cwd, stdio: ['ignore', 'pipe', 'ignore'], timeout: 700, encoding: 'utf8' }).trim();
+    const status = execSync('git status --porcelain', { cwd, stdio: ['ignore', 'pipe', 'ignore'], timeout: 700, encoding: 'utf8' });
+    return { head, dirty: status.trim().length > 0 };
+  } catch { return null; }
+}
+function writeCheckpoint(input, meta) {
+  const sid = input.session_id;
+  if (!sid || !SID_RE.test(sid)) return null;
+  try {
+    fs.mkdirSync(guardDir(), { recursive: true });
+    const cwd = inputCwd(input);
+    // preserve an existing limit-window schedule: a PreCompact snapshot (no resets_at)
+    // must not wipe the resets_at/window an armed auto-resume watcher depends on.
+    let resets_at = (meta && meta.resets_at) || null;
+    let window = (meta && meta.window) || '';
+    if (resets_at == null) { const ex = readCheckpoint(sid); if (ex && ex.resets_at) { resets_at = ex.resets_at; if (!window) window = ex.window || ''; } }
+    const data = {
+      session_id: sid,
+      session_name: input.session_name || '',
+      cwd,
+      saved_at: new Date().toISOString(),
+      reason: (meta && meta.reason) || 'checkpoint',
+      window,
+      resets_at,
+      transcript_path: input.transcript_path || '',
+      todos: latestTodos(input.transcript_path) || [],
+      last_request: latestUserText(input.transcript_path),
+      agents: inflightAgents(input.transcript_path).map((a) => a.desc).slice(0, 8), // orchestration in flight at the limit
+      git: gitSnapshot(cwd),
+    };
+    fs.writeFileSync(checkpointPath(sid), JSON.stringify(data, null, 2) + '\n');
+    sweepGuardDir();
+    return data;
+  } catch { return null; }
+}
+// 14-day retention sweep over the guardian dir (checkpoints, tickets-adjacent markers,
+// per-session .model files). Runs at points that fire at most once per session, not per render.
+function sweepGuardDir() {
+  try {
+    for (const f of fs.readdirSync(guardDir())) {
+      try { const p = path.join(guardDir(), f); if (Date.now() - fs.statSync(p).mtimeMs > 14 * 86400 * 1000) fs.unlinkSync(p); } catch {}
+    }
+  } catch {}
+}
+function readCheckpoint(sid) {
+  try { return JSON.parse(fs.readFileSync(checkpointPath(sid), 'utf8')); } catch { return null; }
+}
+// turn a checkpoint into a resume prompt that forbids repeating finished work
+function resumePromptFromCheckpoint(cp, crossAccount, unattended) {
+  const todos = Array.isArray(cp.todos) ? cp.todos : [];
+  const done = todos.filter((t) => t && t.status === 'completed').map((t) => t.content).filter(Boolean);
+  const rest = todos.filter((t) => t && t.status !== 'completed')
+    .map((t) => (t.status === 'in_progress' ? '[in progress] ' : '') + (t.content || t.activeForm)).filter(Boolean);
+  const why = cp.reason && /limit/.test(cp.reason) ? 'You were interrupted mid-task by a Claude usage limit and are resuming now.'
+    : cp.reason && /compact/.test(cp.reason) ? 'Your context was just compacted. Here is the work state captured beforehand so nothing is lost.'
+    : 'You are resuming this session.';
+  // cross-account failover starts a FRESH session (no prior transcript); a same-account
+  // --resume has the full transcript. Say the true thing so the model doesn't hallucinate.
+  const transcriptLine = crossAccount
+    ? ' You are continuing on a different profile, so the earlier transcript is NOT here — rely on the checkpoint below and the working tree, and run `git status` first.'
+    : ' The full transcript above is intact, so do NOT redo anything already finished.';
+  const L = [why + transcriptLine];
+  if (cp.last_request) L.push('', 'Original request: ' + cp.last_request);
+  if (done.length) L.push('', 'Already DONE (do not repeat):', ...done.map((x) => '- ' + x));
+  if (rest.length) L.push('', 'Remaining TODO (continue from the first one):', ...rest.map((x) => '- ' + x));
+  else L.push('', 'No open todos were recorded. Review the last few steps in the transcript and finish the original request.');
+  if (cp.git && cp.git.head) {
+    L.push('', 'When interrupted, git HEAD was ' + cp.git.head.slice(0, 12) + ' and the working tree was ' + (cp.git.dirty ? 'DIRTY (uncommitted changes were in progress)' : 'clean') + '. First run `git status` to reconcile the tree against what the transcript says you did, then continue.');
+  }
+  const agents = Array.isArray(cp.agents) ? cp.agents.filter(Boolean) : [];
+  if (agents.length) {
+    L.push('', 'NOTE: ' + agents.length + ' subagent(s)/workflow(s) were running when the limit hit and did NOT survive it: ' +
+      agents.slice(0, 6).join('; ') + '. They are not auto-resumed — re-dispatch or re-run whichever are still needed.');
+  }
+  // unattended-safety: ONLY when a scheduler relaunched us headless (not on an attended
+  // compaction or a manual resume, where a human is present and this would mislead).
+  if (unattended) {
+    L.push('', 'IMPORTANT: you are resuming UNATTENDED (a scheduler relaunched you at the limit reset; no human is watching). ' +
+      'Do the next concrete step, favour reversible actions, and do NOT kick off new long-running workflows or many parallel subagents unprompted. ' +
+      'If the next step needs a human decision, a secret, or is destructive/irreversible, stop and leave a clear note instead of guessing.');
+  }
+  L.push('', 'Continue now from the first remaining step.');
+  return L.join('\n');
+}
+
+// --- best-effort desktop notification + detached process spawn (never throw) ---
+function spawnDetached(cmd, args, opts) {
+  try {
+    const { spawn } = require('child_process');
+    // windowsHide: no flashing console window when a background helper fires on Windows
+    const child = spawn(cmd, args, Object.assign({ detached: true, stdio: 'ignore', windowsHide: true }, opts || {}));
+    child.unref();
+    return true;
+  } catch { return false; }
+}
+function notify(title, msg) {
+  if (!actAllowed()) return;
+  const p = process.platform;
+  if (p === 'darwin') spawnDetached('osascript', ['-e', 'display notification ' + JSON.stringify(msg) + ' with title ' + JSON.stringify(title)]);
+  else if (p === 'linux') spawnDetached('notify-send', [title, msg]);
+  else if (p === 'win32') spawnDetached('powershell', ['-NoProfile', '-Command',
+    'New-BurntToastNotification -Text ' + JSON.stringify(title) + ',' + JSON.stringify(msg) + ' 2>$null']);
+}
+// do a once-per-session action, guarded by a marker file under guardian/
+function oncePerSession(sid, tag, fn) {
+  if (!sid || !SID_RE.test(sid)) return false;
+  try {
+    fs.mkdirSync(guardDir(), { recursive: true });
+    const marker = path.join(guardDir(), sid + '.' + tag);
+    if (fs.existsSync(marker)) return false;
+    fs.writeFileSync(marker, new Date().toISOString() + '\n');
+  } catch { return false; }
+  try { fn(); } catch {}
+  return true;
+}
+
+// --- Feature 4: cross-profile usage ledger. Each render records THIS profile's
+// last-seen usage to a shared dir in HOME (not CFG), so any profile can later see
+// which others still have headroom. Honest about staleness: entries carry a time.
+function ledgerDir() { return path.join(HOME, '.claude-usage-ledger'); }
+function writeLedger(input, sPct, sReset, wPct, wReset) {
+  if (CONFIG.ledger === false || !actAllowed()) return;
+  const base = path.basename(CFG);
+  if (!/^\.claude(-[A-Za-z0-9._-]+)?$/.test(base)) return;
+  writeJsonAtomic(path.join(ledgerDir(), base + '.json'), {   // atomic: concurrent profiles never truncate it
+    profile: base, session: sPct, sessionReset: sReset, weekly: wPct, weeklyReset: wReset,
+    cwd: inputCwd(input), ts: Math.floor(Date.now() / 1000),
+  });
+}
+// another profile with headroom, freshest first; null if none qualifies
+function pickFreshProfile(maxPct, maxAgeSec) {
+  const here = path.basename(CFG);
+  let best = null;
+  try {
+    for (const f of fs.readdirSync(ledgerDir())) {
+      if (!f.endsWith('.json')) continue;
+      let e; try { e = JSON.parse(fs.readFileSync(path.join(ledgerDir(), f), 'utf8')); } catch { continue; }
+      if (!e || e.profile === here) continue;
+      const age = Math.floor(Date.now() / 1000) - (e.ts || 0);
+      if (age > (maxAgeSec || 6 * 3600)) continue;                 // too stale to trust
+      const s = typeof e.session === 'number' ? e.session : 100;
+      const w = typeof e.weekly === 'number' ? e.weekly : 100;
+      const head = Math.max(s, w);
+      if (head >= (maxPct != null ? maxPct : 85)) continue;        // not enough headroom
+      if (!best || head < best.head) best = { profile: e.profile, dir: path.join(HOME, e.profile), head, session: s, weekly: w };
+    }
+  } catch {}
+  return best;
+}
+function profileLabelOf(base) {
+  return (CONFIG.profileLabels && CONFIG.profileLabels[base]) || base.replace(/^\.?claude-?/, '') || 'default';
+}
+
+// --- Feature 3: burn-rate forecast. Keep a tiny rolling sample of usage over
+// time (per session, in tmp) and project when the window would hit 100%.
+function sampleFile(sid) { return path.join(os.tmpdir(), 'ccbsl-usage-' + strHash(sid) + '.jsonl'); }
+function recordSample(sid, sPct, wPct) {
+  if (CONFIG.forecast === false || !sid || !SID_RE.test(sid)) return;
+  const now = Math.floor(Date.now() / 1000);
+  const file = sampleFile(sid);
+  let lines = [];
+  try { lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean); } catch {}
+  // first sample for this session: sweep stale ccbsl-usage-* files (one per old session
+  // accumulates in tmp otherwise). Mirrors the 14-day retention on tickets/checkpoints.
+  if (!lines.length) {
+    try {
+      const tmp = os.tmpdir();
+      for (const f of fs.readdirSync(tmp)) {
+        if (f.startsWith('ccbsl-usage-') && f.endsWith('.jsonl')) {
+          try { const p = path.join(tmp, f); if (Date.now() - fs.statSync(p).mtimeMs > 14 * 86400 * 1000) fs.unlinkSync(p); } catch {}
+        }
+      }
+    } catch {}
+  }
+  // throttle: at most one sample per 12s so the file and the slope stay meaningful
+  try {
+    const last = lines.length ? JSON.parse(lines[lines.length - 1]) : null;
+    if (last && now - last.t < 12) return;
+  } catch {}
+  lines.push(JSON.stringify({ t: now, s: sPct == null ? null : Math.round(sPct * 10) / 10, w: wPct == null ? null : Math.round(wPct * 10) / 10 }));
+  if (lines.length > 40) lines = lines.slice(-40);               // rolling window
+  try { fs.writeFileSync(file, lines.join('\n') + '\n'); } catch {}
+}
+// least-squares slope (%/sec) of the chosen field over the samples, or null
+function burnRate(sid, field) {
+  let lines = [];
+  try { lines = fs.readFileSync(sampleFile(sid), 'utf8').split('\n').filter(Boolean); } catch { return null; }
+  const pts = [];
+  for (const l of lines) { let o; try { o = JSON.parse(l); } catch { continue; } if (o && typeof o[field] === 'number') pts.push([o.t, o[field]]); }
+  if (pts.length < 3) return null;
+  const t0 = pts[0][0];
+  const span = pts[pts.length - 1][0] - t0;
+  if (span < 30) return null;                                     // too little time to trust a rate
+  // rebase time to t0 before the least-squares sums: raw epoch seconds (~1.78e9)
+  // otherwise blow up n*Σt² and (Σt)² into near-equal ~1e19 values whose difference
+  // loses all precision (catastrophic cancellation), wrecking the slope.
+  const n = pts.length; let st = 0, sv = 0, stv = 0, stt = 0;
+  for (const [tRaw, v] of pts) { const t = tRaw - t0; st += t; sv += v; stv += t * v; stt += t * t; }
+  const denom = n * stt - st * st;
+  if (denom === 0) return null;
+  const slope = (n * stv - st * sv) / denom;                      // %/sec
+  return { slope, last: pts[pts.length - 1][1] };
+}
+
+// spawn the detached, sleep-safe watcher that will relaunch this session at reset
+function armWatcher(sid, cwd) {
+  if (!actAllowed()) return;
+  spawnDetached(process.execPath, [__filename, '--watch', sid], { cwd });
+}
+// Feature 1: at critical usage, snapshot the work and, per config, arm auto-resume.
+function armAutopilot(input, which, pct, resetEpoch) {
+  const sid = input.session_id;
+  if (!sid || !SID_RE.test(sid)) return;
+  const mode = cfgAutopilot();
+  if (mode === 'off') return; // plain --install (default): no checkpoint, no notify, no watcher
+  const willResume = mode === 'resume' && (which === 'session' || CONFIG.autopilotWeekly === true);
+  // Checkpoint: when we'll actually relaunch, REFRESH it for THIS window so the watcher's
+  // schedule matches — a session watcher must not inherit a weekly reset written earlier.
+  if (willResume) {
+    const ex = readCheckpoint(sid);
+    if (!ex || ex.window !== which || ex.resets_at !== resetEpoch) writeCheckpoint(input, { reason: which + ' limit critical', window: which, resets_at: resetEpoch });
+  } else {
+    oncePerSession(sid, 'checkpoint', () => writeCheckpoint(input, { reason: which + ' limit critical', window: which, resets_at: resetEpoch }));
+  }
+  const label = which === 'session' ? 'session (5h)' : 'weekly (7d)';
+  const when = resetEpoch ? fmtReset(resetEpoch) : 'the next window';
+  oncePerSession(sid, 'notified', () => notify('Claude Code: ' + label + ' limit',
+    'Work checkpointed. ' + (willResume ? 'Auto-resume armed for ' + when + '.' : 'Resume with claude --resume after ' + when + '.')));
+  if (willResume) oncePerSession(sid, 'watch', () => armWatcher(sid, inputCwd(input)));
+}
+// Feature 4: a compact hint pointing at another profile that still has headroom
+function failoverHint() {
+  if (CONFIG.ledger === false) return '';
+  const fo = pickFreshProfile(85, 6 * 3600);
+  if (!fo) return '';
+  return c(K.sky, '⤳ ' + profileLabelOf(fo.profile) + ' free ' + Math.round(100 - fo.head) + '%');
+}
+
 // Shown once session OR weekly usage crosses thresholds.usage.warn. Escalates at
-// critical: the resume ticket is written and the hint names it.
-function resumeHintSeg(input, sPct, wPct, sReset, wReset) {
+// critical: the resume ticket + checkpoint are written and autopilot is armed.
+function resumeHintSeg(input, sPct, wPct, sReset, wReset, live) {
   const t = CONFIG.thresholds.usage;
   const warnAt = warnAtOf(t);
   const critAt = t.critical != null ? t.critical : 98;
@@ -301,13 +774,302 @@ function resumeHintSeg(input, sPct, wPct, sReset, wReset) {
   const sOn = near(sPct, sReset), wOn = near(wPct, wReset);
   if (!sOn && !wOn) return '';
   const sCrit = sOn && sPct >= critAt, wCrit = wOn && wPct >= critAt;
-  if (CONFIG.resumeTickets !== false && (sCrit || wCrit)) {
+  if (sCrit || wCrit) {
     const which = sCrit ? 'session' : 'weekly';
-    const saved = writeResumeTicket(input, sCrit ? sPct : wPct, which, sCrit ? sReset : wReset);
-    return cBold(K.red, '⚠ limit imminent') +
-      c(K.dim, saved ? ': resume ticket saved, pick up with ' : ': resume with ') + c(K.yellow, 'claude --resume');
+    const pct = sCrit ? sPct : wPct, reset = sCrit ? sReset : wReset;
+    // side effects (ticket/checkpoint/watcher/notify) only on the LIVE render, so a
+    // hand-edited `critical` threshold can't make --demo/--config/--selftest write files.
+    const saved = live && CONFIG.resumeTickets !== false && writeResumeTicket(input, pct, which, reset);
+    if (live) armAutopilot(input, which, pct, reset);
+    const willResume = cfgAutopilot() === 'resume' && (which === 'session' || CONFIG.autopilotWeekly === true);
+    const tail = willResume
+      ? c(K.dim, ': checkpoint saved, ') + c(K.yellow, 'autopilot armed')
+      : c(K.dim, saved ? ': resume ticket saved, pick up with ' : ': resume with ') + c(K.yellow, 'claude --resume');
+    const fo = failoverHint();
+    return cBold(K.red, '⚠ limit imminent') + tail + (fo ? c(K.dim, ' · ') + fo : '');
   }
   return cBold(K.red, '⚠ near limit') + c(K.dim, ': auto-saved, resume with ') + c(K.yellow, 'claude --continue');
+}
+
+// Feature 3: predictive burn-rate ETA + pace verdict, from the sample ring buffer.
+// Shows only when it has something worth saying (enough samples + a live window).
+function forecastSeg(sid, sPct, sReset, wPct, wReset) {
+  if (CONFIG.forecast === false || !sid) return '';
+  const now = nowSec();
+  // pick the window projected to hit its ceiling first
+  const cands = [];
+  const consider = (name, pct, reset) => {
+    // need a real, future reset to forecast: without one there is no horizon to compare against
+    if (pct == null || reset == null || !windowActive(reset)) return;
+    const br = burnRate(sid, name === 'session' ? 's' : 'w');
+    if (!br || br.slope <= 0) return;
+    const etaSec = ((100 - br.last) / br.slope);                    // seconds to 100%
+    if (etaSec <= 0) return;
+    cands.push({ name, etaSec, toReset: reset - now, pct });
+  };
+  consider('session', sPct, sReset);
+  consider('weekly', wPct, wReset);
+  if (!cands.length) return '';
+  cands.sort((a, b) => a.etaSec - b.etaSec);
+  // A window that resets before it would exhaust never blocks you. Show the soonest
+  // window that WILL actually block; only if none will, report the soonest as safe.
+  const threats = cands.filter((c) => c.etaSec < c.toReset);
+  if (!threats.length) return c(K.green, '⏳ ' + cands[0].name + ' safe (resets first)');
+  const top = threats[0];
+  const mins = Math.max(1, Math.round(top.etaSec / 60));
+  const human = mins >= 60 ? Math.floor(mins / 60) + 'h' + (mins % 60 ? (mins % 60) + 'm' : '') : mins + 'm';
+  const col = mins <= 15 ? K.red : mins <= 45 ? K.yellow : K.green;
+  const verdict = mins <= 15 ? ' · slow down' : '';
+  return c(col, '⏳ ~' + human + ' to ' + top.name + ' limit' + verdict);
+}
+
+// ===========================================================================
+// UPDATES: a once-a-day background check pings the public repo for a newer
+// version and caches the result; the render only READS that cache (zero-network).
+// ===========================================================================
+function updateCacheFile() { return path.join(CFG, '.ccbsl-update.json'); }
+function readUpdateInfo() { try { return JSON.parse(fs.readFileSync(updateCacheFile(), 'utf8')); } catch { return null; } }
+// atomic JSON write (tmp + rename) so a killed writer never leaves half-written JSON
+function writeJsonAtomic(file, obj) {
+  // pid-unique tmp so two concurrent same-profile writers don't clobber each other's temp
+  try { fs.mkdirSync(path.dirname(file), { recursive: true }); const tmp = file + '.' + process.pid + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(obj, null, 2)); fs.renameSync(tmp, file); return true; } catch { return false; }
+}
+function updateNotifierOff() { return !!process.env.NO_UPDATE_NOTIFIER; }
+// compare dotted numeric versions; true if a > b (non-numeric parts ignored safely).
+// Policy: keep VERSION strictly numeric x.y.z — a '-rc' suffix makes parseRemoteVersion
+// return null (the check then no-ops silently), which is the intended safe degrade.
+function semverGt(a, b) {
+  const pa = String(a).split('.').map((x) => parseInt(x, 10) || 0);
+  const pb = String(b).split('.').map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < 3; i++) { if ((pa[i] || 0) > (pb[i] || 0)) return true; if ((pa[i] || 0) < (pb[i] || 0)) return false; }
+  return false;
+}
+// ⬆ badge: shown only when a newer version is cached, not yet dismissed, and the check
+// is still fresh (a blocked network shouldn't nag forever about a version you can't fetch).
+let DEMO_UPDATE_LATEST = null; // set by --demo so the preview can show the badge
+function updateSeg(info) {
+  if (CONFIG.updateCheck === false || updateNotifierOff()) return '';
+  const latest = DEMO_UPDATE_LATEST || (info && info.latest);
+  if (!latest || !semverGt(latest, VERSION)) return '';
+  if (!DEMO_UPDATE_LATEST) {
+    if (info && info.seen && !semverGt(latest, info.seen)) return '';              // dismissed / already applied
+    if (info && info.checkedAt && (Date.now() - info.checkedAt) > 30 * 86400 * 1000) return ''; // stale: stop nagging
+  }
+  return cBold(K.update, '⬆ v' + latest) + c(K.dim, ' update');
+}
+// once-a-day, spawn the detached background check; never blocks the render. Takes the
+// cache already read this render (no second read on the hot path).
+function maybeCheckUpdate(info) {
+  if (CONFIG.updateCheck === false || updateNotifierOff() || !actAllowed()) return;
+  const day = 24 * 3600 * 1000;
+  if (info && info.checkedAt && (Date.now() - info.checkedAt) < day) return; // throttled
+  // stamp the attempt NOW (atomically) so a blocked network can't respawn a checker every render
+  writeJsonAtomic(updateCacheFile(), Object.assign({ current: VERSION }, info || {}, { checkedAt: Date.now() }));
+  // NODE_USE_SYSTEM_CA lets the child trust a corporate root CA (no-op on older Node)
+  spawnDetached(process.execPath, [__filename, '--check-update'], { env: Object.assign({}, process.env, { NODE_USE_SYSTEM_CA: '1' }) });
+}
+
+// fetch text from an http(s) URL OR, when CCBSL_UPDATE_BASE points at a local path
+// (tests / air-gapped mirrors), read it straight from disk. Best-effort; never throws.
+function fetchText(url, cb) {
+  if (!/^https?:\/\//i.test(url)) { fs.readFile(url, 'utf8', (e, d) => cb(e, d)); return; }
+  httpGetText(url, 0, cb);
+}
+function noProxy(host) {
+  const np = (process.env.NO_PROXY || process.env.no_proxy || '').split(',').map((s) => s.trim()).filter(Boolean);
+  return np.some((p) => p === '*' || host === p || (p.startsWith('.') && host.endsWith(p)) || host.endsWith('.' + p) || host === p);
+}
+function httpGetText(url, depth, cb) {
+  if (depth > 5) return cb(new Error('too many redirects'));
+  let u;
+  try { u = new URL(url); } catch (e) { return cb(e); }
+  const isHttps = u.protocol === 'https:';
+  const proxy = isHttps ? (process.env.HTTPS_PROXY || process.env.https_proxy) : (process.env.HTTP_PROXY || process.env.http_proxy);
+  const headers = { 'User-Agent': 'ccbsl/' + VERSION, Accept: 'text/plain, */*' };
+  const onRes = (res) => {
+    // once-guard: res.destroy() (used for the size cap) suppresses 'end', so deliver the
+    // result/error exactly once from whichever handler fires first.
+    let settled = false;
+    const finish = (err, data) => { if (settled) return; settled = true; cb(err, data); };
+    if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+      res.resume();
+      let next; try { next = new URL(res.headers.location, url).toString(); } catch { return finish(new Error('bad redirect')); }
+      return httpGetText(next, depth + 1, finish);
+    }
+    if (res.statusCode !== 200) { res.resume(); return finish(new Error('HTTP ' + res.statusCode)); }
+    let d = '';
+    res.setEncoding('utf8');
+    res.on('data', (x) => { d += x; if (d.length > 6 * 1024 * 1024) { res.destroy(); finish(new Error('response too large')); } });
+    res.on('end', () => finish(null, d));
+    res.on('error', finish);
+  };
+  try {
+    if (proxy && !noProxy(u.hostname)) return httpViaProxy(u, proxy, isHttps, headers, onRes, cb);
+    const mod = require(isHttps ? 'https' : 'http');
+    const req = mod.get({ hostname: u.hostname, port: u.port || (isHttps ? 443 : 80), path: u.pathname + u.search, headers, timeout: 7000 }, onRes);
+    req.on('error', cb);
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+  } catch (e) { cb(e); }
+}
+// minimal zero-dep proxy support: CONNECT-tunnel for https, absolute-URI GET for http
+function httpViaProxy(u, proxy, isHttps, headers, onRes, cb) {
+  let p;
+  try { p = new URL(proxy); } catch (e) { return cb(e); }
+  const auth = p.username ? { 'Proxy-Authorization': 'Basic ' + Buffer.from(decodeURIComponent(p.username) + ':' + decodeURIComponent(p.password || '')).toString('base64') } : {};
+  const proxyPort = p.port || (p.protocol === 'https:' ? 443 : 80);
+  if (!isHttps) {
+    const http = require('http');
+    const req = http.get({ hostname: p.hostname, port: proxyPort, path: u.toString(), headers: Object.assign({ Host: u.host }, headers, auth), timeout: 7000 }, onRes);
+    req.on('error', cb); req.on('timeout', () => req.destroy(new Error('timeout')));
+    return;
+  }
+  const net = require('net'), tls = require('tls');
+  const sock = net.connect(proxyPort, p.hostname);
+  let done = false; const fail = (e) => { if (!done) { done = true; try { sock.destroy(); } catch {} cb(e); } };
+  sock.setTimeout(7000, () => fail(new Error('proxy timeout')));
+  sock.on('error', fail);
+  sock.on('connect', () => {
+    sock.write('CONNECT ' + u.hostname + ':' + (u.port || 443) + ' HTTP/1.1\r\nHost: ' + u.hostname + ':' + (u.port || 443) + '\r\n' +
+      (auth['Proxy-Authorization'] ? 'Proxy-Authorization: ' + auth['Proxy-Authorization'] + '\r\n' : '') + 'Connection: keep-alive\r\n\r\n');
+  });
+  let head = '';
+  const onData = (chunk) => {
+    head += chunk.toString('binary');
+    const i = head.indexOf('\r\n\r\n');
+    if (i < 0) return;
+    sock.removeListener('data', onData);
+    if (!/^HTTP\/\d\.\d 200/.test(head)) return fail(new Error('proxy CONNECT ' + head.slice(0, head.indexOf('\r\n'))));
+    // any bytes the proxy already sent past the header terminator belong to the origin's
+    // TLS handshake — put them back so tls.connect doesn't lose the ServerHello.
+    const leftover = Buffer.from(head.slice(i + 4), 'binary');
+    if (leftover.length) { try { sock.unshift(leftover); } catch {} }
+    const tlsSock = tls.connect({ socket: sock, servername: u.hostname }, () => {
+      const https = require('https');
+      const req = https.request({ createConnection: () => tlsSock, hostname: u.hostname, path: u.pathname + u.search, headers, timeout: 7000 }, (res) => { done = true; onRes(res); });
+      req.on('error', fail);
+      req.on('timeout', () => req.destroy(new Error('timeout'))); // no timeout handler = a mid-body stall hangs forever
+      req.end();
+    });
+    tlsSock.on('error', fail);
+  };
+  sock.on('data', onData);
+}
+
+// pull the VERSION constant out of a fetched statusline.js
+function parseRemoteVersion(js) { const m = /const VERSION\s*=\s*'([0-9.]+)'/.exec(js || ''); return m ? m[1] : null; }
+// pull the newest released section (heading + bullets) out of a fetched CHANGELOG.md
+function parseChangelogTop(md) {
+  if (!md) return '';
+  const lines = md.split('\n');
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) { if (/^##\s+\[?\d+\.\d+\.\d+/.test(lines[i])) { start = i; break; } }
+  if (start < 0) return '';
+  const out = [lines[start].replace(/^##\s+/, '').trim()];
+  for (let i = start + 1; i < lines.length && out.length < 24; i++) { if (/^##\s+/.test(lines[i])) break; if (lines[i].trim()) out.push(lines[i]); }
+  return out.join('\n');
+}
+// --check-update: fetch the remote version (+ changelog notes) and cache it. Runs both
+// as the detached background checker (stdout ignored) and as a manual command.
+function runCheckUpdate() {
+  fetchText(UPDATE_SCRIPT_URL, (err, js) => {
+    const latest = err ? null : parseRemoteVersion(js);
+    const prev = readUpdateInfo() || {};
+    const finish = (notes) => {
+      writeJsonAtomic(updateCacheFile(), { current: VERSION, latest: latest || prev.latest || null, notes: notes || prev.notes || '', seen: prev.seen || null, checkedAt: Date.now(), source: UPDATE_BASE });
+      if (!latest) process.stdout.write('update check failed (offline, blocked, or behind a proxy). Nothing changed.\n');
+      else if (semverGt(latest, VERSION)) process.stdout.write('update available: v' + latest + ' (you have v' + VERSION + ').\nApply:  node "' + __filename + '" --update\n');
+      else process.stdout.write('up to date (v' + VERSION + ').\n');
+      process.exit(0);
+    };
+    if (latest && semverGt(latest, VERSION)) fetchText(UPDATE_CHANGELOG_URL, (e2, md) => finish(parseChangelogTop(md)));
+    else finish('');
+  });
+}
+// only treat __dirname as a git clone to `git pull` when it's genuinely OUR repo:
+// the script is a tracked file AND a remote points at this project. Otherwise a bare
+// .git (a dotfiles repo, a parent-dir clone) would get pulled — data loss / wrong repo.
+function isOurGitClone() {
+  const { execFileSync } = require('child_process');
+  const g = (args) => execFileSync('git', ['-C', __dirname].concat(args), { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
+  try {
+    g(['rev-parse', '--is-inside-work-tree']);
+    g(['ls-files', '--error-unmatch', path.basename(__filename)]);         // our script is version-controlled here
+    return /claude-code-better-status-line|claude-code-statusline/.test(g(['remote', '-v'])); // and the remote is this project
+  } catch { return false; }
+}
+// --update: pull the newest version. our git clone -> git pull; standalone copy -> download,
+// validate (node --check + shape), back up, atomic swap, then print what changed.
+function runUpdate() {
+  const force = argv.includes('--force');
+  if (isOurGitClone()) {
+    // the pinned-key signature gate only applies to the download path; git integrity here
+    // rests on the remote + transport, so be honest that the key is not enforced on a pull.
+    if (updatePubkey()) process.stdout.write('note: updatePubkey is set but this is a git clone — `git pull` integrity rests on your git remote, not the .sig signature. For signature-enforced updates, install as a standalone copy.\n');
+    try {
+      const { execFileSync } = require('child_process');
+      const out = execFileSync('git', ['-C', __dirname, 'pull', '--ff-only'], { encoding: 'utf8', timeout: 60000 });
+      process.stdout.write(out.trim() + '\nPulled the latest into ' + __dirname + '. Restart Claude Code if hooks changed.\n');
+      process.exit(0);
+    } catch (e) { process.stdout.write('git pull failed: ' + ((e.stderr || e.message || e) + '').trim() + '\nResolve it by hand in ' + __dirname + '\n'); process.exit(1); }
+  }
+  fetchText(UPDATE_SCRIPT_URL, (err, js) => {
+    if (err || !js) { process.stdout.write('download failed: ' + (err ? err.message : 'empty response') + '\nYour file is unchanged.\n'); process.exit(1); }
+    const latest = parseRemoteVersion(js);
+    // trust gates before we ever overwrite: it must parse as our script and be a sane size
+    if (!latest) { process.stdout.write('refusing to apply: the downloaded file has no VERSION marker (not our script, or a proxy error page).\n'); process.exit(1); }
+    if (js.length < 10000 || !/claude-code-better-status-line/.test(js)) { process.stdout.write('refusing to apply: the downloaded file did not look like statusline.js (failed the shape check).\n'); process.exit(1); }
+    if (latest === VERSION) { process.stdout.write('already at v' + VERSION + '; nothing to apply.\n'); process.exit(0); }
+    if (!semverGt(latest, VERSION) && !force) { process.stdout.write('remote is v' + latest + ', which is not newer than your v' + VERSION + '. Not applying (run `--update --force` to override).\n'); process.exit(0); }
+    // keep a .js extension so `node --check` parses it as CommonJS (top-level return is legal there)
+    const tmp = __filename + '.download-' + process.pid + '.js';
+    try {
+      const { execFileSync } = require('child_process');
+      fs.writeFileSync(tmp, js);
+      execFileSync(process.execPath, ['--check', tmp], { stdio: 'ignore', timeout: 20000 }); // syntax-validate (no shell: install path is never interpolated)
+    } catch (e) { try { fs.unlinkSync(tmp); } catch {} process.stdout.write('refusing to apply: the downloaded file failed `node --check` (' + (e.message || e) + '). Your file is unchanged.\n'); process.exit(1); }
+    // supply-chain gate: if a signing key is pinned, the download must carry a valid signature
+    verifyUpdate(js, (verr, method) => {
+      if (verr) { try { fs.unlinkSync(tmp); } catch {} process.stdout.write('refusing to apply: ' + verr.message + '\nYour file is unchanged.\n'); process.exit(1); }
+      const bak = __filename + '.bak-v' + VERSION;
+      try { fs.copyFileSync(__filename, bak); fs.renameSync(tmp, __filename); } // backup, then atomic same-dir swap
+      catch (e) { try { fs.unlinkSync(tmp); } catch {} process.stdout.write('update failed while writing (' + (e.message || e) + '); your file is unchanged (backup at ' + bak + ').\n'); process.exit(1); }
+      // prune old backups: keep the two most recent .bak-v* only
+      try {
+        const dir = path.dirname(__filename), pre = path.basename(__filename) + '.bak-v';
+        const baks = fs.readdirSync(dir).filter((f) => f.startsWith(pre)).map((f) => ({ f, m: fs.statSync(path.join(dir, f)).mtimeMs })).sort((a, b) => b.m - a.m);
+        for (const old of baks.slice(2)) { try { fs.unlinkSync(path.join(dir, old.f)); } catch {} }
+      } catch {}
+      fetchText(UPDATE_CHANGELOG_URL, (e2, md) => {
+        writeJsonAtomic(updateCacheFile(), { current: latest, latest, notes: '', seen: latest, checkedAt: Date.now(), source: UPDATE_BASE });
+        process.stdout.write('updated v' + VERSION + ' -> v' + latest + '   (integrity: ' + method + '; backup: ' + bak + ')\n');
+        const notes = parseChangelogTop(md);
+        if (notes) process.stdout.write('\nWhat changed:\n' + notes + '\n');
+        process.stdout.write('\nRestart Claude Code once so any changed hooks reload.\n');
+        process.exit(0);
+      });
+    });
+  });
+}
+function updatePubkey() { return (typeof CONFIG.updatePubkey === 'string' && CONFIG.updatePubkey.trim()) || UPDATE_PUBKEY || ''; }
+// verify a downloaded update: if a public key is pinned, require a matching Ed25519
+// signature (statusline.js.sig, base64) using zero-dep node:crypto. Else TLS-only.
+function verifyUpdate(js, cb) {
+  const pk = updatePubkey();
+  if (!pk) return cb(null, 'HTTPS/TLS + validation (unsigned; pin updatePubkey to require signatures)');
+  fetchText(UPDATE_SCRIPT_URL + '.sig', (err, sigB64) => {
+    if (err || !sigB64) return cb(new Error('a signing key is pinned but no valid statusline.js.sig was found'));
+    try {
+      const ok = require('crypto').verify(null, Buffer.from(js, 'utf8'), pk, Buffer.from(sigB64.trim(), 'base64'));
+      return ok ? cb(null, 'Ed25519 signature verified') : cb(new Error('the signature did NOT verify against the pinned key'));
+    } catch (e) { return cb(new Error('signature check failed: ' + (e.message || e))); }
+  });
+}
+// --whatsnew: print the newest changelog section for the INSTALLED version
+function runWhatsnew() {
+  let md = ''; try { md = fs.readFileSync(path.join(__dirname, 'CHANGELOG.md'), 'utf8'); } catch {}
+  const notes = parseChangelogTop(md) || (readUpdateInfo() || {}).notes || '';
+  process.stdout.write('claude-code-better-status-line v' + VERSION + '\n\n' + (notes || '(no CHANGELOG.md next to the script)') + '\n');
+  process.exit(0);
 }
 
 // context %: prefer Claude Code's own number, fall back to the transcript tail
@@ -449,6 +1211,8 @@ function collectSegments(input, width, gitOverride) {
   const out = {};
 
   out.profile = profileSeg();
+  const updateInfo = (CONFIG.updateCheck === false || updateNotifierOff()) ? null : readUpdateInfo(); // read the cache once
+  out.update = updateSeg(updateInfo);
 
   const cwd = (input.workspace && input.workspace.current_dir) || input.cwd || process.cwd();
   const projectDir = (input.workspace && input.workspace.project_dir) || cwd;
@@ -460,6 +1224,7 @@ function collectSegments(input, width, gitOverride) {
   model = model.replace(/\s*\(1M context\)/i, '').trim();
   const oneM = /\[?1m\]?/i.test(((input.model && input.model.id) || '') + ' ' + (settingsVal('model') || ''));
   out.model = `${c(K.dim, '★')} ${c(K.model, model)}${oneM ? c(K.dim, ' [1m]') : ''}`;
+  out.downgrade = downgradeSeg(input, gitOverride === undefined);
 
   const effort = effortLevel(input);
   out.effort = effort ? c(K.effort, '⚡' + effort) : '';
@@ -473,6 +1238,7 @@ function collectSegments(input, width, gitOverride) {
   out.context = ctx != null ? `${c(K.dim, 'ctx')} ${bar(ctx, 10, CONFIG.thresholds.context)} ${c(K.dim, ctx + '%')}` : '';
 
   out.git = gitOverride != null ? gitOverride : gitSeg(cwd);
+  out.agents = agentsSeg(input);
   out.caveman = cavemanBadge();
   out.billing = billingSeg(input);
 
@@ -480,9 +1246,20 @@ function collectSegments(input, width, gitOverride) {
   const pctOf = (o) => (o && typeof o.used_percentage === 'number') ? o.used_percentage : null;
   const resetOf = (o) => (o && typeof o.resets_at === 'number') ? o.resets_at : null;
   const sPct = pctOf(rl.five_hour), wPct = pctOf(rl.seven_day);
-  out.session = sPct != null ? usageSeg('session', sPct, resetOf(rl.five_hour)) : '';
-  out.weekly = wPct != null ? usageSeg('weekly', wPct, resetOf(rl.seven_day)) : '';
-  out.resumeHint = resumeHintSeg(input, sPct, wPct, resetOf(rl.five_hour), resetOf(rl.seven_day));
+  const sReset = resetOf(rl.five_hour), wReset = resetOf(rl.seven_day);
+  // side effects only on the LIVE render (Claude Code's stdin), never in --demo / --config / --selftest
+  const live = gitOverride === undefined;
+  if (live) {
+    maybeCheckUpdate(updateInfo);                  // once/day background version check (never blocks)
+    if (sPct != null || wPct != null) {
+      recordSample(input.session_id, sPct, wPct);   // Feature 3: build the burn-rate history
+      writeLedger(input, sPct, sReset, wPct, wReset); // Feature 4: publish this profile's usage
+    }
+  }
+  out.session = sPct != null ? usageSeg('session', sPct, sReset) : '';
+  out.weekly = wPct != null ? usageSeg('weekly', wPct, wReset) : '';
+  out.forecast = forecastSeg(input.session_id, sPct, sReset, wPct, wReset);
+  out.resumeHint = resumeHintSeg(input, sPct, wPct, sReset, wReset, live);
 
   const cost = input.cost;
   if (cost && typeof cost.total_cost_usd === 'number') {
@@ -514,6 +1291,7 @@ function render(input, width, gitOverride) {
 function demoInput() {
   const now = Math.floor(Date.now() / 1000);
   return {
+    session_id: 'ccbsl-demo',
     workspace: { current_dir: '/Users/you/Desktop/my-project', project_dir: '/Users/you/Desktop/my-project' },
     model: { id: 'claude-opus-4-8[1m]', display_name: 'Opus 4.8 (1M context)' },
     effort: { level: 'high' },
@@ -534,20 +1312,42 @@ const DEMO_GIT = () => `\u{1F33F} ${c(K.green, 'main')} ${c(K.yellow, '●3')} $
 // ===========================================================================
 const argv = process.argv.slice(2);
 
+// When required as a module (unit tests), export the pure helpers and DON'T run the CLI
+// or touch stdin. Direct execution (`node statusline.js`) runs normally below.
+if (require.main !== module) {
+  module.exports = {
+    semverGt, modelTier, parseRemoteVersion, parseChangelogTop, inflightAgents,
+    computeInflightAgents, latestTodos, latestUserText, dispWidth, deepMerge,
+    truncFolder, fmtReset, resumePromptFromCheckpoint, wrapSegments, bar,
+    fetchText, httpGetText, VERSION,
+  };
+  return;
+}
+
 function helpText() {
   return [
     'claude-code-better-status-line v' + VERSION,
     'Claude Code calls this automatically (JSON on stdin). Manual commands:',
-    '  --install           wire Claude Code to this file (backs up settings.json first)',
-    '  --uninstall         remove the status line from settings.json',
-    '  --doctor            diagnose a broken or missing status line',
-    '  --mode <m>          set display density: minimal | normal | expanded',
-    '  --options           print every current setting and its choices',
-    '  --config            interactive editor (segments, mode, live preview, save)',
-    '  --demo [--cols N]    preview with sample data',
-    '  --selftest          run edge-case render checks',
-    '  --version           print the version',
-    '  --help              this text',
+    '  --install            wire Claude Code to this file (backs up settings.json first)',
+    '  --install-guardian   also wire the guardian: keep-working + auto-resume at limits',
+    '  --uninstall          remove the status line (and any guardian hooks)',
+    '  --uninstall-guardian remove only the guardian hooks; keep the status line',
+    '  --doctor             diagnose a broken or missing status line + guardian',
+    '  --mode <m>           set display density: minimal | normal | expanded',
+    '  --autopilot <m>      limit behaviour: off | notify | resume',
+    '  --keep-working <b>   keep working while todos remain: on | off',
+    '  --status             list armed auto-resume watchers (nothing is a hidden daemon)',
+    '  --disarm [id]        stop auto-resume watcher(s) and clear their state',
+    '  --purge              delete all local guardian state (checkpoints, tickets, cache)',
+    '  --update             pull the newest version (git pull or download, backed up)',
+    '  --check-update       check now whether a newer version is available',
+    '  --whatsnew           print the newest changelog section',
+    '  --options            print every current setting and its choices',
+    '  --config             interactive editor (segments, mode, live preview, save)',
+    '  --demo [--cols N]     preview with sample data',
+    '  --selftest           run edge-case render checks',
+    '  --version            print the version',
+    '  --help               this text',
     '',
     'Config lives in statusline.config.json next to this file',
     '(see statusline.config.example.json). Updating the script never wipes it.',
@@ -564,6 +1364,237 @@ if (argv.includes('--version') || argv.includes('-v')) {
   process.exit(0);
 }
 
+// ===========================================================================
+// GUARDIAN runtime: hook dispatcher (--hook) + the auto-resume watcher (--watch).
+// Claude Code invokes --hook with the hook JSON on stdin; the installer wires it.
+// ===========================================================================
+function emitHook(obj) {
+  try { if (obj && Object.keys(obj).length) process.stdout.write(JSON.stringify(obj)); } catch {}
+  process.exit(0);
+}
+function guardVal(sid, tag) {
+  const f = path.join(guardDir(), sid + '.' + tag);
+  return {
+    get: () => { try { return parseInt(fs.readFileSync(f, 'utf8'), 10) || 0; } catch { return 0; } },
+    set: (n) => { try { fs.mkdirSync(guardDir(), { recursive: true }); fs.writeFileSync(f, String(n)); return true; } catch { return false; } },
+  };
+}
+function clearGuardCounters(sid) {
+  for (const tag of ['continues', 'stuck', 'lastpending']) { try { fs.unlinkSync(path.join(guardDir(), sid + '.' + tag)); } catch {} }
+}
+// drop everything we track for a session: checkpoint, arming markers, loop counters
+function clearSessionGuardState(sid) {
+  if (!sid || !SID_RE.test(sid)) return;
+  try { fs.unlinkSync(checkpointPath(sid)); } catch {}
+  for (const tag of ['checkpoint', 'notified', 'watch', 'continues', 'stuck', 'lastpending']) {
+    try { fs.unlinkSync(path.join(guardDir(), sid + '.' + tag)); } catch {}
+  }
+}
+// Feature 2 (Relentless mode): a Stop hook that refuses to pause while todos remain.
+function runHookStop(input) {
+  // an unattended auto-resume must not loop overnight: never force-continue there
+  if (process.env.CCBSL_UNATTENDED) return emitHook({});
+  const kw = cfgKeepWorking();
+  if (!kw) return emitHook({});                                   // disabled -> allow stop
+  const sid = input.session_id, tp = input.transcript_path;
+  const validSid = sid && SID_RE.test(sid);
+  const pending = (latestTodos(tp, true) || []).filter((x) => x && x.status !== 'completed'); // full-scan: don't miss todos past the tail
+  if (!pending.length) { if (validSid) clearGuardCounters(sid); return emitHook({}); } // done -> allow
+  // a trailing question or an explicit hand-off is a real human decision: never talk over it
+  const last = latestAssistantText(tp);
+  if (/\?\s*$/.test(last) || /\b(which would you|which one|should i|do you want|would you like|let me know|please (confirm|choose|decide|clarify|advise)|blocked:?|need (your|you to|a decision|input|clarification)|waiting for|up to you|your call|can't proceed|cannot proceed|awaiting)\b/i.test(last.slice(-320))) {
+    if (validSid) clearGuardCounters(sid);                        // fresh burst starts clean after a hand-off
+    return emitHook({});
+  }
+  if (!validSid) return emitHook({});                             // can't loop-guard safely -> don't force
+  const cont = guardVal(sid, 'continues'), stuck = guardVal(sid, 'stuck'), lastN = guardVal(sid, 'lastpending');
+  const n = cont.get() + 1;
+  if (n > kw.maxContinues) { clearGuardCounters(sid); return emitHook({}); }   // hard cap -> allow stop
+  const prev = lastN.get();
+  const s = (prev && pending.length >= prev) ? stuck.get() + 1 : 0;            // pending not shrinking = stalled
+  if (s >= kw.maxStuck) { clearGuardCounters(sid); return emitHook({}); }      // stalled -> allow stop
+  // fail OPEN: if the counters can't be persisted, we can't bound the loop, so allow the stop.
+  // (all three run, no short-circuit, so a partial write doesn't leave a half-updated state.)
+  const okC = cont.set(n), okS = stuck.set(s), okL = lastN.set(pending.length);
+  if (!okC || !okS || !okL) { clearGuardCounters(sid); return emitHook({}); }
+  const list = pending.slice(0, 6).map((x) => '- ' + (x.content || x.activeForm)).join('\n');
+  emitHook({ decision: 'block', reason:
+    'Do not stop yet: ' + pending.length + ' todo(s) still open. Keep working through them:\n' + list +
+    '\nIf you are genuinely blocked on a human decision, a missing secret, or a question, state that explicitly, then stop.' });
+}
+// Feature 1 (re-kick): on resume/compact, inject the checkpoint so no work repeats.
+function runHookSessionStart(input) {
+  const sid = input.session_id, source = input.source || '';
+  if (source && source !== 'resume' && source !== 'compact') return emitHook({}); // startup/clear = fresh
+  if (!sid || !SID_RE.test(sid)) return emitHook({});
+  const cp = readCheckpoint(sid);
+  if (!cp) return emitHook({});
+  // attended on a normal compact/manual resume; unattended only if the watcher relaunched us
+  const ctx = resumePromptFromCheckpoint(cp, false, !!process.env.CCBSL_UNATTENDED);
+  clearSessionGuardState(sid); // consume once + re-arm cleanly for any later limit in this session
+  emitHook({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: ctx } });
+}
+// Feature 5 (compaction-proof): snapshot work state before Claude Code compacts context.
+function runHookPreCompact(input) {
+  writeCheckpoint(input, { reason: 'pre-compact', window: '' });
+  emitHook({});
+}
+function runHook(event, input) {
+  try {
+    if (event === 'stop' || event === 'Stop') return runHookStop(input);
+    if (event === 'session-start' || event === 'SessionStart') return runHookSessionStart(input);
+    if (event === 'pre-compact' || event === 'PreCompact') return runHookPreCompact(input);
+  } catch {}
+  emitHook({}); // unknown or error -> never block Claude Code
+}
+
+// Feature 1 (scheduler): the detached, sleep-safe watcher. Waits out the reset by
+// polling wall-clock (survives laptop suspend + week-long waits), then relaunches
+// the exact session headless. Optionally fails over to a profile with headroom.
+function watchLog(sid, m) {
+  try { const d = path.join(guardDir(), 'logs'); fs.mkdirSync(d, { recursive: true }); fs.appendFileSync(path.join(d, sid + '.log'), new Date().toISOString() + ' ' + m + '\n'); } catch {}
+}
+function relaunchResume(cp, profileDir) {
+  const sid = cp.session_id;
+  const prompt = resumePromptFromCheckpoint(cp, !!profileDir, true); // watcher relaunch = unattended
+  // CCBSL_UNATTENDED disables keep-working inside the relaunched run, so an auto-resume
+  // does its reviewable steps and STOPS instead of looping unattended overnight.
+  const env = Object.assign({}, process.env, { CCBSL_UNATTENDED: '1' });
+  let args;
+  if (profileDir) {                        // cross-account: seed a fresh session (can't --resume another profile's id)
+    env.CLAUDE_CONFIG_DIR = profileDir;
+    args = ['-p', prompt];
+  } else {
+    args = ['--resume', sid, '-p', prompt];
+  }
+  let fd = 'ignore';
+  try { const d = path.join(guardDir(), 'logs'); fs.mkdirSync(d, { recursive: true }); fd = fs.openSync(path.join(d, sid + '.resume.log'), 'a'); } catch {}
+  try {
+    const { spawn } = require('child_process');
+    const child = spawn(claudeBin(), args, { cwd: cp.cwd, env, stdio: ['ignore', fd, fd] });
+    // consume all guard state only once the relaunch actually started, so a failed
+    // spawn (e.g. claude not on PATH) leaves the checkpoint for a manual resume, and
+    // a second limit in the resumed session can re-checkpoint + re-arm cleanly.
+    child.on('spawn', () => clearSessionGuardState(sid));
+    child.on('error', (e) => { watchLog(sid, 'spawn error: ' + e.message + ' (checkpoint kept for manual resume)'); process.exit(1); });
+    child.on('exit', (code) => {
+      watchLog(sid, 'resume process exited code=' + code);
+      notify('Claude Code auto-resumed', (cp.session_name || sid) + ' — ' + (profileDir ? 'continued on another profile' : 'resumed after the reset'));
+      process.exit(0);
+    });
+  } catch (e) { watchLog(sid, 'relaunch failed: ' + e.message); process.exit(1); }
+}
+// has the transcript been written since the window reset? then the user already
+// picked the session back up themselves; auto-resuming would double-run it.
+function resumedManuallySince(cp) {
+  if (!cp.resets_at || !cp.transcript_path) return false;
+  try { return fs.statSync(cp.transcript_path).mtimeMs / 1000 > cp.resets_at + 2; } catch { return false; }
+}
+function watchPidFile(sid) { return path.join(guardDir(), sid + '.watch.pid'); }
+function runWatch(sid) {
+  if (!sid || !SID_RE.test(sid)) process.exit(1);
+  const cp = readCheckpoint(sid);
+  if (!cp) { watchLog(sid, 'no checkpoint; exiting'); process.exit(1); }
+  // Without a known reset time we cannot schedule safely: firing on a bare timer
+  // would relaunch while the window is still exhausted. Leave it to the resume ticket.
+  if (!cp.resets_at) { watchLog(sid, 'no reset time in checkpoint; not auto-resuming (use the resume ticket)'); process.exit(1); }
+  const buffer = (typeof CONFIG.autopilotBuffer === 'number' && CONFIG.autopilotBuffer >= 0 ? CONFIG.autopilotBuffer : 45) * 1000;
+  const target = cp.resets_at * 1000 + buffer;
+  // a PID file makes the watcher inspectable (--status) and killable (--disarm), not an invisible daemon
+  try { fs.writeFileSync(watchPidFile(sid), String(process.pid) + '\n' + target); } catch {}
+  process.on('exit', () => { try { fs.unlinkSync(watchPidFile(sid)); } catch {} });
+  watchLog(sid, 'armed pid=' + process.pid + ' window=' + cp.window + ' resets_at=' + cp.resets_at + ' target=' + new Date(target).toISOString());
+  // the foreground session is still active if its transcript was written in the last N seconds
+  const foregroundActive = () => {
+    if (!cp.transcript_path) return false;
+    try { return Date.now() - fs.statSync(cp.transcript_path).mtimeMs < 120000; } catch { return false; }
+  };
+  const fireIfIdle = (profileDir, why) => {
+    if (resumedManuallySince(cp)) { watchLog(sid, 'session already continued after the reset; standing down'); process.exit(0); }
+    watchLog(sid, why); return relaunchResume(cp, profileDir);
+  };
+  const tick = () => {
+    try {
+      // Failover can fire before the reset (that's the point), but NOT while you're still
+      // working in the foreground session — two agents in one worktree would collide.
+      if (CONFIG.autopilotFailover && !foregroundActive()) {
+        const fo = pickFreshProfile(85, 6 * 3600);
+        if (fo) return fireIfIdle(fo.dir, 'failover to ' + fo.profile + ' (' + Math.round(100 - fo.head) + '% free)');
+      }
+      if (Date.now() >= target) return fireIfIdle(null, 'reset reached; relaunching');
+    } catch (e) { watchLog(sid, 'tick error: ' + e.message); }
+    setTimeout(tick, 30000);
+  };
+  tick();
+}
+function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
+// only signal a pid we can confirm is OUR watcher (its cmdline still has `--watch <sid>`),
+// so a stale pid file that was reused by an unrelated process is never killed.
+function isOurWatcher(pid, sid) {
+  if (!pid || !pidAlive(pid)) return false;
+  if (process.platform === 'win32') return true; // no cheap portable cmdline check; accept
+  try {
+    const cmd = require('child_process').execFileSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] });
+    return cmd.includes('--watch') && cmd.includes(sid);
+  } catch { return false; }
+}
+// --status: list armed auto-resume watchers (nothing is a hidden daemon)
+function runStatus() {
+  process.stdout.write('claude-code-better-status-line v' + VERSION + ' — guardian status\n  profile: ' + CFG + '\n\n');
+  let any = false;
+  try {
+    for (const f of fs.readdirSync(guardDir())) {
+      if (!f.endsWith('.watch.pid')) continue;
+      any = true;
+      const sid = f.slice(0, -'.watch.pid'.length);
+      let pid = 0, target = 0;
+      try { const p = fs.readFileSync(path.join(guardDir(), f), 'utf8').split('\n'); pid = parseInt(p[0], 10) || 0; target = parseInt(p[1], 10) || 0; } catch {}
+      const cp = readCheckpoint(sid) || {};
+      const alive = pid && pidAlive(pid);
+      process.stdout.write('  ' + (alive ? 'ARMED' : 'stale') + '  session ' + sid + '  pid ' + pid + (alive ? '' : ' (not running)') +
+        (target ? '  fires ~' + new Date(target).toLocaleString() : '') + (cp.window ? '  [' + cp.window + ']' : '') + '\n');
+    }
+  } catch {}
+  if (!any) process.stdout.write('  no armed watchers.\n');
+  process.stdout.write('\n  disarm:  node "' + __filename + '" --disarm [session-id]\n  purge:   node "' + __filename + '" --purge\n');
+  process.exit(0);
+}
+// --disarm [sid]: stop watcher(s) and clear their state
+function runDisarm(sid) {
+  const targets = [];
+  try { for (const f of fs.readdirSync(guardDir())) { if (!f.endsWith('.watch.pid')) continue; const s = f.slice(0, -'.watch.pid'.length); if (!sid || s === sid) targets.push(s); } } catch {}
+  let killed = 0;
+  for (const s of targets) {
+    let pid = 0; try { pid = parseInt(fs.readFileSync(watchPidFile(s), 'utf8'), 10) || 0; } catch {}
+    if (isOurWatcher(pid, s)) { try { process.kill(pid); killed++; } catch {} }
+    clearSessionGuardState(s);
+    try { fs.unlinkSync(watchPidFile(s)); } catch {}
+  }
+  process.stdout.write('disarmed ' + targets.length + ' watcher(s)' + (killed ? ', signalled ' + killed + ' process(es)' : '') + '.\n');
+  process.exit(0);
+}
+// --purge: delete everything the guardian wrote locally (checkpoints, tickets, watchers,
+// update cache, this profile's ledger entry, temp samples). Nothing here ever left the machine.
+function runPurge() {
+  const rm = (p) => { try { fs.rmSync(p, { recursive: true, force: true }); } catch {} };
+  try { for (const f of fs.readdirSync(guardDir())) if (f.endsWith('.watch.pid')) { const s = f.slice(0, -'.watch.pid'.length); let pid = 0; try { pid = parseInt(fs.readFileSync(path.join(guardDir(), f), 'utf8'), 10) || 0; } catch {} if (isOurWatcher(pid, s)) { try { process.kill(pid); } catch {} } } } catch {}
+  rm(guardDir());
+  rm(path.join(CFG, 'resume-tickets'));
+  try { fs.unlinkSync(updateCacheFile()); } catch {}
+  try { fs.unlinkSync(path.join(ledgerDir(), path.basename(CFG) + '.json')); } catch {}
+  try { for (const f of fs.readdirSync(os.tmpdir())) if (f.startsWith('ccbsl-usage-') || f.startsWith('ccbsl-agents-') || f.startsWith('ccsl-git-')) { try { fs.unlinkSync(path.join(os.tmpdir(), f)); } catch {} } } catch {}
+  process.stdout.write('purged local guardian state (checkpoints, tickets, watchers, update cache, this profile\'s ledger entry, temp samples).\n');
+  process.exit(0);
+}
+if (argv.includes('--hook')) { let inp = {}; try { inp = JSON.parse(fs.readFileSync(0, 'utf8')); } catch {} runHook(argv[argv.indexOf('--hook') + 1], inp); }
+if (argv.includes('--watch')) { runWatch(argv[argv.indexOf('--watch') + 1]); return; }
+if (argv.includes('--status')) runStatus();
+if (argv.includes('--disarm')) runDisarm(argv[argv.indexOf('--disarm') + 1]);
+if (argv.includes('--purge')) runPurge();
+if (argv.includes('--check-update')) { runCheckUpdate(); return; } // async: exits in its callback
+if (argv.includes('--update')) { runUpdate(); return; }             // async: exits in its callback
+if (argv.includes('--whatsnew')) runWhatsnew();
+
 // ---- --options: print every current setting + its choices (human + agent readable) ----
 function runOptions() {
   const box = (v) => (v === false ? '[ ]' : (v === 'auto' ? '[a]' : '[x]'));
@@ -575,7 +1606,16 @@ function runOptions() {
   o += 'display mode:   ' + CONFIG.mode + '        choices: ' + MODES.join(' | ') + '\n';
   o += 'reset style:    ' + CONFIG.resetStyle + '        choices: clock | relative\n';
   o += 'resume tickets: ' + (CONFIG.resumeTickets === false ? 'off' : 'on') + '\n';
-  o += 'git cache:      ' + (CONFIG.gitCacheMs || 0) + 'ms\n\n';
+  o += 'update check:   ' + (CONFIG.updateCheck === false ? 'off' : 'on') + '        once/day background check for a newer version\n';
+  o += 'git cache:      ' + (CONFIG.gitCacheMs || 0) + 'ms\n';
+  o += '\nguardian (needs --install-guardian to wire the hooks):\n';
+  o += '  keep-working:  ' + (cfgKeepWorking() ? 'on' : 'off') + '        keep the session working while todos remain\n';
+  o += '  autopilot:     ' + cfgAutopilot() + '        off | notify | resume (auto-relaunch at reset)\n';
+  o += '  autopilot buf: ' + (typeof CONFIG.autopilotBuffer === 'number' ? CONFIG.autopilotBuffer : 45) + 's       wait past a reset before relaunching\n';
+  o += '  weekly resume: ' + (CONFIG.autopilotWeekly === true ? 'on' : 'off') + '        also auto-relaunch after the 7-day window\n';
+  o += '  failover:      ' + (CONFIG.autopilotFailover === true ? 'on' : 'off') + '        continue on a profile with headroom instead of waiting\n';
+  o += '  forecast:      ' + (CONFIG.forecast === false ? 'off' : 'on') + '        predictive time-to-limit + pace in the bar\n';
+  o += '  ledger:        ' + (CONFIG.ledger === false ? 'off' : 'on') + '        share this profile\'s usage for cross-profile hints\n\n';
   o += 'segments  ([x] on  [ ] off  [a] auto;  normal mode honors these, minimal/expanded override):\n';
   for (const n of order) o += '  ' + box(S[n]) + ' ' + n + '\n';
   o += '\nthresholds (percent of the window used):\n';
@@ -690,26 +1730,127 @@ function runInstall() {
     }
     process.stdout.write('\nRestart Claude Code once. After that, edits to this file apply live.\n');
     process.stdout.write('Preview now:  node "' + __filename + '" --demo\n');
+    process.stdout.write('Never lose work to a limit? Wire the guardian:  node "' + __filename + '" --install-guardian\n');
+    // honest disclosure: the render is zero-network, but a once-a-day check is not
+    process.stdout.write('\nUpdate checks: once a day this contacts the public GitLab repo to see if a newer\n');
+    process.stdout.write('statusline.js exists, and shows a small ⬆ badge. The status-line render itself makes\n');
+    process.stdout.write('NO network calls; nothing is ever downloaded or run until you type `--update`.\n');
+    process.stdout.write('Turn it off with "updateCheck": false (or NO_UPDATE_NOTIFIER=1).\n');
     process.exit(0);
   } catch (e) {
     process.stdout.write('install failed: ' + e.message + '\n');
     process.exit(1);
   }
 }
+
+// ---- guardian: wire the Stop / SessionStart / PreCompact hooks (Features 1, 2, 5) ----
+const GUARD_EVENTS = [['Stop', 'stop'], ['SessionStart', 'session-start'], ['PreCompact', 'pre-compact']];
+function guardianHookCommand(slug) { return `"${process.execPath}" "${__filename}" --hook ${slug}`; }
+function isGuardianHookCmd(h) { return h && typeof h.command === 'string' && h.command.includes(__filename) && h.command.includes('--hook'); }
+function isGuardianHookGroup(g) { return g && Array.isArray(g.hooks) && g.hooks.some(isGuardianHookCmd); }
+// remove ONLY our individual hook entries, per-hook, so a user's hook that shares a
+// group object with ours is never dropped. Empty groups (and events) are pruned.
+// Returns the possibly-emptied hooks object (undefined if now empty) + a removed count.
+function stripGuardianHooks(hooks) {
+  if (!isPlainObject(hooks)) return { hooks, removed: 0 };
+  let removed = 0;
+  for (const [Event] of GUARD_EVENTS) {
+    if (!Array.isArray(hooks[Event])) continue;
+    const kept = [];
+    for (const g of hooks[Event]) {
+      if (g && Array.isArray(g.hooks)) {
+        const before = g.hooks.length;
+        g.hooks = g.hooks.filter((h) => !isGuardianHookCmd(h));
+        removed += before - g.hooks.length;
+        if (!g.hooks.length) continue; // this group held only our hook(s) -> drop it
+      }
+      kept.push(g);
+    }
+    if (kept.length) hooks[Event] = kept; else delete hooks[Event];
+  }
+  return { hooks: Object.keys(hooks).length ? hooks : undefined, removed };
+}
+function runInstallGuardian() {
+  try {
+    fs.mkdirSync(CFG, { recursive: true });
+    const sp = settingsPathOf();
+    const raw = readSettingsRaw();
+    if (raw.state === 'invalid') { process.stdout.write('!! ' + sp + ' is not valid JSON. Fix it first, then re-run.\n'); process.exit(1); }
+    if (raw.state === 'notObject') { process.stdout.write('!! ' + sp + ' is not a JSON object. Fix it first, then re-run.\n'); process.exit(1); }
+    const settings = raw.value || {};
+    const bak = backupSettings();
+    if (!isPlainObject(settings.statusLine) || typeof settings.statusLine.command !== 'string') {
+      settings.statusLine = { type: 'command', command: `"${process.execPath}" "${__filename}"`, refreshInterval: 2 };
+    }
+    // strip any prior guardian hooks surgically (keeps the user's own), then add fresh
+    settings.hooks = stripGuardianHooks(isPlainObject(settings.hooks) ? settings.hooks : {}).hooks || {};
+    for (const [Event, slug] of GUARD_EVENTS) {
+      const kept = Array.isArray(settings.hooks[Event]) ? settings.hooks[Event] : [];
+      kept.push({ hooks: [{ type: 'command', command: guardianHookCommand(slug) }] });
+      settings.hooks[Event] = kept;
+    }
+    fs.writeFileSync(sp, JSON.stringify(settings, null, 2) + '\n');
+    JSON.parse(fs.readFileSync(sp, 'utf8')); // round-trip validate
+    writeSlashCommand();
+    const want = argv.includes('--auto') ? 'resume' : (cfgAutopilot() === 'off' ? 'notify' : cfgAutopilot());
+    CONFIG.keepWorking = true;
+    CONFIG.autopilot = want;
+    saveConfig();
+    process.stdout.write('ok  guardian hooks (Stop, SessionStart, PreCompact) wired in ' + sp + (bak ? '\nok  previous settings backed up to ' + bak : '') + '\n');
+    process.stdout.write('ok  Relentless mode ON: the session keeps working while todos remain\n');
+    process.stdout.write('ok  Limit Autopilot: ' + want + (want === 'resume'
+      ? '  (auto-relaunches claude --resume the moment the window resets)'
+      : '  (checkpoint + desktop ping; add --auto for hands-free relaunch)') + '\n');
+    process.stdout.write('\nRestart Claude Code once for the hooks to load.\n');
+    process.stdout.write('Dial it:   --autopilot <off|notify|resume>   --keep-working <on|off>\n');
+    process.stdout.write('Remove it: node "' + __filename + '" --uninstall-guardian\n');
+    process.exit(0);
+  } catch (e) { process.stdout.write('guardian install failed: ' + e.message + '\n'); process.exit(1); }
+}
+function runUninstallGuardian() {
+  try {
+    const sp = settingsPathOf();
+    const raw = readSettingsRaw();
+    if (raw.state !== 'ok') { process.stdout.write('nothing to remove: no usable settings at ' + sp + '\n'); process.exit(0); }
+    const settings = raw.value;
+    const res = stripGuardianHooks(settings.hooks);
+    if (!res.removed) { process.stdout.write('nothing to remove: no guardian hooks in ' + sp + '\n'); process.exit(0); }
+    const bak = backupSettings();
+    if (res.hooks === undefined) delete settings.hooks; else settings.hooks = res.hooks;
+    fs.writeFileSync(sp, JSON.stringify(settings, null, 2) + '\n');
+    CONFIG.keepWorking = false; CONFIG.autopilot = 'off'; saveConfig();
+    process.stdout.write('ok  removed ' + res.removed + ' guardian hook(s) from ' + sp + (bak ? ' (backup: ' + bak + ')' : '') + '\n');
+    process.stdout.write('ok  Relentless mode + Autopilot turned off in config; the status line stays\n');
+    process.exit(0);
+  } catch (e) { process.stdout.write('guardian uninstall failed: ' + e.message + '\n'); process.exit(1); }
+}
 function runUninstall() {
   try {
     const sp = settingsPathOf();
     const raw = readSettingsRaw();
-    if (raw.state !== 'ok' || !raw.value.statusLine) {
-      process.stdout.write('nothing to remove: no statusLine in ' + sp + '\n');
+    const gres = raw.state === 'ok' ? stripGuardianHooks(raw.value.hooks) : { removed: 0 };
+    // only remove a statusLine that is THIS script's, so we never delete a third-party
+    // status line the user switched to (a statusLine with no readable command is treated
+    // as ours: it's almost certainly a stale/partial entry from a moved install).
+    const sl = raw.state === 'ok' ? raw.value.statusLine : undefined;
+    const slCmd = isPlainObject(sl) && typeof sl.command === 'string' ? sl.command : (sl ? '' : null);
+    const ownsStatusLine = slCmd != null && (slCmd === '' || slCmd.includes(__filename) || slCmd.includes('statusline.js'));
+    const foreign = sl && !ownsStatusLine;
+    if (raw.state !== 'ok' || (!ownsStatusLine && !gres.removed)) {
+      process.stdout.write('nothing to remove: no ' + (foreign ? 'status line of ours' : 'statusLine') + ' or guardian hooks in ' + sp + '\n');
+      if (foreign) process.stdout.write('--  the statusLine in settings points at a different tool; left untouched.\n');
       process.exit(0);
     }
     const settings = raw.value;
     const bak = backupSettings();
-    delete settings.statusLine;
+    if (ownsStatusLine) delete settings.statusLine;
+    if (gres.removed) { if (gres.hooks === undefined) delete settings.hooks; else settings.hooks = gres.hooks; }
     fs.writeFileSync(sp, JSON.stringify(settings, null, 2) + '\n');
     try { const cp = slashCommandPath(); if (fs.existsSync(cp)) fs.unlinkSync(cp); } catch {}
-    process.stdout.write('ok  statusLine removed from ' + sp + (bak ? ' (backup: ' + bak + ')' : '') + '\n');
+    try { fs.unlinkSync(updateCacheFile()); } catch {} // clean uninstall: drop the update cache too
+    if (ownsStatusLine) process.stdout.write('ok  statusLine removed from ' + sp + (bak ? ' (backup: ' + bak + ')' : '') + '\n');
+    else if (foreign) process.stdout.write('--  left a third-party statusLine in ' + sp + ' untouched\n');
+    if (gres.removed) process.stdout.write('ok  ' + gres.removed + ' guardian hook(s) removed' + (bak && !ownsStatusLine ? ' (backup: ' + bak + ')' : '') + '\n');
     process.stdout.write('--  this file and statusline.config.json were left in place; delete them if you want.\n');
     process.exit(0);
   } catch (e) {
@@ -761,6 +1902,32 @@ function runDoctor() {
   } else info('no statusline.config.json: defaults in use (customize with --config)');
   try { execSync('git --version', { stdio: 'ignore', timeout: 2000 }); ok('git found'); }
   catch { info('git not found: the git segment stays hidden'); }
+  // subscription-only features: rate_limits is only in stdin for Claude.ai Pro/Max
+  if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) info('API key detected: usage bars, forecast, and auto-resume are subscription-only (they need rate_limits, which Claude Code sends only to Pro/Max); you still get context/git/cost/model');
+  else info('usage bars/forecast/auto-resume need a Claude.ai Pro/Max subscription (rate_limits in stdin); if they stay blank on a subscription, the stdin schema may have changed');
+  // guardian: report which lifecycle hooks are wired, and whether claude is reachable for auto-resume
+  if (raw.state === 'ok') {
+    const hooks = isPlainObject(raw.value.hooks) ? raw.value.hooks : {};
+    const wired = GUARD_EVENTS.filter(([Event]) => Array.isArray(hooks[Event]) && hooks[Event].some(isGuardianHookGroup)).map(([Event]) => Event);
+    if (wired.length === GUARD_EVENTS.length) ok('guardian hooks wired (' + wired.join(', ') + ')');
+    else if (wired.length) info('guardian partly wired (' + wired.join(', ') + '); re-run --install-guardian for all three');
+    else info('guardian hooks not wired (Relentless mode + auto-resume off); enable with --install-guardian');
+    if (wired.length) {
+      info('  keep-working: ' + (cfgKeepWorking() ? 'on' : 'off') + '   autopilot: ' + cfgAutopilot());
+      if (cfgAutopilot() === 'resume') {
+        try { execSync((process.platform === 'win32' ? 'where ' : 'command -v ') + claudeBin(), { stdio: 'ignore', timeout: 2000 }); ok('claude on PATH (auto-resume can relaunch)'); }
+        catch { bad('autopilot is "resume" but "' + claudeBin() + '" is not on PATH', 'set "claudeBin" in config to an absolute claude path'); }
+      }
+    }
+  }
+  // update system: report the check state + any available version (no network here; reads the cache)
+  if (CONFIG.updateCheck === false) info('update check: off');
+  else {
+    const u = readUpdateInfo();
+    if (!u) info('update check: on (not run yet; a daily background check will populate it)');
+    else if (u.latest && semverGt(u.latest, VERSION)) info('update check: on — v' + u.latest + ' available (run --update); you have v' + VERSION);
+    else info('update check: on — up to date (v' + VERSION + ')');
+  }
   try { render(demoInput(), 80, DEMO_GIT()); ok('test render'); }
   catch (e) { bad('rendering throws: ' + e.message, 'update this file, or report it'); }
   const elog = path.join(CFG, 'statusline-error.log');
@@ -771,11 +1938,33 @@ function runDoctor() {
 }
 
 // one mode at a time: silently ignoring the second flag misleads the user
-const EXCLUSIVE = ['--install', '--uninstall', '--doctor', '--config', '--demo', '--selftest'];
+const EXCLUSIVE = ['--install', '--install-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--config', '--demo', '--selftest'];
 const picked = EXCLUSIVE.filter((m) => argv.includes(m));
 if (picked.length > 1) {
   process.stdout.write('pick one of: ' + picked.join(', ') + '\n');
   process.exit(1);
+}
+
+// ---- --autopilot / --keep-working: one-command toggles for the guardian, saved to config ----
+if (argv.includes('--autopilot')) {
+  const want = argv[argv.indexOf('--autopilot') + 1];
+  if (!['off', 'notify', 'resume'].includes(want)) {
+    process.stdout.write('usage: --autopilot <off|notify|resume>' + (want ? '  (got "' + want + '")' : '') + '\n');
+    process.exit(1);
+  }
+  CONFIG.autopilot = want;
+  if (saveConfig()) process.stdout.write('ok  autopilot -> ' + want + '  (' + CONFIG_PATH + ')\n');
+  process.exit(0);
+}
+if (argv.includes('--keep-working')) {
+  const want = argv[argv.indexOf('--keep-working') + 1];
+  if (!['on', 'off'].includes(want)) {
+    process.stdout.write('usage: --keep-working <on|off>' + (want ? '  (got "' + want + '")' : '') + '\n');
+    process.exit(1);
+  }
+  CONFIG.keepWorking = (want === 'on');
+  if (saveConfig()) process.stdout.write('ok  keep-working -> ' + want + '  (' + CONFIG_PATH + ')\n');
+  process.exit(0);
 }
 
 // ---- --mode <minimal|normal|expanded>: one-command display density, saved to config ----
@@ -791,6 +1980,8 @@ if (argv.includes('--mode')) {
 }
 
 if (argv.includes('--install')) runInstall();
+if (argv.includes('--install-guardian')) runInstallGuardian();
+if (argv.includes('--uninstall-guardian')) runUninstallGuardian();
 if (argv.includes('--uninstall')) runUninstall();
 if (argv.includes('--doctor')) {
   try { runDoctor(); } catch (e) { process.stdout.write('doctor crashed: ' + e.message + '\n'); process.exit(1); }
@@ -799,7 +1990,19 @@ if (argv.includes('--doctor')) {
 if (argv.includes('--demo')) {
   const ci = argv.indexOf('--cols');
   const cols = ci >= 0 ? parseInt(argv[ci + 1], 10) : null;
+  DEMO_UPDATE_LATEST = '2.9.9';        // showcase the ⬆ update badge in the preview
+  DEMO_AGENTS = 3;                     // showcase the 🤖 subagents segment
+  DEMO_DOWNGRADE = ['Opus 4.8', 'Sonnet 5']; // showcase the ⬇ downgrade alert
   const demo = demoInput();
+  // seed a short burn history so the ⏳ forecast segment shows in the preview
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    fs.writeFileSync(sampleFile(demo.session_id), [
+      JSON.stringify({ t: now - 150, s: 51, w: 90 }),
+      JSON.stringify({ t: now - 80, s: 58, w: 92 }),
+      JSON.stringify({ t: now, s: 63, w: 93 }),
+    ].join('\n') + '\n');
+  } catch {}
   const widths = cols ? [cols] : [120, 80, 50];
   for (const w of widths) {
     process.stdout.write(`\n\x1b[2m── ${w} cols ──\x1b[0m\n`);
@@ -854,10 +2057,23 @@ if (argv.includes('--selftest')) {
 }
 
 // ---- interactive config editor: toggle segments, live preview, save ----
+// keep only what differs from DEFAULTS, so persisting config doesn't freeze every default
+// value against future updates (arrays are atomic: kept only if not deep-equal).
+function diffFromDefaults(cur, def) {
+  if (Array.isArray(def) || Array.isArray(cur)) return JSON.stringify(cur) === JSON.stringify(def) ? undefined : clone(cur);
+  if (def && typeof def === 'object' && cur && typeof cur === 'object') {
+    const out = {};
+    for (const k of Object.keys(cur)) { const d = diffFromDefaults(cur[k], k in def ? def[k] : undefined); if (d !== undefined) out[k] = d; }
+    return Object.keys(out).length ? out : undefined;
+  }
+  return cur === def ? undefined : clone(cur);
+}
 function saveConfig() {
   try {
     if (fs.existsSync(CONFIG_PATH)) fs.copyFileSync(CONFIG_PATH, CONFIG_PATH + '.bak');
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(CONFIG, null, 2) + '\n');
+    // persist only overrides, never a full snapshot, so future default changes still reach the user
+    const sparse = diffFromDefaults(CONFIG, DEFAULTS) || {};
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(sparse, null, 2) + '\n');
     JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); // validate round-trip
     return true;
   } catch (e) { process.stdout.write(`save failed: ${e.message}\n`); return false; }
