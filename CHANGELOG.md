@@ -7,13 +7,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Changed
-- Renamed the project to **Claude Code Better Status Line**, and added a note asking
-  people who like it to star the project.
+- **Renamed the project to Rig** (handle/repo: `ccrig`), tagline *"Your Claude Code rig."*
+  It has outgrown "status line": it's the operational layer you run Claude Code from — a
+  command bar, the guardian, and more to come. The single file is still `statusline.js`
+  and the install/config paths are unchanged, so existing installs keep working.
 
 ### Note
-- The GitLab project path was renamed to `claude-code-better-status-line`. GitLab keeps
-  a redirect from the old path, so existing clones and the install one-liner keep working;
-  update your remote at your convenience with `git remote set-url`.
+- The GitLab project path is renamed to `ccrig`. GitLab keeps a redirect from the old path,
+  so existing clones and the install one-liner keep working; update your remote at your
+  convenience with `git remote set-url`. The `--update` shape-check accepts both the old and
+  new name for one release, so any installed copy can still update across the rename.
 
 ## [2.3.0] - 2026-07-18
 
@@ -282,13 +285,13 @@ claude-auto-retry, unsnooze) and verified against the official docs.
   an API key means pay-per-token.
 - `install.sh` installer and CI (`--selftest` + shellcheck).
 
-[Unreleased]: https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/compare/v2.3.0...HEAD
-[2.3.0]: https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/compare/v2.2.0...v2.3.0
-[2.2.0]: https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/compare/v2.1.0...v2.2.0
-[2.1.0]: https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/compare/v2.0.0...v2.1.0
-[2.0.0]: https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/compare/v1.4.0...v2.0.0
-[1.4.0]: https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/compare/v1.3.0...v1.4.0
-[1.3.0]: https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/compare/v1.2.0...v1.3.0
-[1.2.0]: https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/compare/v1.1.0...v1.2.0
-[1.1.0]: https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/compare/v1.0.0...v1.1.0
-[1.0.0]: https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/tags/v1.0.0
+[Unreleased]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v2.3.0...HEAD
+[2.3.0]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v2.2.0...v2.3.0
+[2.2.0]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v2.1.0...v2.2.0
+[2.1.0]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v2.0.0...v2.1.0
+[2.0.0]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.4.0...v2.0.0
+[1.4.0]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.3.0...v1.4.0
+[1.3.0]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.2.0...v1.3.0
+[1.2.0]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.1.0...v1.2.0
+[1.1.0]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.0.0...v1.1.0
+[1.0.0]: https://gitlab.com/jordanallenlewis/ccrig/-/tags/v1.0.0

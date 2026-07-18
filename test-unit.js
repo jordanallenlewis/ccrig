@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Unit tests for claude-code-better-status-line. These require statusline.js as a
+ * Unit tests for ccrig. These require statusline.js as a
  * module (it exports its pure helpers when required, and does NOT run the CLI), so
  * they test the internal logic directly and fast — complementing the black-box
  * subprocess suite in test.js. Zero dependencies (node:test, Node 18+). Run:

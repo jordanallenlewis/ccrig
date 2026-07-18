@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Test suite for claude-code-better-status-line. Zero dependencies: Node's built-in
+ * Test suite for ccrig. Zero dependencies: Node's built-in
  * test runner (node:test, Node 18+). Run:
  *   node --test test.js        (or: node test.js)
  *
@@ -358,7 +358,7 @@ test('--config m cycles the mode and saves it', () => {
 // CLI: install / uninstall / doctor / misc
 // ===========================================================================
 test('--version and --help', () => {
-  assert.match(run(['--version']).out, /claude-code-better-status-line v\d+\.\d+\.\d+/);
+  assert.match(run(['--version']).out, /ccrig v\d+\.\d+\.\d+/);
   const h = run(['--help']);
   assert.strictEqual(h.code, 0);
   for (const flag of ['--install', '--uninstall', '--doctor', '--config', '--demo', '--selftest']) assert.ok(h.out.includes(flag), flag + ' in help');
@@ -1166,7 +1166,7 @@ test('update badge is suppressed by dismissal (seen), staleness, and NO_UPDATE_N
 test('--whatsnew prints a changelog section', () => {
   const r = run(['--whatsnew']);
   assert.strictEqual(r.code, 0);
-  assert.match(r.out, /claude-code-better-status-line v/);
+  assert.match(r.out, /ccrig v/);
 });
 
 // note: the real-HTTP fetch path is unit-tested in-process in test-unit.js (fetchHttp*).

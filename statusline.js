@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Claude Code Better Status Line: a command center for your terminal
+ * Rig: a command center for your terminal
  * ---------------------------------------------------------------------------
  * CREDIT: kickstarted by Hannah Stulberg's guide
  *   "Claude Code for Everything: Your Status Line Is Empty (Let's Fix That)"
@@ -72,7 +72,7 @@ const VERSION = '2.3.0';
 // where updates come from: the public GitLab repo's main branch (raw files).
 // Override the base with CCBSL_UPDATE_BASE (used by tests to point at a local dir).
 const UPDATE_BASE = process.env.CCBSL_UPDATE_BASE ||
-  'https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/raw/main';
+  'https://gitlab.com/jordanallenlewis/ccrig/-/raw/main';
 const UPDATE_SCRIPT_URL = UPDATE_BASE + '/statusline.js';
 const UPDATE_CHANGELOG_URL = UPDATE_BASE + '/CHANGELOG.md';
 // Supply-chain: paste an Ed25519 PUBLIC key (PEM) here (or set "updatePubkey" in config)
@@ -994,7 +994,7 @@ function isOurGitClone() {
   try {
     g(['rev-parse', '--is-inside-work-tree']);
     g(['ls-files', '--error-unmatch', path.basename(__filename)]);         // our script is version-controlled here
-    return /claude-code-better-status-line|claude-code-statusline/.test(g(['remote', '-v'])); // and the remote is this project
+    return /ccrig|claude-code-statusline/.test(g(['remote', '-v'])); // and the remote is this project
   } catch { return false; }
 }
 // --update: pull the newest version. our git clone -> git pull; standalone copy -> download,
@@ -1017,7 +1017,7 @@ function runUpdate() {
     const latest = parseRemoteVersion(js);
     // trust gates before we ever overwrite: it must parse as our script and be a sane size
     if (!latest) { process.stdout.write('refusing to apply: the downloaded file has no VERSION marker (not our script, or a proxy error page).\n'); process.exit(1); }
-    if (js.length < 10000 || !/claude-code-better-status-line/.test(js)) { process.stdout.write('refusing to apply: the downloaded file did not look like statusline.js (failed the shape check).\n'); process.exit(1); }
+    if (js.length < 10000 || !/ccrig|claude-code-better-status-line/.test(js)) { process.stdout.write('refusing to apply: the downloaded file did not look like statusline.js (failed the shape check).\n'); process.exit(1); }
     if (latest === VERSION) { process.stdout.write('already at v' + VERSION + '; nothing to apply.\n'); process.exit(0); }
     if (!semverGt(latest, VERSION) && !force) { process.stdout.write('remote is v' + latest + ', which is not newer than your v' + VERSION + '. Not applying (run `--update --force` to override).\n'); process.exit(0); }
     // keep a .js extension so `node --check` parses it as CommonJS (top-level return is legal there)
@@ -1068,7 +1068,7 @@ function verifyUpdate(js, cb) {
 function runWhatsnew() {
   let md = ''; try { md = fs.readFileSync(path.join(__dirname, 'CHANGELOG.md'), 'utf8'); } catch {}
   const notes = parseChangelogTop(md) || (readUpdateInfo() || {}).notes || '';
-  process.stdout.write('claude-code-better-status-line v' + VERSION + '\n\n' + (notes || '(no CHANGELOG.md next to the script)') + '\n');
+  process.stdout.write('ccrig v' + VERSION + '\n\n' + (notes || '(no CHANGELOG.md next to the script)') + '\n');
   process.exit(0);
 }
 
@@ -1326,7 +1326,7 @@ if (require.main !== module) {
 
 function helpText() {
   return [
-    'claude-code-better-status-line v' + VERSION,
+    'ccrig v' + VERSION,
     'Claude Code calls this automatically (JSON on stdin). Manual commands:',
     '  --install            wire Claude Code to this file (backs up settings.json first)',
     '  --install-guardian   also wire the guardian: keep-working + auto-resume at limits',
@@ -1360,7 +1360,7 @@ if (argv.includes('--help') || argv.includes('-h')) {
 }
 
 if (argv.includes('--version') || argv.includes('-v')) {
-  process.stdout.write('claude-code-better-status-line v' + VERSION + '\n');
+  process.stdout.write('ccrig v' + VERSION + '\n');
   process.exit(0);
 }
 
@@ -1540,7 +1540,7 @@ function isOurWatcher(pid, sid) {
 }
 // --status: list armed auto-resume watchers (nothing is a hidden daemon)
 function runStatus() {
-  process.stdout.write('claude-code-better-status-line v' + VERSION + ' — guardian status\n  profile: ' + CFG + '\n\n');
+  process.stdout.write('ccrig v' + VERSION + ' — guardian status\n  profile: ' + CFG + '\n\n');
   let any = false;
   try {
     for (const f of fs.readdirSync(guardDir())) {
@@ -1601,7 +1601,7 @@ function runOptions() {
   const S = CONFIG.show, tu = CONFIG.thresholds.usage, tc = CONFIG.thresholds.context;
   const order = Array.isArray(CONFIG.order) ? CONFIG.order : DEFAULT_ORDER;
   const labels = CONFIG.profileLabels || {};
-  let o = 'claude-code-better-status-line v' + VERSION + ' options\n';
+  let o = 'ccrig v' + VERSION + ' options\n';
   o += 'config file: ' + CONFIG_PATH + (fs.existsSync(CONFIG_PATH) ? '' : '  (not present: using defaults)') + '\n\n';
   o += 'display mode:   ' + CONFIG.mode + '        choices: ' + MODES.join(' | ') + '\n';
   o += 'reset style:    ' + CONFIG.resetStyle + '        choices: clock | relative\n';
@@ -1662,7 +1662,7 @@ function writeSlashCommand() {
       'argument-hint: [optional: a change to apply directly, e.g. "minimal mode"]',
       '---',
       '',
-      'Open an INTERACTIVE MENU so the user configures their claude-code-better-status-line by',
+      'Open an INTERACTIVE MENU so the user configures their ccrig by',
       'picking options, not by typing free text. The script is:',
       '',
       '    ' + sl,
@@ -1865,7 +1865,7 @@ function runDoctor() {
   const ok = (m) => process.stdout.write('  ok    ' + m + '\n');
   const bad = (m, fix) => { fails++; process.stdout.write('  FAIL  ' + m + (fix ? '\n        fix: ' + fix : '') + '\n'); };
   const info = (m) => process.stdout.write('  --    ' + m + '\n');
-  process.stdout.write('claude-code-better-status-line v' + VERSION + ' doctor\n');
+  process.stdout.write('ccrig v' + VERSION + ' doctor\n');
   process.stdout.write('  script:  ' + __filename + '\n  profile: ' + CFG + '\n\n');
 
   const major = parseInt(process.versions.node, 10);
