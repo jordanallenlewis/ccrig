@@ -37,6 +37,8 @@
   "forecast": true,
   "ledger": false,
   "downgradeAlert": true,
+  "sessionBoard": false,
+  "reinjectOnCompact": false,
   "updateCheck": true,
   "gitCacheMs": 2500,
   "reserveCols": 1,

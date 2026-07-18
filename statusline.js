@@ -67,7 +67,7 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const VERSION = '2.3.0';
+const VERSION = '2.4.0';
 
 // where updates come from: the public GitLab repo's main branch (raw files).
 // Override the base with CCBSL_UPDATE_BASE (used by tests to point at a local dir).
@@ -142,6 +142,13 @@ const DEFAULTS = {
   // outside your config dir, and cross-account use is a per-user judgement. Opt in with "ledger": true.
   ledger: false,
   downgradeAlert: true,      // ⬇ warn when the model silently downgrades tier mid-session (Opus→Sonnet)
+  // Cross-session attention board (`--board`): each live render publishes this session's
+  // state to a shared dir so `--board` can show every session across your worktrees/profiles.
+  // OFF by default (it writes cwd/model/usage outside the config dir, like the ledger).
+  sessionBoard: false,
+  // Re-inject a rules file after Claude Code compacts context (SessionStart source=compact),
+  // in case compaction drops your project rules. false | true (=CLAUDE.md) | "path/to/file".
+  reinjectOnCompact: false,
   // Update notifications: a once-a-day background check pings the public GitLab repo for a
   // newer version and shows an ⬆ badge. The RENDER stays zero-network (it only reads a local
   // cache the background check wrote). A single unauthenticated GET; set false to disable.
@@ -652,6 +659,23 @@ function writeLedger(input, sPct, sReset, wPct, wReset) {
   writeJsonAtomic(path.join(ledgerDir(), base + '.json'), {   // atomic: concurrent profiles never truncate it
     profile: base, session: sPct, sessionReset: sReset, weekly: wPct, weeklyReset: wReset,
     cwd: inputCwd(input), ts: Math.floor(Date.now() / 1000),
+  });
+}
+
+// --- cross-session attention board: each live render publishes THIS session's state to a
+// shared dir so `--board` can show every session across worktrees/profiles. Opt-in.
+function boardDir() { return path.join(HOME, '.claude-rig-sessions'); }
+function writeBoard(input, sPct, sReset, wPct, wReset, ctx, agents) {
+  if (CONFIG.sessionBoard !== true) return;
+  const sid = input.session_id;
+  if (!sid || !SID_RE.test(sid)) return;
+  const cwd = inputCwd(input);
+  writeJsonAtomic(path.join(boardDir(), sid + '.json'), {
+    sid, cwd, project: path.basename(cwd),
+    profile: path.basename(CFG),
+    model: (input.model && (input.model.display_name || input.model.id)) || '',
+    session: sPct, sessionReset: sReset, weekly: wPct, weeklyReset: wReset,
+    ctx: (ctx == null ? null : ctx), agents: agents || 0, ts: Date.now(),
   });
 }
 // another profile with headroom, freshest first; null if none qualifies
@@ -1251,6 +1275,7 @@ function collectSegments(input, width, gitOverride) {
   const live = gitOverride === undefined;
   if (live) {
     maybeCheckUpdate(updateInfo);                  // once/day background version check (never blocks)
+    writeBoard(input, sPct, sReset, wPct, wReset, ctx, inflightAgents(input.transcript_path).length); // attention board (opt-in)
     if (sPct != null || wPct != null) {
       recordSample(input.session_id, sPct, wPct);   // Feature 3: build the burn-rate history
       writeLedger(input, sPct, sReset, wPct, wReset); // Feature 4: publish this profile's usage
@@ -1336,6 +1361,8 @@ function helpText() {
     '  --mode <m>           set display density: minimal | normal | expanded',
     '  --autopilot <m>      limit behaviour: off | notify | resume',
     '  --keep-working <b>   keep working while todos remain: on | off',
+    '  --board              show every live session across your worktrees/profiles (opt-in)',
+    '  --sessions           list recent sessions with the command to resume each',
     '  --status             list armed auto-resume watchers (nothing is a hidden daemon)',
     '  --disarm [id]        stop auto-resume watcher(s) and clear their state',
     '  --purge              delete all local guardian state (checkpoints, tickets, cache)',
@@ -1423,16 +1450,27 @@ function runHookStop(input) {
     '\nIf you are genuinely blocked on a human decision, a missing secret, or a question, state that explicitly, then stop.' });
 }
 // Feature 1 (re-kick): on resume/compact, inject the checkpoint so no work repeats.
+// Also (opt-in) re-inject a rules file after a compaction, in case compaction dropped it.
 function runHookSessionStart(input) {
   const sid = input.session_id, source = input.source || '';
   if (source && source !== 'resume' && source !== 'compact') return emitHook({}); // startup/clear = fresh
-  if (!sid || !SID_RE.test(sid)) return emitHook({});
-  const cp = readCheckpoint(sid);
-  if (!cp) return emitHook({});
-  // attended on a normal compact/manual resume; unattended only if the watcher relaunched us
-  const ctx = resumePromptFromCheckpoint(cp, false, !!process.env.CCBSL_UNATTENDED);
-  clearSessionGuardState(sid); // consume once + re-arm cleanly for any later limit in this session
-  emitHook({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: ctx } });
+  const parts = [];
+  // rules re-injection after compaction (opt-in via reinjectOnCompact)
+  if (source === 'compact' && CONFIG.reinjectOnCompact) {
+    const rel = CONFIG.reinjectOnCompact === true ? 'CLAUDE.md' : String(CONFIG.reinjectOnCompact);
+    const file = path.isAbsolute(rel) ? rel : path.join(inputCwd(input), rel);
+    try { const txt = fs.readFileSync(file, 'utf8').slice(0, 8000); if (txt.trim()) parts.push('Your context was just compacted. Re-including your project rules (' + rel + ') so they are not lost:\n\n' + txt); } catch {}
+  }
+  // checkpoint restore (limit resume / compact)
+  if (sid && SID_RE.test(sid)) {
+    const cp = readCheckpoint(sid);
+    if (cp) {
+      parts.push(resumePromptFromCheckpoint(cp, false, !!process.env.CCBSL_UNATTENDED)); // attended unless the watcher relaunched us
+      clearSessionGuardState(sid); // consume once + re-arm cleanly for a later limit
+    }
+  }
+  if (!parts.length) return emitHook({});
+  emitHook({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: parts.join('\n\n---\n\n') } });
 }
 // Feature 5 (compaction-proof): snapshot work state before Claude Code compacts context.
 function runHookPreCompact(input) {
@@ -1583,7 +1621,76 @@ function runPurge() {
   try { fs.unlinkSync(updateCacheFile()); } catch {}
   try { fs.unlinkSync(path.join(ledgerDir(), path.basename(CFG) + '.json')); } catch {}
   try { for (const f of fs.readdirSync(os.tmpdir())) if (f.startsWith('ccbsl-usage-') || f.startsWith('ccbsl-agents-') || f.startsWith('ccsl-git-')) { try { fs.unlinkSync(path.join(os.tmpdir(), f)); } catch {} } } catch {}
-  process.stdout.write('purged local guardian state (checkpoints, tickets, watchers, update cache, this profile\'s ledger entry, temp samples).\n');
+  rm(boardDir()); // shared session-board files (live sessions republish on their next render)
+  process.stdout.write('purged local guardian state (checkpoints, tickets, watchers, update cache, ledger entry, board, temp samples).\n');
+  process.exit(0);
+}
+function pad(s, n) { s = String(s == null ? '' : s); return s.length >= n ? s.slice(0, n) : s + ' '.repeat(n - s.length); }
+function shellQuote(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; } // safe for copy-paste, even with spaces/quotes
+function readHead(p, bytes) { try { const fd = fs.openSync(p, 'r'); const buf = Buffer.alloc(bytes); const n = fs.readSync(fd, buf, 0, bytes, 0); fs.closeSync(fd); return buf.slice(0, n).toString('utf8'); } catch { return ''; } }
+// --board: every live session across your worktrees/profiles (opt-in via sessionBoard)
+function runBoard() {
+  const dir = boardDir();
+  const now = Date.now();
+  const entries = [];
+  let files = []; try { files = fs.readdirSync(dir); } catch {}
+  for (const f of files) {
+    if (!f.endsWith('.json')) continue;
+    const p = path.join(dir, f);
+    try { const e = JSON.parse(fs.readFileSync(p, 'utf8')); if (e && e.ts && now - e.ts < 3600000) entries.push(e); else fs.unlinkSync(p); } catch { try { fs.unlinkSync(p); } catch {} } // prune >1h stale
+  }
+  const critAt = CONFIG.thresholds.usage.critical != null ? CONFIG.thresholds.usage.critical : 98;
+  const warnAt = warnAtOf(CONFIG.thresholds.usage);
+  const liveList = entries.filter((e) => now - e.ts < 600000).sort((a, b) => b.ts - a.ts); // updated in last 10 min
+  process.stdout.write('ccrig v' + VERSION + ' — session board\n');
+  if (CONFIG.sessionBoard !== true) process.stdout.write('  (sessionBoard is off — set "sessionBoard": true in config so sessions publish here)\n');
+  process.stdout.write('\n');
+  if (!liveList.length) { process.stdout.write('  no live sessions.\n'); process.exit(0); }
+  for (const e of liveList) {
+    const usage = Math.max(e.session || 0, e.weekly || 0);
+    const state = usage >= critAt ? '⚠ at limit' : (e.ctx != null && e.ctx >= 85) ? '🔴 ctx ' + e.ctx + '%'
+      : e.agents ? '🤖 ' + e.agents + ' agents' : usage >= warnAt ? '⚠ near limit' : 'active';
+    const age = Math.round((now - e.ts) / 1000);
+    process.stdout.write('  ' + pad(e.project, 20) + ' ' + pad((e.profile || '').replace(/^\.?claude-?/, '') || 'default', 9) + ' ' +
+      pad((e.model || '').split(/[\s(]/)[0], 8) + ' ' + pad('s' + Math.round(e.session || 0) + '% w' + Math.round(e.weekly || 0) + '%', 11) + ' ' +
+      pad(state, 13) + ' ' + (age < 60 ? age + 's' : Math.round(age / 60) + 'm') + ' ago\n');
+  }
+  process.stdout.write('\n  ' + liveList.length + ' live session(s).\n');
+  process.exit(0);
+}
+// --sessions: recent sessions in this profile, newest first, with the resume command
+function runSessions() {
+  const base = path.join(CFG, 'projects');
+  const rows = [];
+  try {
+    for (const proj of fs.readdirSync(base)) {
+      const pdir = path.join(base, proj);
+      let files; try { files = fs.readdirSync(pdir); } catch { continue; }
+      for (const f of files) {
+        if (!f.endsWith('.jsonl')) continue;
+        const p = path.join(pdir, f);
+        try { const st = fs.statSync(p); rows.push({ sid: f.replace(/\.jsonl$/, ''), path: p, size: st.size, mtime: st.mtimeMs }); } catch {}
+      }
+    }
+  } catch {}
+  rows.sort((a, b) => b.mtime - a.mtime);
+  process.stdout.write('ccrig v' + VERSION + ' — recent sessions in ' + CFG + '\n\n');
+  if (!rows.length) { process.stdout.write('  none found under ' + base + '\n'); process.exit(0); }
+  const now = Date.now();
+  for (const r of rows.slice(0, 15)) {
+    let cwd = '';
+    for (const line of readHead(r.path, 16384).split('\n')) { // cwd may not be on the very first line
+      if (!line) continue; let o; try { o = JSON.parse(line); } catch { continue; }
+      cwd = o.cwd || (o.workspace && o.workspace.current_dir) || '';
+      if (cwd) break;
+    }
+    const req = (latestUserText(r.path) || '').replace(/\s+/g, ' ').slice(0, 52) || '(no request found)';
+    const ageM = Math.round((now - r.mtime) / 60000);
+    const age = ageM < 60 ? ageM + 'm' : ageM < 1440 ? Math.round(ageM / 60) + 'h' : Math.round(ageM / 1440) + 'd';
+    const sz = r.size > 1e6 ? (r.size / 1e6).toFixed(1) + 'MB' : Math.round(r.size / 1e3) + 'KB';
+    process.stdout.write('  ' + pad(age + ' ago', 8) + ' ' + pad(sz, 7) + ' ' + pad(path.basename(cwd) || '?', 18) + '  ' + req + '\n');
+    process.stdout.write('    ' + (cwd ? 'cd ' + shellQuote(cwd) + ' && ' : '') + 'claude --resume ' + r.sid + '\n');
+  }
   process.exit(0);
 }
 if (argv.includes('--hook')) { let inp = {}; try { inp = JSON.parse(fs.readFileSync(0, 'utf8')); } catch {} runHook(argv[argv.indexOf('--hook') + 1], inp); }
@@ -1591,6 +1698,8 @@ if (argv.includes('--watch')) { runWatch(argv[argv.indexOf('--watch') + 1]); ret
 if (argv.includes('--status')) runStatus();
 if (argv.includes('--disarm')) runDisarm(argv[argv.indexOf('--disarm') + 1]);
 if (argv.includes('--purge')) runPurge();
+if (argv.includes('--board')) runBoard();
+if (argv.includes('--sessions')) runSessions();
 if (argv.includes('--check-update')) { runCheckUpdate(); return; } // async: exits in its callback
 if (argv.includes('--update')) { runUpdate(); return; }             // async: exits in its callback
 if (argv.includes('--whatsnew')) runWhatsnew();
