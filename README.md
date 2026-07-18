@@ -1,21 +1,28 @@
 # Rig
 
-**Your Claude Code rig.** The operational layer that makes [Claude Code](https://claude.com/claude-code) pleasant to run all day — a live command bar, an opt-in guardian that never lets a limit lose your work, and more as it grows.
+**Your Claude Code rig.** The operational layer that makes [Claude Code](https://claude.com/claude-code) pleasant to run all day — a live command bar, an opt-in guardian that picks your work back up after a usage limit, and more as it grows.
 
-Today it's three things:
+The pieces so far:
 
 1. **A status line** that turns the bar at the bottom of your terminal into a command center: active profile, model, reasoning effort, context-window usage, git state, billing path, and your plan's rate-limit windows.
-2. **The Guardian** (opt-in): the part that *acts* on your limits instead of just showing them. It keeps the session working while there's work left, and when you do hit a limit it snapshots your exact work state and can pick the session back up automatically the moment the window resets, losing nothing and repeating nothing. See [The Guardian](#the-guardian).
-3. **A profile switcher** for running multiple Claude accounts side by side.
+2. **The Guardian** (opt-in): the part that *acts* on your limits instead of just showing them. It keeps the session working while there's work left, and when you do hit a limit it snapshots your exact work state and can pick the session back up automatically the moment the window resets — continuing the next step, not redoing finished work. See [The Guardian](#the-guardian).
+3. **A cross-session board and resume-picker** (`--board`, `--sessions`) for keeping track of many sessions across worktrees and accounts, plus **a profile switcher** for running multiple Claude accounts side by side.
 
-Everything the status line shows is read from the JSON Claude Code already hands it on stdin, so **the render makes no network calls** — no API token, no keychain reads. The one exception is an optional once-a-day update check (a single request to the public repo so you learn about new versions; turn it off with `"updateCheck": false`), and it runs in the background — the render itself never touches the network. It's a single Node file with zero dependencies (Node ships with Claude Code), and your settings live in a separate config file so updates never overwrite them. Everything reads from local files; nothing you do ever leaves your machine.
+Everything the status line shows is read from the JSON Claude Code already hands it on stdin, so **the render makes no network calls** — no API token, no keychain reads, nothing leaves your machine. The one exception is an optional once-a-day update check that runs in the background (a single request to the public repo so you learn about new versions; off with `"updateCheck": false`). It's a single Node file with zero dependencies (Node ships with Claude Code), and your settings live in a separate config file so updates never overwrite them.
 
 ```
 👤 work │ 📂 my-project │ ★ Opus 4.8 [1m] │ ⚡high │ ctx ████░░░░░░ 42% │ 🌿 main ●3 ↑1 │ 💳 sub
 session █████░░░ 63% ↺8:53a │ weekly ███████░ 88% ↺7/22 6:53a
 ```
 
-The bars are color-coded (green, then yellow, then red) and the line wraps to your terminal width. Once you have the file (download or clone below), you can preview it with sample data before wiring anything: `node statusline.js --demo`.
+The bars are color-coded (green, then yellow, then red) and the line wraps to your terminal width. And when a limit is coming — which is where Rig earns its spot — it forecasts the wall and, if you've enabled the guardian, checkpoints your work and arms the pickup:
+
+```
+👤 work │ 📂 my-project │ ★ Opus 4.8 [1m] │ ⚡high │ ctx ██████░░░░ 61% │ 🌿 main ●2
+session ████████░ 96% ↺2h14m │ weekly ██████░░ 71% ↺7/22 │ ⏳ ~9m to session limit · slow down │ ⚠ limit imminent: checkpoint saved, autopilot armed
+```
+
+Once you have the file (download or clone below), you can preview it with sample data before wiring anything: `node statusline.js --demo`.
 
 > If it earns a spot in your terminal, please **star the project** on GitLab. It is free and it is the whole ask, and a star is how the next person finds it.
 
@@ -55,17 +62,22 @@ To wire it by hand instead, add this to `~/.claude/settings.json` (use an absolu
 }
 ```
 
-If anything looks wrong, `node statusline.js --doctor` diagnoses the usual suspects (unwired settings, a node path broken by a version manager upgrade, invalid config). `node statusline.js --uninstall` removes it cleanly.
+If anything looks wrong, `node statusline.js --doctor` diagnoses the usual suspects (unwired settings, a node path broken by a version manager upgrade, invalid config).
+
+**Backing out** is clean and total: `--uninstall` removes the status line (and any guardian hooks), `--uninstall-guardian` removes just the guardian, and `--purge` deletes every local file it ever wrote (checkpoints, tickets, caches). Every write is backed up first, and nothing it touches lives outside your home dir.
 
 ## What the status line shows
 
 - **👤 profile**: the active Claude profile, when you run more than one (see below). Hidden if you only have one.
+- **⬆ update**: an "update available" badge when a newer version exists (see [Staying up to date](#staying-up-to-date)). Shown only when there's one to pull.
 - **📂 folder**: the current project, as a repo-relative path.
 - **★ model**: the model, with a `[1m]` tag on a 1M-context model.
+- **⬇ downgrade**: a yellow heads-up if the model tier drops mid-session (Opus → Sonnet), which Claude Code does silently as you near the Opus cap — shown only when usage is elevated.
 - **⚡ effort**: reasoning effort (low through max).
 - **flags**: `fast` when Fast mode is on, `no-think` when extended thinking is off.
 - **ctx**: a context-window bar. Green under 50%, yellow under 70%, red above.
 - **🌿 git**: branch, uncommitted count, unpushed `↑` and unpulled `↓` vs upstream.
+- **🤖 agents**: how many subagents are running right now, when you use the Task tool or workflows.
 - **💳 billing**: `sub` for a Claude.ai subscription, `api` for pay-per-token. Claude Code sends rate-limit data only to subscribers, which is how this is detected.
 - **session / weekly**: 5-hour and 7-day plan-usage bars, each with its reset time (a clock time today, dated when it's days out).
 - **⏳ forecast**: a plain-language read on when you'll hit the wall, projected from your recent burn rate: `⏳ ~34m to session limit · slow down`, or `⏳ session safe (resets first)` when the window refreshes before you'd run out. Shows only once there's enough history to be meaningful. Part of the [Guardian](#the-guardian); off with `"forecast": false`.
@@ -76,7 +88,7 @@ If anything looks wrong, `node statusline.js --doctor` diagnoses the usual suspe
 
 ## The Guardian
 
-Every other status line *tells* you the wall is coming. The Guardian snapshots your work, waits out the reset, and puts you back exactly where you were. It's opt-in and reversible, and like the rest of the toolkit it reads only the JSON and transcript Claude Code already writes: no network, no token, zero dependencies. Wire it in one command (this also installs the status line if it isn't already):
+A status line *tells* you the wall is coming. The Guardian snapshots your work, waits out the reset, and puts you back where you were. It's opt-in and reversible, and reads only the JSON and transcript Claude Code already writes. Wire it in one command (this also installs the status line if it isn't already):
 
 ```bash
 node statusline.js --install-guardian          # checkpoint + notify + keep-working
@@ -103,7 +115,7 @@ node statusline.js --keep-working on
 
 **3. Time-to-limit forecast.** The `⏳` segment described above, projected from your recent burn rate.
 
-**4. Cross-profile failover.** Each render publishes this profile's usage to a shared ledger. When you're at your limit and another profile still has headroom, the bar points there (`⤳ personal free 80%`); with `autopilotFailover: true` the watcher continues the work on that profile instead of waiting for the reset. Ledger entries older than six hours are ignored so you're never sent to a stale account.
+**4. Cross-profile failover.** With `"ledger": true` (off by default), each render publishes this profile's usage to a shared ledger. When you're at your limit and another profile still has headroom, the bar points there (`⤳ personal free 80%`); add `autopilotFailover: true` and the watcher continues the work on that profile instead of waiting for the reset. Ledger entries older than six hours are ignored so you're never sent to a stale account.
 
 **5. Compaction-proof checkpoints.** A `PreCompact` hook snapshots your work state before Claude Code compacts the context, and restores it afterward, so a compaction never quietly drops your plan.
 
@@ -113,7 +125,7 @@ node statusline.js --keep-working on
 
 ## Staying up to date
 
-Once a day, a tiny background check asks the public repo whether a newer `statusline.js` exists and, if so, shows an `⬆ v2.2.0 update` badge in the bar. **The status-line render itself makes no network calls** — it only reads a small local cache (`$CLAUDE_CONFIG_DIR/.ccbsl-update.json`) that the background check writes; the check is throttled to once every 24 hours and fails silently when you're offline or behind a proxy. So if you share this with your team, they find out about new features instead of silently drifting behind.
+Once a day, a tiny background check asks the public repo whether a newer `statusline.js` exists and, if so, shows an `⬆ v<new> update` badge in the bar. **The status-line render itself makes no network calls** — it only reads a small local cache (`$CLAUDE_CONFIG_DIR/.ccbsl-update.json`) that the background check writes; the check is throttled to once every 24 hours and fails silently when you're offline or behind a proxy. So if you share this with your team, they find out about new features instead of silently drifting behind.
 
 ```bash
 node statusline.js --update         # pull the newest version
@@ -199,7 +211,7 @@ The idea came from Hannah Stulberg's guide **"Claude Code for Everything: Your S
 
 ### What's different from the article
 
-- **No network.** The article reads plan usage from the `/api/oauth/usage` endpoint with a keychain token. This reads `rate_limits`, `context_window`, `effort`, and the mode flags from the stdin Claude Code already sends. No token, no keychain, no rate-limit calls, always fresh.
+- **No render-time network.** The article reads plan usage from the `/api/oauth/usage` endpoint with a keychain token. This reads `rate_limits`, `context_window`, `effort`, and the mode flags from the stdin Claude Code already sends. No token, no keychain, no rate-limit calls, always fresh. (The only network anywhere is the optional once-a-day update check, which runs in the background and is off with one flag.)
 - Line-wrapping that tracks a live terminal resize, and a brief git cache for large repos.
 - Extra segments: active profile, reasoning effort, fast / no-think flags, unpushed / unpulled commits, billing path, and date-aware reset times.
 - External config with an interactive editor, so nothing is hardcoded and updates don't clobber your settings.

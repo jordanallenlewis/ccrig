@@ -11,8 +11,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   It has outgrown "status line": it's the operational layer you run Claude Code from — a
   command bar, the guardian, and more to come. The single file is still `statusline.js`
   and the install/config paths are unchanged, so existing installs keep working.
-
-### Note
 - The GitLab project path is renamed to `ccrig`. GitLab keeps a redirect from the old path,
   so existing clones and the install one-liner keep working; update your remote at your
   convenience with `git remote set-url`. The `--update` shape-check accepts both the old and
