@@ -125,6 +125,20 @@ node statusline.js --whatsnew        # what changed in the version you have
 
 Trust note: over-the-wire integrity rests on HTTPS/TLS to GitLab (there's no separate code signature yet), which is why `--update` validates and backs up before it ever swaps, and never runs anything without you asking.
 
+## Running many sessions
+
+If you keep several Claude Code sessions going across worktrees and accounts, two commands help:
+
+```bash
+node statusline.js --board       # every live session at a glance (opt-in)
+node statusline.js --sessions    # recent sessions + the command to resume each
+```
+
+- **`--board`** — turn on `"sessionBoard": true` and each session publishes a small state file to a shared dir; `--board` then shows them all in one table: project, model, session/weekly usage, context, running subagents, and whether one is near or at a limit. Stale entries (older than an hour) are pruned. It's off by default because it writes outside your config dir (like the ledger); `--purge` clears it.
+- **`--sessions`** — read-only, no opt-in: lists your recent sessions newest-first with the project, size, last request, and the exact `cd … && claude --resume <id>` to pick one back up.
+
+And **`"reinjectOnCompact": true`** (or a file path) re-includes your `CLAUDE.md` — or a named rules file — after Claude Code compacts context, in case compaction dropped it. Off by default.
+
 ## Customize
 
 Three ways, easiest first.

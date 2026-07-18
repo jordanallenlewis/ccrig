@@ -1163,6 +1163,62 @@ test('update badge is suppressed by dismissal (seen), staleness, and NO_UPDATE_N
   assert.ok(!strip(render(baseInput(), { env: { ...env, NO_UPDATE_NOTIFIER: '1' } }).out).includes('⬆'), 'env opt-out');
 });
 
+// ---- cross-session board, resume-picker, compaction reinject ----
+test('sessionBoard: off by default writes nothing; on, a live render publishes state that --board shows', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const boardDir = path.join(sb.home, '.claude-rig-sessions');
+  render(baseInput({ session_id: 'b0', rate_limits: { five_hour: { used_percentage: 50 } } }), { env }); // default: off
+  assert.ok(!fs.existsSync(boardDir), 'off by default -> no board dir');
+  const script = scriptCopy(sb.dir, { sessionBoard: true });
+  render(baseInput({ session_id: 'b1', workspace: { current_dir: '/work/myproj', project_dir: '/work/myproj' }, rate_limits: { five_hour: { used_percentage: 72 } } }), { env, script });
+  assert.ok(fs.existsSync(path.join(boardDir, 'b1.json')), 'on -> board file written');
+  const r = run(['--board'], { env, script });
+  assert.match(r.out, /myproj/);
+  assert.match(r.out, /1 live session/);
+});
+
+test('--board prunes stale entries (>1h) and only lists live ones', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const boardDir = path.join(sb.home, '.claude-rig-sessions'); fs.mkdirSync(boardDir, { recursive: true });
+  fs.writeFileSync(path.join(boardDir, 'live.json'), JSON.stringify({ sid: 'live', project: 'nowproj', session: 30, ts: Date.now() }));
+  fs.writeFileSync(path.join(boardDir, 'old.json'), JSON.stringify({ sid: 'old', project: 'oldproj', session: 10, ts: Date.now() - 2 * 3600 * 1000 }));
+  const script = scriptCopy(sb.dir, { sessionBoard: true });
+  const r = run(['--board'], { env, script });
+  assert.match(r.out, /nowproj/);
+  assert.ok(!r.out.includes('oldproj'), 'stale entry not listed');
+  assert.ok(!fs.existsSync(path.join(boardDir, 'old.json')), 'stale entry pruned from disk');
+});
+
+test('--sessions lists recent transcripts with a resume command', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const proj = path.join(sb.cfg, 'projects', '-work-myproj'); fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, 'sess-xyz.jsonl'), [
+    JSON.stringify({ type: 'user', cwd: '/work/myproj', message: { role: 'user', content: 'build the thing' } }),
+  ].join('\n') + '\n');
+  const r = run(['--sessions'], { env });
+  assert.match(r.out, /myproj/);
+  assert.match(r.out, /build the thing/);
+  assert.match(r.out, /claude --resume sess-xyz/);
+  assert.match(r.out, /cd '\/work\/myproj'/);
+});
+
+test('reinjectOnCompact re-injects a rules file on a compaction SessionStart', () => {
+  const sb = sandbox();
+  const proj = path.join(sb.dir, 'proj'); fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, 'CLAUDE.md'), 'ALWAYS use tabs. Never push to main.');
+  const script = scriptCopy(sb.dir, { reinjectOnCompact: true });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const r = hookRun('session-start', { session_id: 'rc1', source: 'compact', cwd: proj }, { env, script });
+  const ctx = JSON.parse(r.out).hookSpecificOutput.additionalContext;
+  assert.match(ctx, /Never push to main/);
+  assert.match(ctx, /compacted/);
+  // on a fresh startup, nothing is injected
+  assert.strictEqual(hookRun('session-start', { session_id: 'rc1', source: 'startup', cwd: proj }, { env, script }).out.trim(), '');
+});
+
 test('--whatsnew prints a changelog section', () => {
   const r = run(['--whatsnew']);
   assert.strictEqual(r.code, 0);

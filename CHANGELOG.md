@@ -18,6 +18,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   convenience with `git remote set-url`. The `--update` shape-check accepts both the old and
   new name for one release, so any installed copy can still update across the rename.
 
+## [2.4.0] - 2026-07-18
+
+### Added
+- **Cross-session board** (`--board`): with `"sessionBoard": true`, every live render publishes
+  a light state file to a shared dir, and `--board` shows every session across your worktrees
+  and profiles at a glance — project, model, usage, context, running subagents, and whether one
+  is near/at a limit. Stale entries (>1h) are pruned; off by default (it writes outside the
+  config dir); cleared by `--purge`. The single biggest thing no other tool does for people
+  juggling many Claude Code sessions.
+- **Resume-picker** (`--sessions`): lists your recent sessions newest-first (project, size, last
+  request) with the exact `cd … && claude --resume <id>` for each — read-only, no opt-in.
+- **Rules re-injection after compaction** (`"reinjectOnCompact": true` or a file path): a
+  `SessionStart` hook re-includes your `CLAUDE.md` (or a named rules file) after Claude Code
+  compacts context, in case compaction dropped it. Off by default.
+
 ## [2.3.0] - 2026-07-18
 
 Hardening pass from ten parallel adversarial-review workflows (each a different aspect:
@@ -285,7 +300,8 @@ claude-auto-retry, unsnooze) and verified against the official docs.
   an API key means pay-per-token.
 - `install.sh` installer and CI (`--selftest` + shellcheck).
 
-[Unreleased]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v2.3.0...HEAD
+[Unreleased]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v2.4.0...HEAD
+[2.4.0]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v2.3.0...v2.4.0
 [2.3.0]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v2.2.0...v2.3.0
 [2.2.0]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v2.1.0...v2.2.0
 [2.1.0]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v2.0.0...v2.1.0
