@@ -514,13 +514,14 @@ function downgradeSeg(input, live) {
     if (live && tier > top) { try { fs.mkdirSync(guardDir(), { recursive: true }); fs.writeFileSync(f, JSON.stringify({ tier, name: cur })); sweepGuardDir(); } catch {} }
     return '';
   }
-  // A drop below the ceiling. Only shout when usage is ELEVATED — that's when Claude Code
-  // silently downgrades; a low-usage change is almost always a deliberate /model switch.
+  // A drop below the ceiling. Only surface when usage is ELEVATED — that's when Claude Code
+  // auto-downgrades. But a deliberate /model switch at high usage looks identical, so this is
+  // a low-key yellow heads-up ("you're on a lower tier"), not a bold-red alarm.
   const rl = input.rate_limits || {};
   const pctOf = (o) => (o && typeof o.used_percentage === 'number') ? o.used_percentage : 0;
   if (Math.max(pctOf(rl.five_hour), pctOf(rl.seven_day)) < 50) return '';
   const shortName = (s) => s.split(/[\s(]/)[0];
-  return cBold(K.red, '⬇ ' + shortName(cur)) + c(K.dim, ' (was ' + shortName(topName) + ')');
+  return c(K.yellow, '⬇ ' + shortName(cur)) + c(K.dim, ' (was ' + shortName(topName) + ')');
 }
 
 // --- checkpoint: a rich, machine-readable snapshot of exactly where work stands.
@@ -723,10 +724,13 @@ function recordSample(sid, sPct, wPct) {
       }
     } catch {}
   }
-  // throttle: at most one sample per 12s so the file and the slope stay meaningful
+  // a window reset (usage drops sharply) invalidates the old slope: start the buffer fresh
   try {
     const last = lines.length ? JSON.parse(lines[lines.length - 1]) : null;
-    if (last && now - last.t < 12) return;
+    if (last) {
+      if ((sPct != null && typeof last.s === 'number' && sPct < last.s - 15) || (wPct != null && typeof last.w === 'number' && wPct < last.w - 15)) lines = [];
+      else if (now - last.t < 12) return; // throttle: at most one sample per 12s
+    }
   } catch {}
   lines.push(JSON.stringify({ t: now, s: sPct == null ? null : Math.round(sPct * 10) / 10, w: wPct == null ? null : Math.round(wPct * 10) / 10 }));
   if (lines.length > 40) lines = lines.slice(-40);               // rolling window
@@ -1018,7 +1022,7 @@ function isOurGitClone() {
   try {
     g(['rev-parse', '--is-inside-work-tree']);
     g(['ls-files', '--error-unmatch', path.basename(__filename)]);         // our script is version-controlled here
-    return /ccrig|claude-code-statusline/.test(g(['remote', '-v'])); // and the remote is this project
+    return /ccrig|claude-code-(better-)?status-line/.test(g(['remote', '-v'])); // remote is this project (any name it's used)
   } catch { return false; }
 }
 // --update: pull the newest version. our git clone -> git pull; standalone copy -> download,
@@ -1099,7 +1103,7 @@ function runWhatsnew() {
 // context %: prefer Claude Code's own number, fall back to the transcript tail
 function contextPct(input) {
   const cw = input.context_window;
-  if (cw && typeof cw.used_percentage === 'number') return Math.round(cw.used_percentage);
+  if (cw && typeof cw.used_percentage === 'number') return Math.min(100, Math.max(0, Math.round(cw.used_percentage)));
   const tp = input.transcript_path;
   if (!tp) return null;
   try {
@@ -1241,7 +1245,8 @@ function collectSegments(input, width, gitOverride) {
   const cwd = (input.workspace && input.workspace.current_dir) || input.cwd || process.cwd();
   const projectDir = (input.workspace && input.workspace.project_dir) || cwd;
   let folder = path.basename(projectDir || cwd);
-  if (cwd && projectDir && cwd !== projectDir && cwd.startsWith(projectDir)) folder += cwd.slice(projectDir.length);
+  // true-ancestor only: cwd must continue with a path separator, so /foo isn't treated as a parent of /foobar
+  if (cwd && projectDir && cwd !== projectDir && cwd.startsWith(projectDir) && (cwd[projectDir.length] === '/' || cwd[projectDir.length] === '\\')) folder += cwd.slice(projectDir.length);
   out.folder = `\u{1F4C2} ${c(K.folder, truncFolder(folder, width - 4))}`;
 
   let model = (input.model && input.model.display_name) || (input.model && input.model.id) || 'Claude';
@@ -1465,6 +1470,11 @@ function runHookSessionStart(input) {
   if (sid && SID_RE.test(sid)) {
     const cp = readCheckpoint(sid);
     if (cp) {
+      // a HUMAN resume supersedes any armed watcher for this session — stop it so it can't
+      // also relaunch later. (Not when we ARE the watcher's own relaunch: CCBSL_UNATTENDED.)
+      if (!process.env.CCBSL_UNATTENDED) {
+        try { const pid = parseInt(fs.readFileSync(watchPidFile(sid), 'utf8'), 10) || 0; if (isOurWatcher(pid, sid)) process.kill(pid); } catch {}
+      }
       parts.push(resumePromptFromCheckpoint(cp, false, !!process.env.CCBSL_UNATTENDED)); // attended unless the watcher relaunched us
       clearSessionGuardState(sid); // consume once + re-arm cleanly for a later limit
     }
@@ -2047,7 +2057,7 @@ function runDoctor() {
 }
 
 // one mode at a time: silently ignoring the second flag misleads the user
-const EXCLUSIVE = ['--install', '--install-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--config', '--demo', '--selftest'];
+const EXCLUSIVE = ['--install', '--install-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--config', '--demo', '--selftest', '--mode', '--autopilot', '--keep-working'];
 const picked = EXCLUSIVE.filter((m) => argv.includes(m));
 if (picked.length > 1) {
   process.stdout.write('pick one of: ' + picked.join(', ') + '\n');
