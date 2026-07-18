@@ -1,21 +1,21 @@
 # Rig
 
-**Your Claude Code rig.** The operational layer that makes [Claude Code](https://claude.com/claude-code) pleasant to run all day — a live command bar, an opt-in guardian that picks your work back up after a usage limit, and more as it grows.
+**Your Claude Code rig.** The operational layer that makes [Claude Code](https://claude.com/claude-code) pleasant to run all day: a live command bar, an opt-in guardian that picks your work back up after a usage limit, and more as it grows.
 
 The pieces so far:
 
 1. **A status line** that turns the bar at the bottom of your terminal into a command center: active profile, model, reasoning effort, context-window usage, git state, billing path, and your plan's rate-limit windows.
-2. **The Guardian** (opt-in): the part that *acts* on your limits instead of just showing them. It keeps the session working while there's work left, and when you do hit a limit it snapshots your exact work state and can pick the session back up automatically the moment the window resets — continuing the next step, not redoing finished work. See [The Guardian](#the-guardian).
+2. **The Guardian** (opt-in): the part that *acts* on your limits instead of just showing them. It keeps the session working while there's work left, and when you do hit a limit it snapshots your exact work state and can pick the session back up automatically the moment the window resets. It carries on at the next step instead of redoing finished work. See [The Guardian](#the-guardian).
 3. **A cross-session board and resume-picker** (`--board`, `--sessions`) for keeping track of many sessions across worktrees and accounts, plus **a profile switcher** for running multiple Claude accounts side by side.
 
-Everything the status line shows is read from the JSON Claude Code already hands it on stdin, so **the render makes no network calls** — no API token, no keychain reads, nothing leaves your machine. The one exception is an optional once-a-day update check that runs in the background (a single request to the public repo so you learn about new versions; off with `"updateCheck": false`). It's a single Node file with zero dependencies (Node ships with Claude Code), and your settings live in a separate config file so updates never overwrite them.
+Everything the status line shows is read from the JSON Claude Code already hands it on stdin, so **the render makes no network calls**. No API token, no keychain reads, nothing leaves your machine. The one exception is an optional once-a-day update check that runs in the background (a single request to the public repo so you learn about new versions; off with `"updateCheck": false`). It's a single Node file with zero dependencies (Node ships with Claude Code), and your settings live in a separate config file so updates never overwrite them.
 
 ```
 👤 work │ 📂 my-project │ ★ Opus 4.8 [1m] │ ⚡high │ ctx ████░░░░░░ 42% │ 🌿 main ●3 ↑1 │ 💳 sub
 session █████░░░ 63% ↺8:53a │ weekly ███████░ 88% ↺7/22 6:53a
 ```
 
-The bars are color-coded (green, then yellow, then red) and the line wraps to your terminal width. And when a limit is coming — which is where Rig earns its spot — it forecasts the wall and, if you've enabled the guardian, checkpoints your work and arms the pickup:
+The bars are color-coded (green, then yellow, then red) and the line wraps to your terminal width. And when a limit is coming (this is where Rig earns its spot), it forecasts the wall and, if you've enabled the guardian, checkpoints your work and arms the pickup:
 
 ```
 👤 work │ 📂 my-project │ ★ Opus 4.8 [1m] │ ⚡high │ ctx ██████░░░░ 61% │ 🌿 main ●2
@@ -40,7 +40,7 @@ One line on Windows (PowerShell):
 mkdir -Force $HOME\.claude | Out-Null; iwr https://gitlab.com/jordanallenlewis/ccrig/-/raw/main/statusline.js -OutFile $HOME\.claude\statusline.js; node $HOME\.claude\statusline.js --install
 ```
 
-The installer wires your `~/.claude/settings.json` (or the active `CLAUDE_CONFIG_DIR` profile, if you run several: re-run it per profile), backing the file up first. It uses the exact node binary it was run with and is safe to re-run. If `node` isn't on your PATH, run the same commands with an absolute path to any Node 18+ binary. Restart Claude Code once; after that, edits apply live. Run `node statusline.js --help` for the full flag list.
+The installer wires every Claude profile on your machine (your `~/.claude` and any `~/.claude-<name>`), backs up each `settings.json` first, and prints which profiles it touched. Run more than one account and they all get the bar in one shot. Want just the active profile? Add `--this-profile`. It uses the exact node binary it was run with and is safe to re-run. If `node` isn't on your PATH, run the same commands with an absolute path to any Node 18+ binary. Restart Claude Code once. After that, edits apply live. Run `node statusline.js --help` for the full flag list.
 
 Prefer a clone? It keeps you on `git pull` updates and includes the profile switcher:
 
@@ -72,7 +72,7 @@ If anything looks wrong, `node statusline.js --doctor` diagnoses the usual suspe
 - **⬆ update**: an "update available" badge when a newer version exists (see [Staying up to date](#staying-up-to-date)). Shown only when there's one to pull.
 - **📂 folder**: the current project, as a repo-relative path.
 - **★ model**: the model, with a `[1m]` tag on a 1M-context model.
-- **⬇ downgrade**: a yellow heads-up if the model tier drops mid-session (Opus → Sonnet), which Claude Code does silently as you near the Opus cap — shown only when usage is elevated.
+- **⬇ downgrade**: a yellow heads-up if the model tier drops mid-session (Opus → Sonnet), which Claude Code does silently as you near the Opus cap. Shown only when usage is elevated.
 - **⚡ effort**: reasoning effort (low through max).
 - **flags**: `fast` when Fast mode is on, `no-think` when extended thinking is off.
 - **ctx**: a context-window bar. Green under 50%, yellow under 70%, red above.
@@ -99,7 +99,7 @@ Restart Claude Code once so the hooks load. Remove it any time with `node status
 
 It has five parts:
 
-**1. Auto-pause and auto-resume.** At critical usage (98%), once you've enabled the guardian, the status line writes a checkpoint: your open and finished todos, your last request, and the git HEAD + dirty state. With `autopilot: "resume"` a small detached watcher then waits for the window to reset (polling the wall clock, so it survives your laptop sleeping and week-long waits) and relaunches the exact session with `claude --resume <id> -p`, handing it the checkpoint so it continues the next step and does not repeat finished work. A `SessionStart` hook does the same restoration if you resume by hand. `autopilot: "notify"` (what `--install-guardian` sets) checkpoints and sends a desktop ping but does not relaunch. The shipped default is `"off"`, so a plain `--install` never checkpoints or spawns a notification — only the guardian does.
+**1. Auto-pause and auto-resume.** At critical usage (98%), once you've enabled the guardian, the status line writes a checkpoint: your open and finished todos, your last request, and the git HEAD + dirty state. With `autopilot: "resume"` a small detached watcher then waits for the window to reset (polling the wall clock, so it survives your laptop sleeping and week-long waits) and relaunches the exact session with `claude --resume <id> -p`, handing it the checkpoint so it continues the next step and does not repeat finished work. A `SessionStart` hook does the same restoration if you resume by hand. `autopilot: "notify"` (what `--install-guardian` sets) checkpoints and sends a desktop ping but does not relaunch. The shipped default is `"off"`, so a plain `--install` never checkpoints or spawns a notification. Only the guardian does.
 
 ```
 node statusline.js --autopilot resume     # full hands-free pickup
@@ -121,11 +121,11 @@ node statusline.js --keep-working on
 
 `node statusline.js --doctor` reports which hooks are wired and, in `resume` mode, whether `claude` is reachable on `PATH` for the relaunch. Every knob (`autopilot`, `keepWorking`, `autopilotBuffer`, `autopilotWeekly`, `autopilotFailover`, `forecast`, `ledger`, `claudeBin`) lives in `statusline.config.json`.
 
-**What it can and can't do, honestly.** Auto-resume needs a Claude.ai Pro/Max plan — Claude Code only sends rate-limit data to subscribers — and a machine that's awake when the window resets. Claude Code gives no way to reach into your open terminal session, so auto-resume launches a *fresh headless* run of the session and reconciles the working tree via the git snapshot; nothing is lost because the transcript is continuous, and the checkpoint keeps it from redoing finished work. Weekly (7-day) auto-relaunch is off by default (`autopilotWeekly`), because a watcher sleeping for days across reboots is less reliable than the checkpoint + `SessionStart` restore you get on a manual resume. If you're on an API key rather than a subscription, the forecast and auto-resume have no usage data to work from; the rest of the status line is unaffected.
+**What it can and can't do, honestly.** Auto-resume needs a Claude.ai Pro/Max plan (Claude Code only sends rate-limit data to subscribers) and a machine that's awake when the window resets. Claude Code gives no way to reach into your open terminal session, so auto-resume launches a *fresh headless* run of the session and reconciles the working tree via the git snapshot. Nothing is lost because the transcript is continuous, and the checkpoint keeps it from redoing finished work. Weekly (7-day) auto-relaunch is off by default (`autopilotWeekly`), because a watcher sleeping for days across reboots is less reliable than the checkpoint + `SessionStart` restore you get on a manual resume. If you're on an API key rather than a subscription, the forecast and auto-resume have no usage data to work from. The rest of the status line is unaffected.
 
 ## Staying up to date
 
-Once a day, a tiny background check asks the public repo whether a newer `statusline.js` exists and, if so, shows an `⬆ v<new> update` badge in the bar. **The status-line render itself makes no network calls** — it only reads a small local cache (`$CLAUDE_CONFIG_DIR/.ccbsl-update.json`) that the background check writes; the check is throttled to once every 24 hours and fails silently when you're offline or behind a proxy. So if you share this with your team, they find out about new features instead of silently drifting behind.
+Once a day, a tiny background check asks the public repo whether a newer `statusline.js` exists and, if so, shows an `⬆ v<new> update` badge in the bar. **The status-line render itself makes no network calls**. It only reads a small local cache (`$CLAUDE_CONFIG_DIR/.ccbsl-update.json`) that the background check writes. The check is throttled to once every 24 hours and fails silently when you're offline or behind a proxy. So if you share this with your team, they find out about new features instead of silently drifting behind.
 
 ```bash
 node statusline.js --update         # pull the newest version
@@ -133,7 +133,7 @@ node statusline.js --check-update    # check right now
 node statusline.js --whatsnew        # what changed in the version you have
 ```
 
-`--update` does a `git pull` if you cloned, or for a downloaded copy it fetches the new file, **validates it** (`node --check` plus a shape check that it really is `statusline.js`), **backs up** your current file, and does an **atomic swap** — rolling back untouched if anything fails. It refuses to downgrade (unless you pass `--force`) and refuses anything that doesn't look like the real script (so a proxy login page can't overwrite your file). It honors `HTTPS_PROXY` / `NO_PROXY` and a corporate root CA. Turn the whole thing off with `"updateCheck": false` (or `NO_UPDATE_NOTIFIER=1`).
+`--update` does a `git pull` if you cloned, or for a downloaded copy it fetches the new file, **validates it** (`node --check` plus a shape check that it really is `statusline.js`), **backs up** your current file, and does an **atomic swap**, rolling back untouched if anything fails. It refuses to downgrade (unless you pass `--force`) and refuses anything that doesn't look like the real script (so a proxy login page can't overwrite your file). It honors `HTTPS_PROXY` / `NO_PROXY` and a corporate root CA. Turn the whole thing off with `"updateCheck": false` (or `NO_UPDATE_NOTIFIER=1`).
 
 Trust note: over-the-wire integrity rests on HTTPS/TLS to GitLab (there's no separate code signature yet), which is why `--update` validates and backs up before it ever swaps, and never runs anything without you asking.
 
@@ -146,10 +146,10 @@ node statusline.js --board       # every live session at a glance (opt-in)
 node statusline.js --sessions    # recent sessions + the command to resume each
 ```
 
-- **`--board`** — turn on `"sessionBoard": true` and each session publishes a small state file to a shared dir; `--board` then shows them all in one table: project, model, session/weekly usage, context, running subagents, and whether one is near or at a limit. Stale entries (older than an hour) are pruned. It's off by default because it writes outside your config dir (like the ledger); `--purge` clears it.
-- **`--sessions`** — read-only, no opt-in: lists your recent sessions newest-first with the project, size, last request, and the exact `cd … && claude --resume <id>` to pick one back up.
+- **`--board`**: turn on `"sessionBoard": true` and each session publishes a small state file to a shared dir. `--board` then shows them all in one table: project, model, session/weekly usage, context, running subagents, and whether one is near or at a limit. Stale entries (older than an hour) are pruned. It's off by default because it writes outside your config dir (like the ledger). `--purge` clears it.
+- **`--sessions`**: read-only, no opt-in. Lists your recent sessions newest-first with the project, size, last request, and the exact `cd … && claude --resume <id>` to pick one back up.
 
-And **`"reinjectOnCompact": true`** (or a file path) re-includes your `CLAUDE.md` — or a named rules file — after Claude Code compacts context, in case compaction dropped it. Off by default.
+And **`"reinjectOnCompact": true`** (or a file path) re-includes your `CLAUDE.md` (or a named rules file) after Claude Code compacts context, in case compaction dropped it. Off by default.
 
 ## Customize
 

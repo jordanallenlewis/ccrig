@@ -6,10 +6,16 @@ All notable changes to **Rig** are documented here. The format follows
 
 **Versioning policy:** `MAJOR.MINOR.PATCH`. **MAJOR** for a breaking change to the
 install, config, or documented behavior; **MINOR** for a backward-compatible feature;
-**PATCH** for a backward-compatible fix. Every entry below is a real, tagged release —
-in-progress work lives under `[Unreleased]` until it's cut.
+**PATCH** for a backward-compatible fix. Every entry below is a real, tagged release.
+In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
+
+### Changed
+- Rewrote the docs (README, SECURITY, CONTRIBUTING, changelog prose) and the CLI's own output
+  in a plainer, more human voice: dropped every em-dash and tightened the phrasing. No behavior
+  change. Also corrected the README install section, which still claimed you had to re-run
+  `--install` per profile (`1.0.1` made one run cover them all).
 
 ## [1.0.1] - 2026-07-18
 
@@ -26,7 +32,7 @@ in-progress work lives under `[Unreleased]` until it's cut.
 
 ## [1.0.0] - 2026-07-18
 
-The first public release of **Rig** — the operational layer you run Claude Code from.
+The first public release of **Rig**: the operational layer you run Claude Code from.
 
 Rig began life as "Claude Code Better Status Line," a single-file status line that read
 [Claude Code](https://claude.com/claude-code)'s own stdin. It grew into a full rig: a live
@@ -55,7 +61,7 @@ everything that touches your machine is opt-in, backed up, and reversible.
 - **Keep-working.** A `Stop` hook keeps the session going while todos remain (loop-guarded,
   yields to a real question).
 - **Time-to-limit forecast** in the bar (`⏳ ~34m to session limit`), from a rolling burn rate.
-- **Cross-profile failover** (opt-in `ledger: true`) — continue on an account with headroom.
+- **Cross-profile failover** (opt-in `ledger: true`): continue on an account with headroom.
 - **Compaction-proof checkpoints** (`PreCompact`), and optional `reinjectOnCompact` to
   re-include your `CLAUDE.md` after a compaction.
 - **Subagent awareness** (`🤖 N agents`) and a **silent-downgrade alarm** (`⬇`, Opus→Sonnet).
@@ -81,12 +87,12 @@ everything that touches your machine is opt-in, backed up, and reversible.
 - Zero-network render, local-only reads, opt-in guardian, backups before every write, full
   reversibility. `SECURITY.md` carries the threat model and on-disk data map. Hardened by
   many adversarial-review passes; **unit + regression suites (119 tests), CI-enforced.**
-  Unofficial — not affiliated with Anthropic. MIT.
+  Unofficial. Not affiliated with Anthropic. MIT.
 
 ### Credit
 - Kickstarted by Hannah Stulberg's guide, *"Claude Code for Everything: Your Status Line Is
-  Empty (Let's Fix That)"* — the command-center concept, the context-bar thresholds, the
-  folder/model/git/usage segments, and the portable Node-script approach. A comment there
+  Empty (Let's Fix That)"*. The command-center concept, the context-bar thresholds, the
+  folder/model/git/usage segments, and the portable Node-script approach all came from there. A comment on it
   (by AstroHan) noted the plan-usage numbers are already in the status line's stdin, which is
   what let this drop the API call the guide used.
 
