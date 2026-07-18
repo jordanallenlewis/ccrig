@@ -1161,7 +1161,7 @@ test('--update refuses to downgrade without --force, applies with it', () => {
   const sb = sandbox();
   const inst = path.join(sb.dir, 'inst'); fs.mkdirSync(inst, { recursive: true });
   const instScript = path.join(inst, 'statusline.js'); fs.copyFileSync(SCRIPT, instScript);
-  const remote = fakeRemote(path.join(sb.dir, 'old'), '1.0.0');
+  const remote = fakeRemote(path.join(sb.dir, 'old'), '0.9.0'); // genuinely older than the installed VERSION
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_UPDATE_BASE: remote };
   const before = fs.readFileSync(instScript, 'utf8');
   const r = run(['--update'], { env, script: instScript });
@@ -1170,7 +1170,7 @@ test('--update refuses to downgrade without --force, applies with it', () => {
   assert.strictEqual(fs.readFileSync(instScript, 'utf8'), before, 'not downgraded');
   const f = run(['--update', '--force'], { env, script: instScript });
   assert.strictEqual(f.code, 0);
-  assert.match(fs.readFileSync(instScript, 'utf8'), /const VERSION = '1\.0\.0'/, 'force downgrades');
+  assert.match(fs.readFileSync(instScript, 'utf8'), /const VERSION = '0\.9\.0'/, 'force downgrades');
 });
 
 test('update badge is suppressed by dismissal (seen), staleness, and NO_UPDATE_NOTIFIER', () => {
