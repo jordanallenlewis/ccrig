@@ -11,6 +11,19 @@ in-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-07-18
+
+### Fixed
+- `--install` now wires **every** Claude profile on your machine, not only the active one.
+  If you run more than one profile (say a work `~/.claude` and a personal `~/.claude-personal`),
+  a single `--install` used to land on whichever profile `CLAUDE_CONFIG_DIR` happened to point at
+  and quietly skip the others. So you'd fire up the second profile and the bar just wasn't there.
+  Now install finds all of them, wires each, and prints exactly which ones it touched. The same
+  goes for `--install-guardian`, `--uninstall`, and `--uninstall-guardian`. Want the old behavior?
+  Add `--this-profile` to scope any of them to the active profile. Rig's own state folders
+  (`.claude-usage-ledger`, `.claude-rig-sessions`) are never mistaken for a profile, and one
+  profile with a broken `settings.json` no longer blocks the rest.
+
 ## [1.0.0] - 2026-07-18
 
 The first public release of **Rig** — the operational layer you run Claude Code from.
@@ -77,5 +90,6 @@ everything that touches your machine is opt-in, backed up, and reversible.
   (by AstroHan) noted the plan-usage numbers are already in the status line's stdin, which is
   what let this drop the API call the guide used.
 
-[Unreleased]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.0.0...HEAD
+[Unreleased]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.0.1...HEAD
+[1.0.1]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.0.0...v1.0.1
 [1.0.0]: https://gitlab.com/jordanallenlewis/ccrig/-/tags/v1.0.0

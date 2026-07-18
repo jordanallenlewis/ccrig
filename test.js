@@ -379,6 +379,53 @@ test('--install wires a fresh profile and is idempotent with a backup', () => {
   assert.ok(fs.existsSync(sp + '.bak'), 'backup written on re-run');
 });
 
+test('REGRESSION: --install wires EVERY profile, not just the active one (work + personal)', () => {
+  const sb = sandbox(); // creates ~/.claude (the default / "work" profile)
+  const personal = path.join(sb.home, '.claude-personal');
+  fs.mkdirSync(personal, { recursive: true });
+  // install pointed at the DEFAULT profile only — personal must still get wired
+  const r = run(['--install'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
+  assert.strictEqual(r.code, 0);
+  for (const dir of [sb.cfg, personal]) {
+    const j = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
+    assert.ok(j.statusLine && j.statusLine.command.includes(SCRIPT), 'statusLine wired in ' + dir);
+    assert.ok(fs.existsSync(path.join(dir, 'commands', 'statusline-config.md')), 'slash command in ' + dir);
+  }
+  assert.match(r.out, /personal/, 'reports the personal profile by name');
+  assert.match(r.out, /2 profile\(s\) wired/);
+});
+
+test('--install --this-profile scopes to the active profile only', () => {
+  const sb = sandbox();
+  const personal = path.join(sb.home, '.claude-personal');
+  fs.mkdirSync(personal, { recursive: true });
+  run(['--install', '--this-profile'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
+  assert.ok(fs.existsSync(path.join(sb.cfg, 'settings.json')), 'active profile wired');
+  assert.ok(!fs.existsSync(path.join(personal, 'settings.json')), 'other profile untouched');
+});
+
+test('REGRESSION: --install never treats our own state dirs as profiles', () => {
+  const sb = sandbox();
+  for (const d of ['.claude-usage-ledger', '.claude-rig-sessions']) fs.mkdirSync(path.join(sb.home, d), { recursive: true });
+  const r = run(['--install'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
+  assert.strictEqual(r.code, 0);
+  for (const d of ['.claude-usage-ledger', '.claude-rig-sessions']) {
+    assert.ok(!fs.existsSync(path.join(sb.home, d, 'settings.json')), d + ' must not be wired');
+  }
+});
+
+test('--install: one broken profile is skipped, the rest still get wired', () => {
+  const sb = sandbox();
+  const personal = path.join(sb.home, '.claude-personal');
+  fs.mkdirSync(personal, { recursive: true });
+  fs.writeFileSync(path.join(personal, 'settings.json'), '{broken');
+  const r = run(['--install'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
+  assert.strictEqual(r.code, 0, 'still succeeds for the good profile');
+  assert.ok(JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8')).statusLine, 'default wired');
+  assert.strictEqual(fs.readFileSync(path.join(personal, 'settings.json'), 'utf8'), '{broken', 'corrupt one not clobbered');
+  assert.match(r.out, /skipped personal/);
+});
+
 test('--install preserves unrelated settings keys', () => {
   const sb = sandbox();
   fs.writeFileSync(path.join(sb.cfg, 'settings.json'), JSON.stringify({ model: 'opus', hooks: { a: 1 } }));
@@ -1051,6 +1098,26 @@ test('--uninstall removes both the status line and guardian hooks', () => {
   const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
   assert.strictEqual(j.statusLine, undefined);
   assert.ok(!j.hooks || !j.hooks.Stop);
+});
+
+test('REGRESSION: --install-guardian and --uninstall span every profile', () => {
+  const sb = sandbox();
+  const personal = path.join(sb.home, '.claude-personal');
+  fs.mkdirSync(personal, { recursive: true });
+  const script = scriptCopy(sb.dir);
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  run(['--install-guardian'], { env, script });
+  for (const dir of [sb.cfg, personal]) {
+    const j = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
+    assert.ok(j.hooks && Array.isArray(j.hooks.Stop), 'guardian Stop hook wired in ' + dir);
+  }
+  const u = run(['--uninstall'], { env, script });
+  assert.strictEqual(u.code, 0);
+  for (const dir of [sb.cfg, personal]) {
+    const j = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
+    assert.strictEqual(j.statusLine, undefined, 'status line gone from ' + dir);
+    assert.ok(!j.hooks || !j.hooks.Stop, 'guardian gone from ' + dir);
+  }
 });
 
 test('--autopilot and --keep-working setters write config and reject junk', () => {
