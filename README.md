@@ -1,9 +1,11 @@
-# Claude Code Better Status Line
+# Rig
 
-Claude Code Better Status Line is a small toolkit for [Claude Code](https://claude.com/claude-code):
+**Your Claude Code rig.** The operational layer that makes [Claude Code](https://claude.com/claude-code) pleasant to run all day — a live command bar, an opt-in guardian that never lets a limit lose your work, and more as it grows.
+
+Today it's three things:
 
 1. **A status line** that turns the bar at the bottom of your terminal into a command center: active profile, model, reasoning effort, context-window usage, git state, billing path, and your plan's rate-limit windows.
-2. **The Guardian** (opt-in): the first status line that *acts* on your limits instead of just showing them. It keeps the session working while there's work left, and when you do hit a limit it snapshots your exact work state and can pick the session back up automatically the moment the window resets, losing nothing and repeating nothing. See [The Guardian](#the-guardian).
+2. **The Guardian** (opt-in): the part that *acts* on your limits instead of just showing them. It keeps the session working while there's work left, and when you do hit a limit it snapshots your exact work state and can pick the session back up automatically the moment the window resets, losing nothing and repeating nothing. See [The Guardian](#the-guardian).
 3. **A profile switcher** for running multiple Claude accounts side by side.
 
 Everything the status line shows is read from the JSON Claude Code already hands it on stdin, so **the render makes no network calls** — no API token, no keychain reads. The one exception is an optional once-a-day update check (a single request to the public repo so you learn about new versions; turn it off with `"updateCheck": false`), and it runs in the background — the render itself never touches the network. It's a single Node file with zero dependencies (Node ships with Claude Code), and your settings live in a separate config file so updates never overwrite them. Everything reads from local files; nothing you do ever leaves your machine.
@@ -22,13 +24,13 @@ The bars are color-coded (green, then yellow, then red) and the line wraps to yo
 One line on macOS / Linux:
 
 ```bash
-mkdir -p ~/.claude && curl -fsSL https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/raw/main/statusline.js -o ~/.claude/statusline.js && node ~/.claude/statusline.js --install
+mkdir -p ~/.claude && curl -fsSL https://gitlab.com/jordanallenlewis/ccrig/-/raw/main/statusline.js -o ~/.claude/statusline.js && node ~/.claude/statusline.js --install
 ```
 
 One line on Windows (PowerShell):
 
 ```powershell
-mkdir -Force $HOME\.claude | Out-Null; iwr https://gitlab.com/jordanallenlewis/claude-code-better-status-line/-/raw/main/statusline.js -OutFile $HOME\.claude\statusline.js; node $HOME\.claude\statusline.js --install
+mkdir -Force $HOME\.claude | Out-Null; iwr https://gitlab.com/jordanallenlewis/ccrig/-/raw/main/statusline.js -OutFile $HOME\.claude\statusline.js; node $HOME\.claude\statusline.js --install
 ```
 
 The installer wires your `~/.claude/settings.json` (or the active `CLAUDE_CONFIG_DIR` profile, if you run several: re-run it per profile), backing the file up first. It uses the exact node binary it was run with and is safe to re-run. If `node` isn't on your PATH, run the same commands with an absolute path to any Node 18+ binary. Restart Claude Code once; after that, edits apply live. Run `node statusline.js --help` for the full flag list.
@@ -36,8 +38,8 @@ The installer wires your `~/.claude/settings.json` (or the active `CLAUDE_CONFIG
 Prefer a clone? It keeps you on `git pull` updates and includes the profile switcher:
 
 ```bash
-git clone https://gitlab.com/jordanallenlewis/claude-code-better-status-line.git
-cd claude-code-better-status-line
+git clone https://gitlab.com/jordanallenlewis/ccrig.git
+cd ccrig
 ./install.sh        # or: node statusline.js --install
 ```
 
@@ -157,7 +159,7 @@ A profile is an isolated `CLAUDE_CONFIG_DIR` with its own login, settings, and h
 
 ```bash
 # in ~/.zshrc or ~/.bashrc
-source /path/to/claude-code-better-status-line/claude-profiles.sh
+source /path/to/ccrig/claude-profiles.sh
 ```
 
 Then:
