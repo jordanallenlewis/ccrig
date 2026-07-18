@@ -3,9 +3,10 @@
 Claude Code Better Status Line is a small toolkit for [Claude Code](https://claude.com/claude-code):
 
 1. **A status line** that turns the bar at the bottom of your terminal into a command center: active profile, model, reasoning effort, context-window usage, git state, billing path, and your plan's rate-limit windows.
-2. **A profile switcher** for running multiple Claude accounts side by side.
+2. **The Guardian** (opt-in): the first status line that *acts* on your limits instead of just showing them. It keeps the session working while there's work left, and when you do hit a limit it snapshots your exact work state and can pick the session back up automatically the moment the window resets, losing nothing and repeating nothing. See [The Guardian](#the-guardian).
+3. **A profile switcher** for running multiple Claude accounts side by side.
 
-Everything the status line shows is read from the JSON Claude Code already hands it on stdin, so there are no network calls, no API token, and no keychain reads. It's a single Node file with zero dependencies (Node ships with Claude Code), and your settings live in a separate config file so updates never overwrite them.
+Everything the status line shows is read from the JSON Claude Code already hands it on stdin, so **the render makes no network calls** — no API token, no keychain reads. The one exception is an optional once-a-day update check (a single request to the public repo so you learn about new versions; turn it off with `"updateCheck": false`), and it runs in the background — the render itself never touches the network. It's a single Node file with zero dependencies (Node ships with Claude Code), and your settings live in a separate config file so updates never overwrite them. Everything reads from local files; nothing you do ever leaves your machine.
 
 ```
 👤 work │ 📂 my-project │ ★ Opus 4.8 [1m] │ ⚡high │ ctx ████░░░░░░ 42% │ 🌿 main ●3 ↑1 │ 💳 sub
@@ -65,10 +66,62 @@ If anything looks wrong, `node statusline.js --doctor` diagnoses the usual suspe
 - **🌿 git**: branch, uncommitted count, unpushed `↑` and unpulled `↓` vs upstream.
 - **💳 billing**: `sub` for a Claude.ai subscription, `api` for pay-per-token. Claude Code sends rate-limit data only to subscribers, which is how this is detected.
 - **session / weekly**: 5-hour and 7-day plan-usage bars, each with its reset time (a clock time today, dated when it's days out).
-- **⚠ near-limit hint**: once session or weekly usage crosses the warn threshold (90% by default), the bar turns bold red and a hint shows that your work is auto-saved and how to pick it back up (`claude --continue`).
-- **resume tickets**: at critical usage (98% by default) it also saves `resume-tickets/<session>.md` in your Claude config dir, holding the project path and the exact `claude --resume <session-id>` command. Claude Code already saves the transcript continuously, so nothing is lost at a limit; the ticket is for days later, after a weekly reset, when `claude --continue` would resume the wrong (a newer) session. Turn off with `"resumeTickets": false`.
+- **⏳ forecast**: a plain-language read on when you'll hit the wall, projected from your recent burn rate: `⏳ ~34m to session limit · slow down`, or `⏳ session safe (resets first)` when the window refreshes before you'd run out. Shows only once there's enough history to be meaningful. Part of the [Guardian](#the-guardian); off with `"forecast": false`.
+- **⚠ near-limit hint**: once session or weekly usage crosses the warn threshold (90% by default), the bar turns bold red and a hint shows that your work is auto-saved and how to pick it back up (`claude --continue`). If another profile still has headroom, it points there too (`⤳ personal free 80%`).
+- **resume tickets**: at critical usage (98% by default) it also saves `resume-tickets/<session>.md` in your Claude config dir, holding the project path and the exact `claude --resume <session-id>` command. Claude Code already saves the transcript continuously, so nothing is lost at a limit; the ticket is for days later, after a weekly reset, when `claude --continue` would resume the wrong (a newer) session. Turn off with `"resumeTickets": false`. For hands-free pickup, see [The Guardian](#the-guardian).
 - **[CAVEMAN]**: the mode badge for the third-party caveman plugin, shown only if you use that plugin; everyone else never sees it.
 - **cost / session name**: session spend and the session's title. Off by default.
+
+## The Guardian
+
+Every other status line *tells* you the wall is coming. The Guardian snapshots your work, waits out the reset, and puts you back exactly where you were. It's opt-in and reversible, and like the rest of the toolkit it reads only the JSON and transcript Claude Code already writes: no network, no token, zero dependencies. Wire it in one command (this also installs the status line if it isn't already):
+
+```bash
+node statusline.js --install-guardian          # checkpoint + notify + keep-working
+node statusline.js --install-guardian --auto    # same, plus hands-free auto-resume
+```
+
+Restart Claude Code once so the hooks load. Remove it any time with `node statusline.js --uninstall-guardian` (the status line stays). It wires three Claude Code hooks (`Stop`, `SessionStart`, `PreCompact`) into your `settings.json`, alongside any hooks you already have.
+
+It has five parts:
+
+**1. Auto-pause and auto-resume.** At critical usage (98%), once you've enabled the guardian, the status line writes a checkpoint: your open and finished todos, your last request, and the git HEAD + dirty state. With `autopilot: "resume"` a small detached watcher then waits for the window to reset (polling the wall clock, so it survives your laptop sleeping and week-long waits) and relaunches the exact session with `claude --resume <id> -p`, handing it the checkpoint so it continues the next step and does not repeat finished work. A `SessionStart` hook does the same restoration if you resume by hand. `autopilot: "notify"` (what `--install-guardian` sets) checkpoints and sends a desktop ping but does not relaunch. The shipped default is `"off"`, so a plain `--install` never checkpoints or spawns a notification — only the guardian does.
+
+```
+node statusline.js --autopilot resume     # full hands-free pickup
+node statusline.js --autopilot notify     # checkpoint + ping only (what --install-guardian sets)
+node statusline.js --autopilot off        # do nothing beyond the resume ticket (shipped default)
+```
+
+**2. Relentless mode (keep-working).** A `Stop` hook refuses to let the session pause while todos remain, feeding the open items back so Claude keeps going until the task is actually done. It steps aside the moment Claude asks you a real question, and has loop guards (a hard continue cap and a stall detector) so it never spins on the spot. Off by default:
+
+```
+node statusline.js --keep-working on
+```
+
+**3. Time-to-limit forecast.** The `⏳` segment described above, projected from your recent burn rate.
+
+**4. Cross-profile failover.** Each render publishes this profile's usage to a shared ledger. When you're at your limit and another profile still has headroom, the bar points there (`⤳ personal free 80%`); with `autopilotFailover: true` the watcher continues the work on that profile instead of waiting for the reset. Ledger entries older than six hours are ignored so you're never sent to a stale account.
+
+**5. Compaction-proof checkpoints.** A `PreCompact` hook snapshots your work state before Claude Code compacts the context, and restores it afterward, so a compaction never quietly drops your plan.
+
+`node statusline.js --doctor` reports which hooks are wired and, in `resume` mode, whether `claude` is reachable on `PATH` for the relaunch. Every knob (`autopilot`, `keepWorking`, `autopilotBuffer`, `autopilotWeekly`, `autopilotFailover`, `forecast`, `ledger`, `claudeBin`) lives in `statusline.config.json`.
+
+**What it can and can't do, honestly.** Auto-resume needs a Claude.ai Pro/Max plan — Claude Code only sends rate-limit data to subscribers — and a machine that's awake when the window resets. Claude Code gives no way to reach into your open terminal session, so auto-resume launches a *fresh headless* run of the session and reconciles the working tree via the git snapshot; nothing is lost because the transcript is continuous, and the checkpoint keeps it from redoing finished work. Weekly (7-day) auto-relaunch is off by default (`autopilotWeekly`), because a watcher sleeping for days across reboots is less reliable than the checkpoint + `SessionStart` restore you get on a manual resume. If you're on an API key rather than a subscription, the forecast and auto-resume have no usage data to work from; the rest of the status line is unaffected.
+
+## Staying up to date
+
+Once a day, a tiny background check asks the public repo whether a newer `statusline.js` exists and, if so, shows an `⬆ v2.2.0 update` badge in the bar. **The status-line render itself makes no network calls** — it only reads a small local cache (`$CLAUDE_CONFIG_DIR/.ccbsl-update.json`) that the background check writes; the check is throttled to once every 24 hours and fails silently when you're offline or behind a proxy. So if you share this with your team, they find out about new features instead of silently drifting behind.
+
+```bash
+node statusline.js --update         # pull the newest version
+node statusline.js --check-update    # check right now
+node statusline.js --whatsnew        # what changed in the version you have
+```
+
+`--update` does a `git pull` if you cloned, or for a downloaded copy it fetches the new file, **validates it** (`node --check` plus a shape check that it really is `statusline.js`), **backs up** your current file, and does an **atomic swap** — rolling back untouched if anything fails. It refuses to downgrade (unless you pass `--force`) and refuses anything that doesn't look like the real script (so a proxy login page can't overwrite your file). It honors `HTTPS_PROXY` / `NO_PROXY` and a corporate root CA. Turn the whole thing off with `"updateCheck": false` (or `NO_UPDATE_NOTIFIER=1`).
+
+Trust note: over-the-wire integrity rests on HTTPS/TLS to GitLab (there's no separate code signature yet), which is why `--update` validates and backs up before it ever swaps, and never runs anything without you asking.
 
 ## Customize
 

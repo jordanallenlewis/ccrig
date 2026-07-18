@@ -1,4 +1,4 @@
-# Minimal CI: prove the status line renders on edge inputs and the shell tool parses.
+# CI: syntax-check, edge-case render, and run the full test suite (unit + regression).
 stages: [test]
 
 test:
@@ -6,8 +6,10 @@ test:
   image: node:22
   script:
     - node --check statusline.js
+    - node --check test.js
+    - node --check test-unit.js
     - node statusline.js --selftest
-    - node --test test.js
+    - node --test          # auto-discovers test.js (regression/integration) + test-unit.js (unit)
 
 shellcheck:
   stage: test

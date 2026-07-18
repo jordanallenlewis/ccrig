@@ -10,11 +10,23 @@ that every change lands through a merge request that a maintainer approves.
 2. Keep it **zero-dependency**: `statusline.js` runs on the Node that ships with
    Claude Code, with no npm install. The shell tooling targets bash and zsh.
 3. Test locally before opening the MR:
-   - `node --test test.js` (the full suite: rendering, CLI, install/uninstall/doctor, regressions)
+   - `node --test` (runs **both** suites: `test-unit.js` + `test.js`)
    - `node statusline.js --selftest` (quick rendering check on edge inputs)
    - `node statusline.js --demo` (eyeball the result)
    - `shellcheck claude-profiles.sh install.sh` if you touched the shell files
-   A bug fix should come with a regression test in `test.js`.
+
+   There are two layers, both run in CI on every push:
+   - **`test-unit.js`** — fast unit tests of the pure helpers (version compare, model
+     tier, changelog/version parsing, transcript parsing, wrapping/bars). It `require()`s
+     `statusline.js`, which exports its internals only when required (the CLI never runs).
+   - **`test.js`** — black-box regression/integration tests that spawn the real script as
+     a subprocess against a throwaway `HOME`/`CLAUDE_CONFIG_DIR` sandbox, covering
+     rendering, wrapping, the guardian hooks, auto-resume, updates, and every CLI mode.
+     Tests prefixed `REGRESSION:` encode a specific bug found in review — keep them passing.
+
+   **A bug fix must ship with a test** — a unit test in `test-unit.js` if the logic is
+   pure, a `REGRESSION:` test in `test.js` if it's behavioral. A new feature ships with
+   tests for the happy path and the failure/edge cases.
 4. Open a **merge request** describing the change and why. Reference an issue if
    one exists.
 5. A maintainer reviews it. **An MR is merged only after a maintainer approves
