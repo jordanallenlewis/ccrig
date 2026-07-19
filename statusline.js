@@ -1124,8 +1124,14 @@ function isOurGitClone() {
 }
 // --update: pull the newest version. our git clone -> git pull; standalone copy -> download,
 // validate (node --check + shape), back up, atomic swap, then print what changed.
+// an npm-installed copy lives under node_modules; its updates are npm's job, not ours
+function isNpmInstall() { return /[\\/]node_modules[\\/]/.test(__dirname); }
 function runUpdate() {
   const force = argv.includes('--force');
+  if (isNpmInstall()) {
+    process.stdout.write('installed via npm; update with:  npm install -g ccrig@latest\n(the built-in --update download path is for the standalone / curl install.)\n');
+    process.exit(0);
+  }
   if (isOurGitClone()) {
     // the pinned-key signature gate only applies to the download path; git integrity here
     // rests on the remote + transport, so be honest that the key is not enforced on a pull.
