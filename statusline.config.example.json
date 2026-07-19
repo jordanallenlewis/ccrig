@@ -4,6 +4,7 @@
   "order": ["profile", "update", "folder", "model", "downgrade", "effort", "flags", "context", "git", "agents", "caveman", "billing", "session", "weekly", "forecast", "resumeHint", "cost", "sessionName"],
   "show": {
     "profile": "auto",
+    "update": true,
     "folder": true,
     "model": true,
     "downgrade": true,
@@ -25,6 +26,7 @@
     "context": { "green": 50, "yellow": 70 },
     "usage": { "green": 50, "yellow": 80, "warn": 90, "critical": 98 }
   },
+  "_resetStyle": "clock | clock24 (24-hour) | relative",
   "resetStyle": "clock",
   "resumeTickets": true,
   "_guardian": "The next block powers the guardian. keepWorking + autopilot need the hooks wired: node statusline.js --install-guardian (which sets keepWorking:true and autopilot:notify). Default autopilot is 'off' so a plain install never checkpoints or notifies.",
@@ -40,12 +42,15 @@
   "sessionBoard": false,
   "reinjectOnCompact": false,
   "updateCheck": true,
-  "gitCacheMs": 2500,
+  "_updatePubkey": "Empty = TLS-only updates (default). Paste an Ed25519 PUBLIC key (PEM) to REQUIRE a signed statusline.js.sig on every --update. See the statusline.js header for the openssl commands.",
+  "updatePubkey": "",
+  "gitCacheMs": 10000,
   "reserveCols": 1,
-  "profileLabels": { ".claude": "work", ".claude-personal": "personal" },
+  "_profileLabels": "Map a config-dir name to a label, e.g. {\".claude\":\"work\",\".claude-personal\":\"personal\"}. Default {} derives labels from the dir name.",
+  "profileLabels": {},
   "color": {
     "dim": 245, "folder": 75, "model": 111, "effort": 179, "flag": 45, "caveman": 172,
-    "green": 78, "yellow": 214, "red": 203, "sky": 75,
+    "green": 78, "yellow": 214, "red": 203, "sky": 75, "update": 220, "agents": 141,
     "profileDefault": 39, "profilePersonal": 213
   }
 }
