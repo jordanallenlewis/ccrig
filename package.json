@@ -1,6 +1,6 @@
 {
   "name": "ccrig",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Rig: a zero-dependency status line and usage-limit guardian for Claude Code.",
   "keywords": ["claude", "claude-code", "statusline", "status-line", "cli", "terminal", "guardian", "anthropic"],
   "homepage": "https://gitlab.com/jordanallenlewis/ccrig",
