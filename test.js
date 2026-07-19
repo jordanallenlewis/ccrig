@@ -1799,3 +1799,55 @@ test('reinjectOnCompact re-injects an absolute rules file, capped at 8000 chars'
   assert.strictEqual(r.code, 0);
   assert.match(r.out, /RULETOKEN/, 'the rules file is re-injected on a compaction');
 });
+
+// ===========================================================================
+// autopilotBypassPermissions: the unattended relaunch can bypass permission prompts (opt-in)
+// ===========================================================================
+function armedCheckpoint(cfg, dir, sid) {
+  const gd = path.join(cfg, 'guardian'); fs.mkdirSync(gd, { recursive: true });
+  fs.writeFileSync(path.join(gd, sid + '.checkpoint.json'), JSON.stringify({
+    session_id: sid, cwd: dir, window: 'session', resets_at: Math.floor(Date.now() / 1000) - 60,
+  }));
+}
+function recordingStub(dir, argsFile) {
+  const stub = path.join(dir, 'claude-record.sh');
+  fs.writeFileSync(stub, '#!/bin/sh\nprintf "%s\\n" "$@" > "' + argsFile + '"\n');
+  fs.chmodSync(stub, 0o755);
+  return stub;
+}
+
+test('autopilotBypassPermissions off (default): the relaunch does NOT bypass permissions', () => {
+  const sb = sandbox();
+  const sid = 'byp-off';
+  const argsFile = path.join(sb.dir, 'args-off.txt');
+  const stub = recordingStub(sb.dir, argsFile);
+  const script = scriptCopy(sb.dir, { claudeBin: stub, autopilotBuffer: 0, updateCheck: false });
+  armedCheckpoint(sb.cfg, sb.dir, sid);
+  // CCBSL_NO_ACT='' re-enables the real relaunch so the stub records the argv
+  run(['--watch', sid], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_NO_ACT: '' }, script });
+  const args = fs.readFileSync(argsFile, 'utf8');
+  assert.ok(!/bypassPermissions/.test(args), 'no permission bypass by default');
+  assert.match(args, /--resume/);
+  assert.match(args, /-p/);
+});
+
+test('autopilotBypassPermissions on: the relaunch passes --permission-mode bypassPermissions', () => {
+  const sb = sandbox();
+  const sid = 'byp-on';
+  const argsFile = path.join(sb.dir, 'args-on.txt');
+  const stub = recordingStub(sb.dir, argsFile);
+  const script = scriptCopy(sb.dir, { claudeBin: stub, autopilotBuffer: 0, updateCheck: false, autopilotBypassPermissions: true });
+  armedCheckpoint(sb.cfg, sb.dir, sid);
+  run(['--watch', sid], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_NO_ACT: '' }, script });
+  const args = fs.readFileSync(argsFile, 'utf8').split('\n');
+  const i = args.indexOf('--permission-mode');
+  assert.ok(i >= 0 && args[i + 1] === 'bypassPermissions', 'passes --permission-mode bypassPermissions');
+  assert.ok(args.includes('--resume') && args.includes(sid), 'still resumes the exact session');
+});
+
+test('--options reports the bypass-permissions setting', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { autopilotBypassPermissions: true });
+  const r = run(['--options'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, script });
+  assert.match(r.out, /bypass perms:\s*on/);
+});

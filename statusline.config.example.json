@@ -35,6 +35,8 @@
   "autopilotBuffer": 45,
   "autopilotWeekly": false,
   "autopilotFailover": false,
+  "_autopilotBypassPermissions": "Opt-in: let the unattended auto-resume relaunch bypass permission prompts (it is headless and cannot answer one). Off by default; only affects the guardian's own relaunch.",
+  "autopilotBypassPermissions": false,
   "claudeBin": "claude",
   "forecast": true,
   "ledger": false,
