@@ -150,7 +150,7 @@ node statusline.js --sessions    # recent sessions + the command to resume each
 ```
 
 - **`--board`**: turn on `"sessionBoard": true` and each session publishes a small state file to a shared dir. `--board` then shows them all in one table: project, model, session/weekly usage, context, running subagents, and whether one is near or at a limit. Stale entries (older than an hour) are pruned. It's off by default because it writes outside your config dir (like the ledger). `--purge` clears it.
-- **`--sessions`**: read-only, no opt-in. Lists your recent sessions newest-first with the project, size, last request, and the exact `cd … && claude --resume <id>` to pick one back up. It prints a `cd /d "…"` form on Windows; in PowerShell 5.1 (where `&&` is not a separator) run the `cd` and `claude --resume` parts as two commands.
+- **`--sessions`**: read-only, no opt-in. Lists your recent sessions across **every profile** newest-first, each row labelled with its profile, with the project, size, last request, and the exact command to pick it back up. That command **pins `CLAUDE_CONFIG_DIR` to the profile the session ran under**, so a session started on your personal account resumes on personal even from a shell set to work. It prints a `cd /d "…"` + `set CLAUDE_CONFIG_DIR=…` form on Windows; in PowerShell 5.1 (where `&&` is not a separator) run the parts as separate commands. The resume ticket and the guardian's auto-resume relaunch pin the profile the same way.
 
 And **`"reinjectOnCompact": true`** (or a file path) re-includes your `CLAUDE.md` (or a named rules file) after Claude Code compacts context, in case compaction dropped it. Off by default.
 

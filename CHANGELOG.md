@@ -23,6 +23,11 @@ In-progress work lives under `[Unreleased]` until it's cut.
 - `autopilotBypassPermissions` (off by default): let the unattended auto-resume relaunch run in
   bypass-permissions mode, so a permission prompt cannot stall a headless pickup. Applies only to
   the guardian's own relaunch, never your interactive session.
+- Profile-aware resume: a session belongs to a profile (`CLAUDE_CONFIG_DIR`), and every resume path
+  now pins that profile so a session resumes on the account it ran under, not whatever profile the
+  shell or watcher happens to be set to. `--sessions` scans every profile and labels each row; the
+  resume ticket records the owning profile and pins it; the checkpoint stores the profile and the
+  auto-resume watcher relaunches under it.
 - A performance budget and a sandboxed benchmark recipe in CONTRIBUTING.md.
 - Mechanical quality gates (`test-gates.js`, run by `node --test`): a plain-voice scan of the docs
   and CLI text, example-config-versus-defaults parity, config-key coverage, and README/help flag parity.
