@@ -6,7 +6,8 @@ that every change lands through a merge request that a maintainer approves.
 
 ## How to contribute
 
-1. Fork the repo (or create a branch if you have access) and make your change.
+1. Clone the repo (`git clone https://gitlab.com/jordanallenlewis/ccrig.git`), or fork it,
+   then make your change on a branch. (Users install from npm; the clone is for hacking on CCRig.)
 2. Keep it **zero-dependency**: `statusline.js` runs on the Node that ships with
    Claude Code, with no npm install. The shell tooling targets bash and zsh.
 3. Test locally before opening the MR (there is no CI pipeline; the maintainer runs
@@ -29,7 +30,9 @@ that every change lands through a merge request that a maintainer approves.
      These keep the docs and config honest; keep them green.
 
    The suite is hermetic (it never touches your real `~/.claude` or temp dir), and it
-   passes on Node 18, 20, and 22 (the supported floor is Node 18).
+   passes on Node 18, 20, and 22 (the supported floor is Node 18), on macOS, Linux, and
+   Windows. A few tests that need a POSIX shell or symlink privilege skip cleanly on
+   Windows rather than failing.
 
    **A bug fix must ship with a test:** a unit test in `test-unit.js` if the logic is
    pure, a `REGRESSION:` test in `test.js` if it's behavioral. A new feature ships with

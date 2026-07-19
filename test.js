@@ -385,7 +385,7 @@ test('--config m cycles the mode and saves it', () => {
 // CLI: install / uninstall / doctor / misc
 // ===========================================================================
 test('--version and --help', () => {
-  assert.match(run(['--version']).out, /ccrig v\d+\.\d+\.\d+/);
+  assert.match(run(['--version']).out, /CCRig v\d+\.\d+\.\d+/);
   const h = run(['--help']);
   assert.strictEqual(h.code, 0);
   for (const flag of ['--install', '--uninstall', '--doctor', '--config', '--demo', '--selftest']) assert.ok(h.out.includes(flag), flag + ' in help');
@@ -406,6 +406,31 @@ test('--install wires a fresh profile and is idempotent with a backup', () => {
   assert.ok(fs.existsSync(sp + '.bak'), 'backup written on re-run');
 });
 
+test('the `init` subcommand is an alias for --install', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const r = run(['init'], { env });
+  assert.strictEqual(r.code, 0);
+  const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  assert.ok(j.statusLine && j.statusLine.command.includes(SCRIPT), 'ccrig init wired the status line');
+});
+
+test('install writes the native /ccrig slash commands; uninstall removes them', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  run(['--install'], { env });
+  const cdir = path.join(sb.cfg, 'commands');
+  assert.ok(fs.existsSync(path.join(cdir, 'ccrig.md')), '/ccrig hub written');
+  assert.ok(fs.existsSync(path.join(cdir, 'statusline-config.md')), 'legacy /statusline-config kept');
+  for (const f of ['config', 'status', 'sessions', 'doctor', 'update']) {
+    assert.ok(fs.existsSync(path.join(cdir, 'ccrig', f + '.md')), '/ccrig:' + f + ' written');
+  }
+  assert.match(fs.readFileSync(path.join(cdir, 'ccrig', 'status.md'), 'utf8'), /--status/, 'the status command runs --status');
+  run(['--uninstall'], { env });
+  assert.ok(!fs.existsSync(path.join(cdir, 'ccrig')), 'the /ccrig subdir is removed on uninstall');
+  assert.ok(!fs.existsSync(path.join(cdir, 'ccrig.md')), 'the /ccrig hub is removed on uninstall');
+});
+
 test('REGRESSION: --install wires EVERY profile, not just the active one (work + personal)', () => {
   const sb = sandbox(); // creates ~/.claude (the default / "work" profile)
   const personal = path.join(sb.home, '.claude-personal');
@@ -420,7 +445,7 @@ test('REGRESSION: --install wires EVERY profile, not just the active one (work +
     assert.ok(fs.existsSync(path.join(dir, 'commands', 'statusline-config.md')), 'slash command in ' + dir);
   }
   assert.match(r.out, /personal/, 'reports the personal profile by name');
-  assert.match(r.out, /2 profile\(s\) wired/);
+  assert.match(r.out, /Set up 2 of 2 profiles/);
 });
 
 test('--install --this-profile scopes to the active profile only', () => {
@@ -451,7 +476,7 @@ test('--install: one broken profile is skipped, the rest still get wired', () =>
   assert.strictEqual(r.code, 0, 'still succeeds for the good profile');
   assert.ok(JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8')).statusLine, 'default wired');
   assert.strictEqual(fs.readFileSync(path.join(personal, 'settings.json'), 'utf8'), '{broken', 'corrupt one not clobbered');
-  assert.match(r.out, /skipped personal/);
+  assert.match(r.out, /Could not set up the personal profile/);
 });
 
 test('--install preserves unrelated settings keys', () => {
@@ -516,7 +541,7 @@ test('REGRESSION: --uninstall on a read-only settings.json fails gracefully, no 
   const r = run(['--uninstall'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
   fs.chmodSync(sb.cfg, 0o755); fs.chmodSync(sp, 0o644);
   assert.strictEqual(r.code, 1);
-  assert.match(r.out, /uninstall failed/);
+  assert.match(r.out, /Could not remove CCRig from the/);
   assert.ok(!r.out.includes('at runUninstall'), 'no raw stack trace');
 });
 
@@ -708,8 +733,10 @@ test('caveman badge shows from the flag file and refuses a symlink', () => {
   assert.match(strip(render(baseInput(), { env }).out), /\[CAVEMAN:ULTRA\]/);
   fs.unlinkSync(path.join(sb.cfg, '.caveman-active'));
   fs.writeFileSync(path.join(sb.dir, 'target'), 'full');
-  fs.symlinkSync(path.join(sb.dir, 'target'), path.join(sb.cfg, '.caveman-active'));
-  assert.ok(!strip(render(baseInput(), { env }).out).includes('CAVEMAN'), 'symlinked flag refused');
+  // symlink creation needs privilege / Developer Mode on Windows; skip the refusal check if we can't make one
+  let linked = false;
+  try { fs.symlinkSync(path.join(sb.dir, 'target'), path.join(sb.cfg, '.caveman-active')); linked = true; } catch {}
+  if (linked) assert.ok(!strip(render(baseInput(), { env }).out).includes('CAVEMAN'), 'symlinked flag refused');
 });
 
 // ===========================================================================
@@ -793,7 +820,7 @@ test('--status lists armed watchers; --disarm clears them; --purge wipes state',
   fs.writeFileSync(path.join(gdir, 'sess1.checkpoint.json'), JSON.stringify({ session_id: 'sess1', window: 'session', todos: [] }));
   assert.match(run(['--status'], { env }).out, /sess1/);
   const d = run(['--disarm'], { env });
-  assert.match(d.out, /disarmed 1/);
+  assert.match(d.out, /Stopped 1 watcher/);
   assert.ok(!fs.existsSync(path.join(gdir, 'sess1.watch.pid')), 'pid file cleared');
   assert.ok(!fs.existsSync(path.join(gdir, 'sess1.checkpoint.json')), 'checkpoint cleared');
   fs.mkdirSync(gdir, { recursive: true }); fs.writeFileSync(path.join(gdir, 'x.checkpoint.json'), '{}');
@@ -1211,7 +1238,7 @@ test('--check-update detects a newer version and writes the cache', () => {
   const remote = fakeRemote(path.join(sb.dir, 'remote'), '99.1.0');
   const r = run(['--check-update'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_UPDATE_BASE: remote } });
   assert.strictEqual(r.code, 0);
-  assert.match(r.out, /update available: v99\.1\.0/);
+  assert.match(r.out, /A newer version is ready: v99\.1\.0/);
   const info = JSON.parse(fs.readFileSync(path.join(sb.cfg, '.ccbsl-update.json'), 'utf8'));
   assert.strictEqual(info.latest, '99.1.0');
   assert.ok(info.notes && info.notes.includes('99.1.0'), 'changelog notes captured');
@@ -1221,7 +1248,7 @@ test('--check-update on an unreachable source fails silently (exit 0, no crash)'
   const sb = sandbox();
   const r = run(['--check-update'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_UPDATE_BASE: path.join(sb.dir, 'does-not-exist') } });
   assert.strictEqual(r.code, 0);
-  assert.match(r.out, /update check failed/);
+  assert.match(r.out, /Could not check for updates/);
 });
 
 test('--update applies a newer version with a backup (standalone copy)', () => {
@@ -1232,7 +1259,7 @@ test('--update applies a newer version with a backup (standalone copy)', () => {
   const remote = fakeRemote(path.join(sb.dir, 'remote'), '99.2.0');
   const r = run(['--update'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_UPDATE_BASE: remote }, script: instScript });
   assert.strictEqual(r.code, 0);
-  assert.match(r.out, /updated v.+ -> v99\.2\.0/);
+  assert.match(r.out, /Updated v.+ to v99\.2\.0/);
   assert.match(r.out, /What changed/);
   assert.match(fs.readFileSync(instScript, 'utf8'), /const VERSION = '99\.2\.0'/);
   assert.ok(fs.readdirSync(inst).some((f) => f.startsWith('statusline.js.bak-')), 'backup written');
@@ -1249,7 +1276,7 @@ test('--update refuses a download that is not our script (leaves the file untouc
   const before = fs.readFileSync(instScript, 'utf8');
   const r = run(['--update'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_UPDATE_BASE: remote }, script: instScript });
   assert.strictEqual(r.code, 1);
-  assert.match(r.out, /refusing to apply/);
+  assert.match(r.out, /Update skipped/);
   assert.strictEqual(fs.readFileSync(instScript, 'utf8'), before, 'original untouched');
 });
 
@@ -1340,7 +1367,7 @@ test('reinjectOnCompact re-injects a rules file on a compaction SessionStart', (
 test('--whatsnew prints a changelog section', () => {
   const r = run(['--whatsnew']);
   assert.strictEqual(r.code, 0);
-  assert.match(r.out, /ccrig v/);
+  assert.match(r.out, /CCRig v/);
 });
 
 // note: the real-HTTP fetch path is unit-tested in-process in test-unit.js (fetchHttp*).
@@ -1622,7 +1649,7 @@ test('REGRESSION: replacing a foreign status line is announced and its backup su
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
   fs.writeFileSync(path.join(sb.cfg, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: '/usr/local/bin/my-custom-bar --fancy' } }));
   const first = run(['--install'], { env });
-  assert.match(first.out, /replaced an existing status line/);
+  assert.match(first.out, /Replaced the status line/);
   run(['--install'], { env });
   const backups = fs.readdirSync(sb.cfg).filter((f) => f.startsWith('settings.json.bak'));
   assert.ok(backups.some((f) => fs.readFileSync(path.join(sb.cfg, f), 'utf8').includes('my-custom-bar')), 'a backup still holds the original custom bar');
@@ -1676,7 +1703,8 @@ test('REGRESSION: --sessions resume command is runnable on this platform', () =>
   const proj = path.join(sb.cfg, 'projects', '-tmp-proj'); fs.mkdirSync(proj, { recursive: true });
   fs.writeFileSync(path.join(proj, 'abc-123.jsonl'), JSON.stringify({ cwd: '/tmp/proj', type: 'user', message: { role: 'user', content: 'hi' } }) + '\n');
   const out = run(['--sessions'], { env }).out;
-  if (process.platform === 'win32') assert.match(out, /cd \/d "/);
+  // Windows uses PowerShell-native syntax ($env: + ; separators); POSIX uses inline env + &&.
+  if (process.platform === 'win32') assert.match(out, /\$env:CLAUDE_CONFIG_DIR=/);
   else assert.match(out, /cd '/);
 });
 
@@ -1739,7 +1767,7 @@ test('REGRESSION: --update in a repo whose remote merely CONTAINS ccrig uses the
   fs.copyFileSync(path.join(__dirname, 'CHANGELOG.md'), path.join(base, 'CHANGELOG.md'));
   const r = run(['--update'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_UPDATE_BASE: base }, script: s });
   assert.ok(!/git pull/.test(r.out), 'must not take the git-pull path for an unrelated remote');
-  assert.match(r.out, /updated v.+ -> v99|What changed/, 'took the download path');
+  assert.match(r.out, /Updated v.+ to v99|What changed/, 'took the download path');
 });
 
 test('REGRESSION: --update --force re-applies the same version (repair a modified copy)', () => {
@@ -1752,9 +1780,9 @@ test('REGRESSION: --update --force re-applies the same version (repair a modifie
   fs.writeFileSync(path.join(base, 'statusline.js'), pristine);
   fs.copyFileSync(path.join(__dirname, 'CHANGELOG.md'), path.join(base, 'CHANGELOG.md'));
   const noForce = run(['--update'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_UPDATE_BASE: base }, script: s });
-  assert.match(noForce.out, /already at/, 'without --force, same-version is a no-op');
+  assert.match(noForce.out, /already on/, 'without --force, same-version is a no-op');
   const r = run(['--update', '--force'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_UPDATE_BASE: base }, script: s });
-  assert.match(r.out, /updated|integrity/);
+  assert.match(r.out, /Updated|Verified/);
   assert.strictEqual(fs.readFileSync(s, 'utf8'), pristine, 'file repaired to the pristine remote');
   assert.ok(fs.readdirSync(inst).some((f) => f.startsWith('statusline.js.bak')), 'a backup was written');
 });
@@ -1762,27 +1790,27 @@ test('REGRESSION: --update --force re-applies the same version (repair a modifie
 // ===========================================================================
 // Wave 4: shell + coverage gaps (SHELL-02, TEST-09)
 // ===========================================================================
-test('REGRESSION: claude-profile rejects slashed/dot-dot profile names (bash + zsh)', () => {
-  const { execFileSync, spawnSync } = require('child_process');
+const _posixShells = ['bash', 'zsh'].filter((s) => {
+  try { require('child_process').execFileSync(s, ['-c', 'true'], { stdio: 'ignore' }); return true; } catch { return false; }
+});
+// claude-profiles.sh is a POSIX (bash/zsh) helper with no Windows equivalent; skip where no such shell exists.
+test('REGRESSION: claude-profile rejects slashed/dot-dot profile names (bash + zsh)', { skip: _posixShells.length === 0 && 'no POSIX shell (bash/zsh) on this host' }, () => {
+  const { spawnSync } = require('child_process');
   const sh = path.join(__dirname, 'claude-profiles.sh');
-  let ran = 0;
-  for (const shell of ['bash', 'zsh']) {
-    try { execFileSync(shell, ['-c', 'true'], { stdio: 'ignore' }); } catch { continue; } // shell absent -> skip
-    ran++;
+  for (const shell of _posixShells) {
     const sb = sandbox();
     const victim = path.join(path.dirname(sb.home), 'outside-victim');
     const r = spawnSync(shell, ['-c', 'source "' + sh + '"; claude-profile new "x/../../outside-victim"'], { env: { ...process.env, HOME: sb.home }, encoding: 'utf8' });
     assert.notStrictEqual(r.status, 0, shell + ': a slashed name must be rejected');
     assert.ok(!fs.existsSync(victim), shell + ': nothing created outside the .claude-* namespace');
   }
-  assert.ok(ran > 0, 'at least one of bash/zsh should be available to exercise the guard');
 });
 
 test('--board notes when sessionBoard is off and lists no live sessions', () => {
   const sb = sandbox();
   const r = run(['--board'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
   assert.strictEqual(r.code, 0);
-  assert.match(r.out, /sessionBoard is off|no live sessions/);
+  assert.match(r.out, /session board is off|No sessions are active/);
 });
 
 test('billing shows api for ANTHROPIC_AUTH_TOKEN too', () => {
@@ -1810,11 +1838,22 @@ function armedCheckpoint(cfg, dir, sid) {
     session_id: sid, cwd: dir, window: 'session', resets_at: Math.floor(Date.now() / 1000) - 60,
   }));
 }
+// A cross-platform executable stub the product can spawn as `claude`: a node recorder plus a launcher
+// this platform can run (a .cmd shim on Windows, which relaunchResume's winLaunch resolves back to
+// node against the .js; a #!/usr/bin/env node script on POSIX). `body` runs with `fs` in scope.
+function nodeStub(dir, name, body) {
+  const js = path.join(dir, name + '.js');
+  fs.writeFileSync(js, '#!/usr/bin/env node\nconst fs=require("fs");\n' + body + '\n');
+  if (process.platform === 'win32') {
+    const cmd = path.join(dir, name + '.cmd');
+    fs.writeFileSync(cmd, '@node "' + js + '" %*\r\n');
+    return cmd;
+  }
+  fs.chmodSync(js, 0o755);
+  return js;
+}
 function recordingStub(dir, argsFile) {
-  const stub = path.join(dir, 'claude-record.sh');
-  fs.writeFileSync(stub, '#!/bin/sh\nprintf "%s\\n" "$@" > "' + argsFile + '"\n');
-  fs.chmodSync(stub, 0o755);
-  return stub;
+  return nodeStub(dir, 'claude-record', 'fs.writeFileSync(' + JSON.stringify(argsFile) + ', process.argv.slice(2).join("\\n") + "\\n");');
 }
 
 test('autopilotBypassPermissions off (default): the relaunch does NOT bypass permissions', () => {
@@ -1886,10 +1925,8 @@ test('END-TO-END: guardian checkpoints at the limit, WAITS for the reset, then a
 
   const sid = 'e2e-resume-1';
   const marker = path.join(sb.dir, 'RELAUNCH_ARGS.txt');
-  const stub = path.join(sb.dir, 'claude-emu.sh');
   // emulate `claude`: record every argument (the last is the resume prompt) AND the profile it ran under
-  fs.writeFileSync(stub, '#!/bin/sh\n{ printf "%s\\n" "$@"; echo "CFG=$CLAUDE_CONFIG_DIR"; } > "' + marker + '"\n');
-  fs.chmodSync(stub, 0o755);
+  const stub = nodeStub(sb.dir, 'claude-emu', 'fs.writeFileSync(' + JSON.stringify(marker) + ', process.argv.slice(2).join("\\n") + "\\nCFG=" + (process.env.CLAUDE_CONFIG_DIR || "") + "\\n");');
 
   const script = scriptCopy(sb.dir, { autopilot: 'resume', autopilotBuffer: 0, updateCheck: false, claudeBin: stub });
   const gd = path.join(sb.cfg, 'guardian');
@@ -2006,7 +2043,8 @@ test('--sessions spans every profile and pins CLAUDE_CONFIG_DIR per session', ()
   assert.match(r.out, /\[personal\]/, 'rows are labelled with their profile');
   // each resume command pins the OWNING profile's config dir
   assert.ok(r.out.includes('CLAUDE_CONFIG_DIR=' + shellQuoteJs(personal) + ' claude --resume psess-1')
-    || r.out.includes('CLAUDE_CONFIG_DIR=\'' + personal + '\' claude --resume psess-1'),
+    || r.out.includes('CLAUDE_CONFIG_DIR=\'' + personal + '\' claude --resume psess-1')
+    || r.out.includes('$env:CLAUDE_CONFIG_DIR=\'' + personal + '\'; claude --resume psess-1'),
     'personal session resume pins the personal profile:\n' + r.out);
   assert.ok(r.out.includes('claude --resume wsess-1') && r.out.includes('CLAUDE_CONFIG_DIR='),
     'work session resume pins a profile');

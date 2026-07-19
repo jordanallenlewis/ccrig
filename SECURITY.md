@@ -12,6 +12,8 @@ Nothing this tool reads ever leaves your machine.
 
 ## The update mechanism (`--update`)
 
+CCRig is distributed primarily through npm, as the `ccrig` package. On an npm install, updates come from npm itself (`npm install -g ccrig@latest`), backed by the registry's integrity checks and TLS; `--update` detects that case and defers to npm rather than touching a file npm manages. The self-update mechanism described below covers a copy you installed without npm (the curl one-liner), where CCRig updates its own single file.
+
 - **Nothing is ever downloaded or executed automatically.** The daily check only writes a version number to a local file and shows a badge. Code changes only when **you** run `--update`.
 - `--update` fetches over HTTPS, then **refuses to apply** anything that fails `node --check` (syntax) or a shape check (it must actually be `statusline.js`), so a proxy login page or truncated file cannot overwrite yours. It **backs up** the current file and does an **atomic swap**, rolling back untouched on any failure. It will not silently downgrade.
 - **Trust anchor:** by default, integrity rests on HTTPS/TLS to the repo host. You can require more: pin an Ed25519 public key (PEM) in `updatePubkey` and `--update` will refuse any download that lacks a matching `statusline.js.sig` signature, verified with `node:crypto` (zero dependencies). Generate and sign a release with:
@@ -19,7 +21,7 @@ Nothing this tool reads ever leaves your machine.
   openssl genpkey -algorithm ed25519 -out key.pem && openssl pkey -in key.pem -pubout   # the -pubout value goes in updatePubkey
   openssl pkeyutl -sign -inkey key.pem -rawin -in statusline.js | base64 > statusline.js.sig
   ```
-  For a stronger guarantee without pinning, install by `git clone` and update with `git pull` (a reviewable diff), and/or pin `CCBSL_UPDATE_BASE` to a tagged release rather than the moving `main`. Note: the signature gate applies to the download path, not to a `git pull`.
+  For a stronger guarantee, pin the Ed25519 key above so every download must carry a matching signature, and/or pin `CCBSL_UPDATE_BASE` to a tagged release rather than the moving `main`.
 - **Blast radius if the repo/account were compromised:** a malicious `statusline.js` would run wherever the status line runs, plus on session lifecycle events if you wired the guardian. Mitigations: manual apply, backups, single-file auditability, absolute-path hook pinning (PATH cannot hijack it), and `--uninstall`/`--purge` to fully remove it.
 
 ## The guardian (auto-resume + keep-working)

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Rig: a command center for your terminal
+ * CCRig: a command center for your terminal
  * ---------------------------------------------------------------------------
  * CREDIT: kickstarted by Hannah Stulberg's guide
  *   "Claude Code for Everything: Your Status Line Is Empty (Let's Fix That)"
@@ -67,7 +67,7 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const VERSION = '1.1.0';
+const VERSION = '1.3.0';
 
 // where updates come from: the public GitLab repo's main branch (raw files).
 // Override the base with CCBSL_UPDATE_BASE (used by tests to point at a local dir).
@@ -430,6 +430,8 @@ function cfgKeepWorking() {
   return null; // disabled
 }
 function claudeBin() { return (typeof CONFIG.claudeBin === 'string' && CONFIG.claudeBin) || 'claude'; }
+// real pluralization for user-facing counts ("1 watcher" / "3 watchers"), never "watcher(s)".
+function plural(n, singular, pluralForm) { return n === 1 ? singular : (pluralForm || singular + 's'); }
 // process-spawning side effects (desktop notify, the watcher) are gated so the
 // test suite and CI never launch anything; file side effects (checkpoints) are not.
 function actAllowed() { return !process.env.CCBSL_NO_ACT; }
@@ -944,7 +946,7 @@ function writeJsonAtomic(file, obj) {
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     tmp = file + '.' + process.pid + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
+    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n');
     fs.renameSync(tmp, file);
     return true;
   } catch { try { if (tmp) fs.unlinkSync(tmp); } catch {} return false; } // never strand the tmp (Windows EPERM on rename-over-open)
@@ -1103,9 +1105,9 @@ function runCheckUpdate() {
     const prev = readUpdateInfo() || {};
     const finish = (notes) => {
       writeJsonAtomic(updateCacheFile(), { current: VERSION, latest: latest || prev.latest || null, notes: notes || prev.notes || '', seen: prev.seen || null, checkedAt: Date.now(), lastSuccessAt: latest ? Date.now() : (prev.lastSuccessAt || null), source: UPDATE_BASE });
-      if (!latest) process.stdout.write('update check failed (offline, blocked, or behind a proxy); the cached version info is unchanged.\n');
-      else if (semverGt(latest, VERSION)) process.stdout.write('update available: v' + latest + ' (you have v' + VERSION + ').\nApply:  node "' + __filename + '" --update\n');
-      else process.stdout.write('up to date (v' + VERSION + ').\n');
+      if (!latest) process.stdout.write('Could not check for updates (you may be offline, blocked, or behind a proxy). Your saved version info is unchanged.\n');
+      else if (semverGt(latest, VERSION)) process.stdout.write('A newer version is ready: v' + latest + ' (you have v' + VERSION + ').\n' + (isNpmInstall() ? 'To get it, run:  npm install -g ccrig@latest\n' : 'To get it, run:  node "' + __filename + '" --update\n'));
+      else process.stdout.write('You are on the latest version (v' + VERSION + ').\n');
       process.exit(0);
     };
     if (latest && semverGt(latest, VERSION)) fetchText(UPDATE_CHANGELOG_URL, (e2, md) => finish(parseChangelogTop(md)));
@@ -1146,23 +1148,23 @@ function runUpdate() {
     } catch (e) { process.stdout.write('git pull failed: ' + ((e.stderr || e.message || e) + '').trim() + '\nResolve it by hand in ' + __dirname + '\n'); process.exit(1); }
   }
   fetchText(UPDATE_SCRIPT_URL, (err, js) => {
-    if (err || !js) { process.stdout.write('download failed: ' + (err ? err.message : 'empty response') + '\nYour file is unchanged.\n'); process.exit(1); }
+    if (err || !js) { process.stdout.write('The download did not finish: ' + (err ? err.message : 'empty response') + '\nYour file was left unchanged.\n'); process.exit(1); }
     const latest = parseRemoteVersion(js);
     // trust gates before we ever overwrite: it must parse as our script and be a sane size
-    if (!latest) { process.stdout.write('refusing to apply: the downloaded file has no VERSION marker (not our script, or a proxy error page).\n'); process.exit(1); }
-    if (js.length < 10000 || !/ccrig|claude-code-better-status-line/.test(js)) { process.stdout.write('refusing to apply: the downloaded file did not look like statusline.js (failed the shape check).\n'); process.exit(1); }
-    if (latest === VERSION && !force) { process.stdout.write('already at v' + VERSION + '; nothing to apply. Use --update --force to re-apply (repair a modified copy).\n'); process.exit(0); }
-    if (!semverGt(latest, VERSION) && !force) { process.stdout.write('remote is v' + latest + ', which is not newer than your v' + VERSION + '. Not applying (run `--update --force` to override).\n'); process.exit(0); }
+    if (!latest) { process.stdout.write('Update skipped: the downloaded file has no version marker, so it is not the real script (it may be a proxy error page). Your file was left unchanged.\n'); process.exit(1); }
+    if (js.length < 10000 || !/ccrig|claude-code-better-status-line/.test(js)) { process.stdout.write('Update skipped: the downloaded file does not look like statusline.js, so it was left alone. Your file was left unchanged.\n'); process.exit(1); }
+    if (latest === VERSION && !force) { process.stdout.write('You are already on v' + VERSION + ', so there is nothing to apply. To reinstall this same version and repair a changed copy, run --update --force.\n'); process.exit(0); }
+    if (!semverGt(latest, VERSION) && !force) { process.stdout.write('The available version (v' + latest + ') is not newer than yours (v' + VERSION + '), so nothing was applied. To install it anyway, run --update --force.\n'); process.exit(0); }
     // keep a .js extension so `node --check` parses it as CommonJS (top-level return is legal there)
     const tmp = __filename + '.download-' + process.pid + '.js';
     try {
       const { execFileSync } = require('child_process');
       fs.writeFileSync(tmp, js);
       execFileSync(process.execPath, ['--check', tmp], { stdio: 'ignore', timeout: 20000 }); // syntax-validate (no shell: install path is never interpolated)
-    } catch (e) { try { fs.unlinkSync(tmp); } catch {} process.stdout.write('refusing to apply: the downloaded file failed `node --check` (' + (e.message || e) + '). Your file is unchanged.\n'); process.exit(1); }
+    } catch (e) { try { fs.unlinkSync(tmp); } catch {} process.stdout.write('Update skipped: the downloaded file did not pass a syntax check (' + (e.message || e) + '). Your file was left unchanged.\n'); process.exit(1); }
     // supply-chain gate: if a signing key is pinned, the download must carry a valid signature
     verifyUpdate(js, (verr, method) => {
-      if (verr) { try { fs.unlinkSync(tmp); } catch {} process.stdout.write('refusing to apply: ' + verr.message + '\nYour file is unchanged.\n'); process.exit(1); }
+      if (verr) { try { fs.unlinkSync(tmp); } catch {} process.stdout.write('Update skipped: ' + verr.message + '\nYour file was left unchanged.\n'); process.exit(1); }
       const bak = __filename + '.bak-v' + VERSION;
       try { fs.copyFileSync(__filename, bak); fs.renameSync(tmp, __filename); } // backup, then atomic same-dir swap
       catch (e) { try { fs.unlinkSync(tmp); } catch {} process.stdout.write('update failed while writing (' + (e.message || e) + '); your file is unchanged (backup at ' + bak + ').\n'); process.exit(1); }
@@ -1174,10 +1176,10 @@ function runUpdate() {
       } catch {}
       fetchText(UPDATE_CHANGELOG_URL, (e2, md) => {
         writeJsonAtomic(updateCacheFile(), { current: latest, latest, notes: '', seen: latest, checkedAt: Date.now(), source: UPDATE_BASE });
-        process.stdout.write('updated v' + VERSION + ' -> v' + latest + '   (integrity: ' + method + '; backup: ' + bak + ')\n');
+        process.stdout.write('Updated v' + VERSION + ' to v' + latest + '.  (Verified with ' + method + '; a backup is at ' + bak + '.)\n');
         const notes = parseChangelogTop(md);
         if (notes) process.stdout.write('\nWhat changed:\n' + notes + '\n');
-        process.stdout.write('\nRestart Claude Code once so any changed hooks reload.\n');
+        process.stdout.write('\nRestart Claude Code once so any updated hooks load.\n');
         process.exit(0);
       });
     });
@@ -1201,7 +1203,7 @@ function verifyUpdate(js, cb) {
 function runWhatsnew() {
   let md = ''; try { md = fs.readFileSync(path.join(__dirname, 'CHANGELOG.md'), 'utf8'); } catch {}
   const notes = parseChangelogTop(md) || (readUpdateInfo() || {}).notes || '';
-  process.stdout.write('ccrig v' + VERSION + '\n\n' + (notes || '(no CHANGELOG.md next to the script)') + '\n');
+  process.stdout.write('CCRig v' + VERSION + '\n\n' + (notes || '(no CHANGELOG.md next to the script)') + '\n');
   process.exit(0);
 }
 
@@ -1512,10 +1514,22 @@ if (require.main !== module) {
   return;
 }
 
+// Subcommand aliases: `ccrig init` behaves like `ccrig --install`, and a few other verbs map to
+// their flag, so the modern `ccrig <command>` form works alongside the `--flag` form.
+const SUBCOMMANDS = {
+  init: '--install', install: '--install', uninstall: '--uninstall', doctor: '--doctor',
+  update: '--update', preview: '--demo', demo: '--demo', sessions: '--sessions',
+  board: '--board', config: '--config', help: '--help', version: '--version',
+};
+if (argv[0] && !argv[0].startsWith('-') && Object.prototype.hasOwnProperty.call(SUBCOMMANDS, argv[0])) {
+  argv[0] = SUBCOMMANDS[argv[0]];
+}
+
 function helpText() {
   return [
-    'ccrig v' + VERSION,
-    'Claude Code calls this automatically (JSON on stdin). Manual commands:',
+    'CCRig v' + VERSION,
+    'Claude Code runs this for you automatically. You can also run these by hand',
+    '(as `ccrig <command>`, for example `ccrig init`, or by the flag names below):',
     '  --install            wire Claude Code to this file, for ALL your profiles (backs up settings.json first)',
     '  --install-guardian   also wire the guardian: keep-working + auto-resume at limits (all profiles)',
     '  --auto               with --install-guardian: hands-free relaunch (autopilot resume)',
@@ -1531,7 +1545,7 @@ function helpText() {
     '  --status             list armed auto-resume watchers (nothing is a hidden daemon)',
     '  --disarm [id]        stop auto-resume watcher(s) and clear their state',
     '  --purge              delete all local guardian state (checkpoints, tickets, cache)',
-    '  --update             pull the newest version (git pull or download, backed up)',
+    '  --update             update in place (npm installs: npm install -g ccrig@latest; else git pull or download)',
     '  --force              with --update: apply even when the remote is not newer (repair)',
     '  --check-update       check now whether a newer version is available',
     '  --whatsnew           print the newest changelog section',
@@ -1554,7 +1568,7 @@ if (argv.includes('--help') || argv.includes('-h')) {
 }
 
 if (argv.includes('--version') || argv.includes('-v')) {
-  process.stdout.write('ccrig v' + VERSION + '\n');
+  process.stdout.write('CCRig v' + VERSION + '\n');
   process.exit(0);
 }
 
@@ -1664,6 +1678,29 @@ function runHook(event, input) {
 function watchLog(sid, m) {
   try { const d = path.join(guardDir(), 'logs'); fs.mkdirSync(d, { recursive: true }); fs.appendFileSync(path.join(d, sid + '.log'), new Date().toISOString() + ' ' + m + '\n'); } catch {}
 }
+// On Windows `claude` is a .cmd/.ps1 shim: CreateProcess cannot run it, and post-CVE Node refuses a
+// .cmd without a shell, while routing our multi-line -p prompt through cmd.exe would mangle newlines
+// and expand %VARS%. So resolve the shim to the node entry (cli.js) it launches and run node against
+// it directly: the prompt arg is then passed verbatim, no shell in the loop. Returns null (meaning
+// spawn the bin as-is) for a real .exe or when the shim can't be resolved.
+function winLaunch(bin) {
+  const exts = (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD;.PS1').split(';').filter(Boolean);
+  const cands = [];
+  if (/[\\/]/.test(bin) || /\.[A-Za-z0-9]+$/.test(bin)) cands.push(bin);
+  else for (const dir of (process.env.PATH || '').split(path.delimiter)) for (const e of [''].concat(exts)) cands.push(path.join(dir, bin + e));
+  let shim = null;
+  for (const c of cands) { try { if (fs.statSync(c).isFile()) { shim = c; break; } } catch {} }
+  if (!shim) return null;
+  if (/\.exe$/i.test(shim)) return { cmd: shim, pre: [] };        // a real executable: spawn directly
+  let txt = ''; try { txt = fs.readFileSync(shim, 'utf8'); } catch {}
+  const m = txt.match(/["']?([^"'\r\n]*\.js)["']?/);              // the cli.js the shim runs
+  if (m) {
+    let js = m[1].replace(/%~dp0\\?/gi, path.dirname(shim) + path.sep).replace(/\$basedir[\\/]*/gi, path.dirname(shim) + path.sep);
+    if (!path.isAbsolute(js)) js = path.join(path.dirname(shim), js);
+    try { if (fs.statSync(js).isFile()) return { cmd: process.execPath, pre: [js] }; } catch {}
+  }
+  return null;
+}
 function relaunchResume(cp, profileDir) {
   const sid = cp.session_id;
   // process-spawning safety: under CCBSL_NO_ACT (the test guard) never launch the real
@@ -1690,7 +1727,14 @@ function relaunchResume(cp, profileDir) {
   try { const d = path.join(guardDir(), 'logs'); fs.mkdirSync(d, { recursive: true }); fd = fs.openSync(path.join(d, sid + '.resume.log'), 'a'); } catch {}
   try {
     const { spawn } = require('child_process');
-    const child = spawn(claudeBin(), args, { cwd: cp.cwd, env, stdio: ['ignore', fd, fd] });
+    let cmd = claudeBin(), spawnArgs = args;
+    const opts = { cwd: cp.cwd, env, stdio: ['ignore', fd, fd], windowsHide: true };
+    if (process.platform === 'win32') {
+      const wl = winLaunch(cmd);
+      if (wl) { cmd = wl.cmd; spawnArgs = wl.pre.concat(args); }
+      else { opts.shell = true; }                 // fallback: let the shell resolve the shim
+    }
+    const child = spawn(cmd, spawnArgs, opts);
     // consume all guard state only once the relaunch actually started, so a failed
     // spawn (e.g. claude not on PATH) leaves the checkpoint for a manual resume, and
     // a second limit in the resumed session can re-checkpoint + re-arm cleanly.
@@ -1778,7 +1822,7 @@ function isOurWatcher(pid, sid) {
 }
 // --status: list armed auto-resume watchers (nothing is a hidden daemon)
 function runStatus() {
-  process.stdout.write('ccrig v' + VERSION + ': guardian status\n  profile: ' + CFG + '\n\n');
+  process.stdout.write('CCRig v' + VERSION + ' guardian status\n  Profile: ' + CFG + '\n\n');
   let any = false;
   try {
     for (const f of fs.readdirSync(guardDir())) {
@@ -1789,17 +1833,17 @@ function runStatus() {
       try { const p = fs.readFileSync(path.join(guardDir(), f), 'utf8').split('\n'); pid = parseInt(p[0], 10) || 0; target = parseInt(p[1], 10) || 0; } catch {}
       const cp = readCheckpoint(sid) || {};
       const alive = isOurWatcher(pid, sid);   // a recycled-PID orphan must not report ARMED
-      process.stdout.write('  ' + (alive ? 'ARMED' : 'stale') + '  session ' + sid + '  pid ' + pid + (alive ? '' : ' (not running)') +
-        (target ? '  fires ~' + new Date(target).toLocaleString() : '') + (cp.window ? '  [' + cp.window + ']' : '') + '\n');
+      process.stdout.write('  ' + (alive ? 'Ready' : 'Inactive') + '  session ' + sid + '  process ' + pid + (alive ? '' : ' (no longer running)') +
+        (target ? '  fires about ' + new Date(target).toLocaleString() : '') + (cp.window ? '  [' + cp.window + ' window]' : '') + '\n');
     }
   } catch {}
-  if (!any) process.stdout.write('  no armed watchers.\n');
-  process.stdout.write('\n  disarm:  node "' + __filename + '" --disarm [session-id]\n  purge:   node "' + __filename + '" --purge\n');
+  if (!any) process.stdout.write('  No auto-resume watchers are set up right now.\n');
+  process.stdout.write('\n  To stop a watcher:  node "' + __filename + '" --disarm [session-id]\n  To clear all saved state:  node "' + __filename + '" --purge\n');
   process.exit(0);
 }
 // --disarm [sid]: stop watcher(s) and clear their state
 function runDisarm(sid) {
-  process.stdout.write('ccrig v' + VERSION + ': disarm\n  profile: ' + CFG + '\n');
+  process.stdout.write('CCRig v' + VERSION + ': disarm\n  profile: ' + CFG + '\n');
   const targets = [];
   try { for (const f of fs.readdirSync(guardDir())) { if (!f.endsWith('.watch.pid')) continue; const s = f.slice(0, -'.watch.pid'.length); if (!sid || s === sid) targets.push(s); } } catch {}
   let killed = 0;
@@ -1809,13 +1853,13 @@ function runDisarm(sid) {
     clearSessionGuardState(s);
     try { fs.unlinkSync(watchPidFile(s)); } catch {}
   }
-  process.stdout.write('disarmed ' + targets.length + ' watcher(s)' + (killed ? ', signalled ' + killed + ' process(es)' : '') + '.\n');
+  process.stdout.write('Stopped ' + targets.length + ' ' + plural(targets.length, 'watcher') + (killed ? ' and ended ' + killed + ' running ' + plural(killed, 'process', 'processes') : '') + '.\n');
   process.exit(0);
 }
 // --purge: delete everything the guardian wrote locally (checkpoints, tickets, watchers,
 // update cache, this profile's ledger entry, temp samples). Nothing here ever left the machine.
 function runPurge() {
-  process.stdout.write('ccrig v' + VERSION + ': purge\n  profile: ' + CFG + '\n');
+  process.stdout.write('CCRig v' + VERSION + ' clearing saved state\n  Profile: ' + CFG + '\n');
   const rm = (p) => { try { fs.rmSync(p, { recursive: true, force: true }); } catch {} };
   try { for (const f of fs.readdirSync(guardDir())) if (f.endsWith('.watch.pid')) { const s = f.slice(0, -'.watch.pid'.length); let pid = 0; try { pid = parseInt(fs.readFileSync(path.join(guardDir(), f), 'utf8'), 10) || 0; } catch {} if (isOurWatcher(pid, s)) { try { process.kill(pid); } catch {} } } } catch {}
   rm(guardDir());
@@ -1825,18 +1869,22 @@ function runPurge() {
   try { fs.unlinkSync(path.join(ledgerDir(), path.basename(CFG) + '.json')); } catch {}
   try { for (const f of fs.readdirSync(os.tmpdir())) if (f.startsWith('ccbsl-usage-') || f.startsWith('ccbsl-agents-') || f.startsWith('ccsl-git-')) { try { fs.unlinkSync(path.join(os.tmpdir(), f)); } catch {} } } catch {}
   rm(boardDir()); // shared session-board files (live sessions republish on their next render)
-  process.stdout.write('purged local guardian state (checkpoints, tickets, watchers, update cache, ledger entry, board, temp samples).\n');
+  process.stdout.write("Cleared the saved state on this machine: checkpoints, resume tickets, watchers, the update cache, this profile's ledger entry, the session board, and temporary samples.\n");
   process.exit(0);
 }
 function pad(s, n) { s = String(s == null ? '' : s); return s.length >= n ? s.slice(0, n) : s + ' '.repeat(n - s.length); }
 function shellQuote(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; } // safe for copy-paste, even with spaces/quotes
 // a copy-pasteable resume command that PINS the owning profile's CLAUDE_CONFIG_DIR, so a session
 // started under one profile (e.g. personal) resumes under THAT profile even if the current shell is
-// pointed at another (e.g. work). Platform-aware: cmd.exe `set` + `cd /d` vs POSIX inline env.
+// pointed at another (e.g. work). Platform-aware: PowerShell (the default Windows shell) vs POSIX.
 function resumeCmdLine(cfgDir, cwd, sid) {
   if (process.platform === 'win32') {
-    const cd = cwd ? 'cd /d "' + cwd.replace(/"/g, '') + '" && ' : '';
-    return cd + 'set "CLAUDE_CONFIG_DIR=' + String(cfgDir).replace(/"/g, '') + '" && claude --resume ' + sid;
+    // Emit PowerShell-native syntax. The old cmd.exe form (`cd /d`, `set`, `&&`) does not paste into
+    // PowerShell, where `&&` is not a separator in 5.1 and `set`/`$env:` differ. A single-quoted
+    // PowerShell string escapes an inner quote by doubling it.
+    const q = (s) => "'" + String(s).replace(/'/g, "''") + "'";
+    const cd = cwd ? 'cd ' + q(cwd) + '; ' : '';
+    return cd + '$env:CLAUDE_CONFIG_DIR=' + q(cfgDir) + '; claude --resume ' + sid;
   }
   const cd = cwd ? 'cd ' + shellQuote(cwd) + ' && ' : '';
   return cd + 'CLAUDE_CONFIG_DIR=' + shellQuote(cfgDir) + ' claude --resume ' + sid;
@@ -1856,10 +1904,10 @@ function runBoard() {
   const critAt = CONFIG.thresholds.usage.critical != null ? CONFIG.thresholds.usage.critical : 98;
   const warnAt = warnAtOf(CONFIG.thresholds.usage);
   const liveList = entries.filter((e) => now - e.ts < 600000).sort((a, b) => b.ts - a.ts); // updated in last 10 min
-  process.stdout.write('ccrig v' + VERSION + ': session board\n');
-  if (CONFIG.sessionBoard !== true) process.stdout.write('  (sessionBoard is off. Set "sessionBoard": true in config so sessions publish here)\n');
+  process.stdout.write('CCRig v' + VERSION + ' session board\n');
+  if (CONFIG.sessionBoard !== true) process.stdout.write('  (The session board is off. Turn on "sessionBoard" in your config so your sessions show up here.)\n');
   process.stdout.write('\n');
-  if (!liveList.length) { process.stdout.write('  no live sessions.\n'); process.exit(0); }
+  if (!liveList.length) { process.stdout.write('  No sessions are active right now.\n'); process.exit(0); }
   for (const e of liveList) {
     const usage = Math.max(e.session || 0, e.weekly || 0);
     const state = usage >= critAt ? '⚠ at limit' : (e.ctx != null && e.ctx >= 85) ? '🔴 ctx ' + e.ctx + '%'
@@ -1893,8 +1941,8 @@ function runSessions() {
   }
   rows.sort((a, b) => b.mtime - a.mtime);
   const multi = profiles.length > 1;
-  process.stdout.write('ccrig v' + VERSION + ': recent sessions across ' + profiles.length + ' profile(s)\n\n');
-  if (!rows.length) { process.stdout.write('  none found\n'); process.exit(0); }
+  process.stdout.write('CCRig v' + VERSION + ' recent sessions across ' + profiles.length + ' ' + plural(profiles.length, 'profile') + '\n\n');
+  if (!rows.length) { process.stdout.write('  No recent sessions found.\n'); process.exit(0); }
   const now = Date.now();
   for (const r of rows.slice(0, 15)) {
     let cwd = '';
@@ -1903,13 +1951,13 @@ function runSessions() {
       cwd = o.cwd || (o.workspace && o.workspace.current_dir) || '';
       if (cwd) break;
     }
-    const req = (latestUserText(r.path) || '').replace(/\s+/g, ' ').slice(0, 48) || '(no request found)';
+    const req = (latestUserText(r.path) || '').replace(/\s+/g, ' ').slice(0, 48) || '(no first request found)';
     const ageM = Math.round((now - r.mtime) / 60000);
     const age = ageM < 60 ? ageM + 'm' : ageM < 1440 ? Math.round(ageM / 60) + 'h' : Math.round(ageM / 1440) + 'd';
     const sz = r.size > 1e6 ? (r.size / 1e6).toFixed(1) + 'MB' : Math.round(r.size / 1e3) + 'KB';
     const prof = multi ? pad('[' + profileLabel(r.cfgDir) + ']', 11) + ' ' : '';
     process.stdout.write('  ' + pad(age + ' ago', 8) + ' ' + prof + pad(sz, 7) + ' ' + pad(path.basename(cwd) || '?', 16) + '  ' + req + '\n');
-    process.stdout.write('    ' + resumeCmdLine(r.cfgDir, cwd, r.sid) + (cwd ? '' : '   (run from its project dir)') + '\n');
+    process.stdout.write('    ' + resumeCmdLine(r.cfgDir, cwd, r.sid) + (cwd ? '' : "   (run this from the project's folder)") + '\n');
   }
   process.exit(0);
 }
@@ -1946,7 +1994,7 @@ function runOptions() {
   const S = CONFIG.show, tu = CONFIG.thresholds.usage, tc = CONFIG.thresholds.context;
   const order = Array.isArray(CONFIG.order) ? CONFIG.order : DEFAULT_ORDER;
   const labels = CONFIG.profileLabels || {};
-  let o = 'ccrig v' + VERSION + ' options\n';
+  let o = 'CCRig v' + VERSION + ' options\n';
   o += 'config file: ' + CONFIG_PATH + (fs.existsSync(CONFIG_PATH) ? '' : '  (not present: using defaults)') + '\n\n';
   o += 'display mode:   ' + CONFIG.mode + '        choices: ' + MODES.join(' | ') + '\n';
   o += 'reset style:    ' + CONFIG.resetStyle + '        choices: clock | clock24 | relative\n';
@@ -1993,7 +2041,7 @@ function backupSettings(dir = CFG) {
   const sp = settingsPathOf(dir);
   if (!fs.existsSync(sp)) return null;
   const bak = sp + '.bak';
-  // protect a pristine pre-Rig backup: if a .bak exists that predates us (no statusline.js reference),
+  // protect a pristine pre-CCRig backup: if a .bak exists that predates us (no statusline.js reference),
   // don't clobber it — write the current content to .bak.1 instead, so a user's original custom bar
   // survives repeated installs/guardian-installs.
   try {
@@ -2003,54 +2051,97 @@ function backupSettings(dir = CFG) {
   } catch {}
   fs.copyFileSync(sp, bak); return bak;
 }
-// the in-session command: writing it to <dir>/commands makes `/statusline-config`
-// available in Claude Code sessions on that profile. The script path is baked in.
-function slashCommandPath(dir = CFG) { return path.join(dir, 'commands', 'statusline-config.md'); }
-function writeSlashCommand(dir = CFG) {
+// The commands CCRig installs into <dir>/commands so they appear natively in the Claude Code `/`
+// menu: `/ccrig` (a hub) and focused `/ccrig:<name>` actions, plus `/statusline-config` (kept for
+// backward compatibility). The script path is baked into each, so they work whether CCRig was
+// installed from npm or as a single file.
+function slashCommandDir(dir = CFG) { return path.join(dir, 'commands'); }
+function slashCommandPath(dir = CFG) { return path.join(slashCommandDir(dir), 'statusline-config.md'); }
+// every command file CCRig owns, so --uninstall can remove them all cleanly
+function ccrigCommandFiles(dir = CFG) {
+  const d = slashCommandDir(dir);
+  return ['statusline-config.md', 'ccrig.md', path.join('ccrig', 'config.md'), path.join('ccrig', 'status.md'),
+    path.join('ccrig', 'sessions.md'), path.join('ccrig', 'doctor.md'), path.join('ccrig', 'update.md')].map((f) => path.join(d, f));
+}
+// the interactive config menu, shared by /statusline-config and /ccrig:config
+function configMenuDoc(sl) {
+  return [
+    '---',
+    'description: Open an interactive menu to configure your CCRig status line',
+    'argument-hint: [optional: a change to apply directly, e.g. "minimal mode"]',
+    '---',
+    '',
+    'Open an INTERACTIVE MENU so the user configures their CCRig by',
+    'picking options, not by typing free text. The script is:',
+    '',
+    '    ' + sl,
+    '',
+    'Drive every choice with the AskUserQuestion tool (it renders as a selectable menu',
+    'in the Claude Code CLI). Do not dump walls of text; surface values inside the menus.',
+    '',
+    '1. Read the current settings: run `node "' + sl + '" --options` (parse it, do not paste it all).',
+    '2. If arguments were given below, apply that directly and skip to step 5. Otherwise open the',
+    '   MAIN MENU with AskUserQuestion, header "Status line", question "What do you want to change?",',
+    '   options (put the current value in each description):',
+    '     - Display mode        (minimal / normal / expanded)',
+    '     - Toggle a segment    (turn any segment on or off)',
+    '     - Reset time style    (clock / relative)',
+    '     - Resume tickets      (on / off)',
+    '     - Thresholds          (warn %, critical %, color cutoffs)',
+    '     - Show current + preview',
+    '   (AskUserQuestion always adds an "Other" free-text choice; the user can use it.)',
+    '3. Drill in with a follow-up AskUserQuestion menu for the pick, e.g. mode -> minimal/normal/expanded;',
+    '   "Toggle a segment" -> a menu of the segments with their on/off state, then which way to set it.',
+    '4. Apply the change:',
+    '     - Display mode: `node "' + sl + '" --mode <minimal|normal|expanded>`',
+    '     - Anything else: edit statusline.config.json next to the script, deep-merging ONLY the keys',
+    '       being changed and keeping valid JSON. Never edit statusline.js.',
+    '5. Verify with `node "' + sl + '" --doctor` (must pass) and show a fresh `node "' + sl + '" --demo`.',
+    '6. Ask with AskUserQuestion "Change something else?" (Yes -> back to the main menu; Done -> stop).',
+    '   Loop until the user is done.',
+    '7. Briefly summarize what changed. Changes apply live within a couple seconds; no restart.',
+    '',
+    '$ARGUMENTS',
+    '',
+  ].join('\n');
+}
+// a "run one CCRig command and present the result nicely" slash command
+function actionDoc(desc, sl, flag, instruction) {
+  return ['---', 'description: ' + desc, 'allowed-tools: Bash(node:*)', '---', '', instruction, '',
+    '!`node "' + sl + '" ' + flag + '`', ''].join('\n');
+}
+// write the whole /ccrig command suite (+ the legacy /statusline-config). Returns the config path
+// (a truthy command path) so the caller can report that commands were added; null on failure.
+function writeSlashCommands(dir = CFG) {
   try {
-    const p = slashCommandPath(dir);
+    const d = slashCommandDir(dir);
     const sl = __filename;
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, [
-      '---',
-      'description: Open an interactive menu to configure your status line',
-      'argument-hint: [optional: a change to apply directly, e.g. "minimal mode"]',
-      '---',
-      '',
-      'Open an INTERACTIVE MENU so the user configures their ccrig by',
-      'picking options, not by typing free text. The script is:',
-      '',
-      '    ' + sl,
-      '',
-      'Drive every choice with the AskUserQuestion tool (it renders as a selectable menu',
-      'in the Claude Code CLI). Do not dump walls of text; surface values inside the menus.',
-      '',
-      '1. Read the current settings: run `node "' + sl + '" --options` (parse it, do not paste it all).',
-      '2. If arguments were given below, apply that directly and skip to step 5. Otherwise open the',
-      '   MAIN MENU with AskUserQuestion, header "Status line", question "What do you want to change?",',
-      '   options (put the current value in each description):',
-      '     - Display mode        (minimal / normal / expanded)',
-      '     - Toggle a segment    (turn any segment on or off)',
-      '     - Reset time style    (clock / relative)',
-      '     - Resume tickets      (on / off)',
-      '     - Thresholds          (warn %, critical %, color cutoffs)',
-      '     - Show current + preview',
-      '   (AskUserQuestion always adds an "Other" free-text choice; the user can use it.)',
-      '3. Drill in with a follow-up AskUserQuestion menu for the pick, e.g. mode -> minimal/normal/expanded;',
-      '   "Toggle a segment" -> a menu of the segments with their on/off state, then which way to set it.',
-      '4. Apply the change:',
-      '     - Display mode: `node "' + sl + '" --mode <minimal|normal|expanded>`',
-      '     - Anything else: edit statusline.config.json next to the script, deep-merging ONLY the keys',
-      '       being changed and keeping valid JSON. Never edit statusline.js.',
-      '5. Verify with `node "' + sl + '" --doctor` (must pass) and show a fresh `node "' + sl + '" --demo`.',
-      '6. Ask with AskUserQuestion "Change something else?" (Yes -> back to the main menu; Done -> stop).',
-      '   Loop until the user is done.',
-      '7. Briefly summarize what changed. Changes apply live within a couple seconds; no restart.',
-      '',
-      '$ARGUMENTS',
-      '',
+    fs.mkdirSync(path.join(d, 'ccrig'), { recursive: true });
+    const cfg = configMenuDoc(sl);
+    fs.writeFileSync(path.join(d, 'statusline-config.md'), cfg);
+    fs.writeFileSync(path.join(d, 'ccrig', 'config.md'), cfg);
+    fs.writeFileSync(path.join(d, 'ccrig', 'status.md'), actionDoc('Show your CCRig guardian status (auto-resume watchers)', sl, '--status',
+      'Run the command below and give me a short, plain summary of my CCRig guardian status: which sessions are watched for auto-resume and when they will fire. If nothing is armed, say so.'));
+    fs.writeFileSync(path.join(d, 'ccrig', 'sessions.md'), actionDoc('List your recent Claude Code sessions and how to resume each', sl, '--sessions',
+      'Run the command below and show me my recent Claude Code sessions as a clean list, each with the exact command to resume it. Do not change anything.'));
+    fs.writeFileSync(path.join(d, 'ccrig', 'doctor.md'), actionDoc('Check that your CCRig status line and guardian are healthy', sl, '--doctor',
+      'Run the command below and tell me, in plain language, whether my CCRig setup is healthy. If it flags a problem, explain it and the exact fix.'));
+    fs.writeFileSync(path.join(d, 'ccrig', 'update.md'), actionDoc('Check whether a newer CCRig is available', sl, '--check-update',
+      'Run the command below and tell me whether a newer CCRig is available and how to get it. Do not update anything without asking me first.'));
+    fs.writeFileSync(path.join(d, 'ccrig.md'), ['---',
+      'description: CCRig, your Claude Code status line and usage-limit guardian',
+      'argument-hint: [status | sessions | doctor | update | config]',
+      'allowed-tools: Bash(node:*)',
+      '---', '',
+      "You are helping with CCRig, the user's Claude Code status line and usage-limit guardian.",
+      'If an argument is given below, do that action (status, sessions, doctor, update, or config).',
+      'Otherwise, run the status check below, tell the user in a line or two what CCRig is doing right',
+      'now, and list what they can run next: /ccrig:status, /ccrig:sessions, /ccrig:doctor,',
+      '/ccrig:update, and /ccrig:config.', '',
+      '!`node "' + sl + '" --status`', '',
+      '$ARGUMENTS', '',
     ].join('\n'));
-    return p;
+    return path.join(d, 'statusline-config.md');
   } catch { return null; }
 }
 // wire ONE profile. Returns a result the caller reports; never exits, never throws for a
@@ -2069,9 +2160,9 @@ function installStatusLineInto(dir) {
     const bak = backupSettings(dir);
     // process.execPath = the node running this installer: absolute, exists, cross-platform
     settings.statusLine = { type: 'command', command: `"${process.execPath}" "${__filename}"`, refreshInterval: 2 };
-    fs.writeFileSync(sp, JSON.stringify(settings, null, 2) + '\n');
+    if (!writeJsonAtomic(sp, settings)) throw new Error('could not save ' + sp + '; it was left unchanged');
     JSON.parse(fs.readFileSync(sp, 'utf8')); // round-trip validate
-    const cmd = writeSlashCommand(dir);
+    const cmd = writeSlashCommands(dir);
     return { dir, sp, bak, cmd, replacedForeign };
   } catch (e) { return { dir, sp: settingsPathOf(dir), err: e.message }; }
 }
@@ -2084,31 +2175,29 @@ function runInstall() {
   const okd = results.filter((r) => !r.err);
   const failed = results.filter((r) => r.err);
   for (const r of okd) {
-    process.stdout.write('ok  status line wired for ' + profileLabel(r.dir) + '  (' + r.sp + ')'
-      + (r.bak ? '  [backup: ' + r.bak + ']' : '') + '\n');
-    if (r.replacedForeign) process.stdout.write('--  replaced an existing status line: ' + r.replacedForeign + (r.bak ? '  (kept in ' + r.bak + ')' : '') + '\n');
+    process.stdout.write('Set up the status line for the ' + profileLabel(r.dir) + ' profile.  (' + r.sp + ')'
+      + (r.bak ? '  A backup was saved first.' : '') + '\n');
+    if (r.replacedForeign) process.stdout.write('  Replaced the status line that was there before' + (r.bak ? ' (the old one is in the backup)' : '') + '.\n');
   }
-  if (okd.some((r) => r.cmd)) process.stdout.write('ok  in-session command installed: run /statusline-config in Claude Code to see and change options\n');
-  for (const r of failed) process.stdout.write('!! skipped ' + profileLabel(r.dir) + ' (' + r.sp + '): ' + r.err + '\n');
-  if (!thisOnly) for (const d of markerlessClaudeDirs()) process.stdout.write('--  skipped ' + profileLabel(d) + ': no Claude settings found (wire it with  CLAUDE_CONFIG_DIR=' + d + ' node "' + __filename + '" --install --this-profile)\n');
-  if (!okd.length) { process.stdout.write('install failed: no profile could be wired.\n'); process.exit(1); }
+  if (okd.some((r) => r.cmd)) process.stdout.write('Added the /ccrig commands to Claude Code: /ccrig, /ccrig:status, /ccrig:sessions, /ccrig:doctor, /ccrig:update, and /ccrig:config.\n');
+  for (const r of failed) process.stdout.write('Could not set up the ' + profileLabel(r.dir) + ' profile (' + r.sp + '): ' + r.err + '\n');
+  if (!thisOnly) for (const d of markerlessClaudeDirs()) process.stdout.write('Skipped the ' + profileLabel(d) + ' profile: it has no Claude settings yet. To set it up, run:  CLAUDE_CONFIG_DIR=' + d + ' node "' + __filename + '" --install --this-profile\n');
+  if (!okd.length) { process.stdout.write('Setup did not finish: no profile could be set up. Run --doctor to see what is wrong.\n'); process.exit(1); }
   if (!thisOnly && profiles.length > 1) {
-    // honest summary: only claim "all profiles" when nothing was skipped (Q1). Exit stays 0 on a
-    // partial success so the one-line curl installer's `&&` chain is not broken (owner open question).
-    process.stdout.write('\n' + okd.length + ' of ' + profiles.length + ' profile(s) wired'
-      + (failed.length ? ', ' + failed.length + ' skipped. Fix the skipped one(s) and re-run.' : '. All your Claude profiles now show the bar.')
-      + ' (Scope to one with --this-profile.)\n');
+    // honest summary: only claim "all profiles" when nothing was skipped. Exit stays 0 on a partial
+    // success so the one-line curl installer's `&&` chain is not broken.
+    process.stdout.write('\nSet up ' + okd.length + ' of ' + profiles.length + ' ' + plural(profiles.length, 'profile')
+      + (failed.length ? '. ' + failed.length + ' could not be set up; fix ' + (failed.length === 1 ? 'it' : 'them') + ' and run again.' : '. All your Claude profiles now show the bar.')
+      + ' (Add --this-profile to set up just one.)\n');
   }
   const helper = path.join(__dirname, 'claude-profiles.sh');
-  if (fs.existsSync(helper)) process.stdout.write('--  switch accounts from your shell:  source "' + helper + '"\n');
-  process.stdout.write('\nRestart Claude Code once. After that, edits to this file apply live.\n');
-  process.stdout.write('Preview now:  node "' + __filename + '" --demo\n');
-  process.stdout.write('Never lose work to a limit? Wire the guardian:  node "' + __filename + '" --install-guardian\n');
-  // honest disclosure: the render is zero-network, but a once-a-day check is not
-  process.stdout.write('\nUpdate checks: once a day this contacts the public GitLab repo to see if a newer\n');
-  process.stdout.write('statusline.js exists, and shows a small ⬆ badge. The status-line render itself makes\n');
-  process.stdout.write('NO network calls; nothing is ever downloaded or run until you type `--update`.\n');
-  process.stdout.write('Turn it off with "updateCheck": false (or NO_UPDATE_NOTIFIER=1).\n');
+  // claude-profiles.sh is a bash/zsh helper; do not tell a PowerShell (Windows) user to `source` it.
+  if (fs.existsSync(helper) && process.platform !== 'win32') process.stdout.write('To switch accounts from your shell:  source "' + helper + '"\n');
+  process.stdout.write('\nPreview it now:  node "' + __filename + '" --demo\n');
+  process.stdout.write('Never lose work to a usage limit? Set up the guardian:  node "' + __filename + '" --install-guardian\n');
+  // honest one-line privacy note; the render is zero-network, a once-a-day check is the only exception
+  process.stdout.write('Privacy: drawing the bar never uses the network. The only exception is a once-a-day update check, which you can turn off with "updateCheck": false (or NO_UPDATE_NOTIFIER=1).\n');
+  process.stdout.write('\nRestart Claude Code once, and you are set. After that, changes to your settings apply live.\n');
   process.exit(0);
 }
 
@@ -2189,9 +2278,9 @@ function installGuardianInto(dir) {
       kept.push({ hooks: [{ type: 'command', command: guardianHookCommand(slug) }] });
       settings.hooks[Event] = kept;
     }
-    fs.writeFileSync(sp, JSON.stringify(settings, null, 2) + '\n');
+    if (!writeJsonAtomic(sp, settings)) throw new Error('could not save ' + sp + '; it was left unchanged');
     JSON.parse(fs.readFileSync(sp, 'utf8')); // round-trip validate
-    writeSlashCommand(dir);
+    writeSlashCommands(dir);
     return { dir, sp, bak };
   } catch (e) { return { dir, sp: settingsPathOf(dir), err: e.message }; }
 }
@@ -2202,27 +2291,27 @@ function runInstallGuardian() {
   const okd = results.filter((r) => !r.err);
   const failed = results.filter((r) => r.err);
   for (const r of okd) {
-    process.stdout.write('ok  guardian hooks (Stop, SessionStart, PreCompact) wired for ' + profileLabel(r.dir) + '  (' + r.sp + ')'
-      + (r.bak ? '  [backup: ' + r.bak + ']' : '') + '\n');
+    process.stdout.write('Set up the guardian for the ' + profileLabel(r.dir) + ' profile (Stop, SessionStart, and PreCompact hooks).  (' + r.sp + ')'
+      + (r.bak ? '  A backup was saved first.' : '') + '\n');
   }
-  for (const r of failed) process.stdout.write('!! skipped ' + profileLabel(r.dir) + ' (' + r.sp + '): ' + r.err + '\n');
-  if (!okd.length) { process.stdout.write('guardian install failed: no profile could be wired.\n'); process.exit(1); }
+  for (const r of failed) process.stdout.write('Could not set up the ' + profileLabel(r.dir) + ' profile (' + r.sp + '): ' + r.err + '\n');
+  if (!okd.length) { process.stdout.write('Guardian setup did not finish: no profile could be set up. Run --doctor to see what is wrong.\n'); process.exit(1); }
   // config (keep-working + autopilot) is shared across profiles — set it once
   const want = argv.includes('--auto') ? 'resume' : (cfgAutopilot() === 'off' ? 'notify' : cfgAutopilot());
   CONFIG.keepWorking = true;
   CONFIG.autopilot = want;
   saveConfig();
   if (!thisOnly && profiles.length > 1) {
-    process.stdout.write('\n' + okd.length + ' profile(s) guarded' + (failed.length ? ', ' + failed.length + ' skipped' : '')
-      + '. (Scope to one with --this-profile.)\n');
+    process.stdout.write('\nSet up the guardian for ' + okd.length + ' ' + plural(okd.length, 'profile')
+      + (failed.length ? '. ' + failed.length + ' could not be set up.' : '.') + ' (Add --this-profile to set up just one.)\n');
   }
-  process.stdout.write('ok  Relentless mode ON: the session keeps working while todos remain\n');
-  process.stdout.write('ok  Limit Autopilot: ' + want + (want === 'resume'
-    ? '  (auto-relaunches claude --resume the moment the window resets)'
-    : '  (checkpoint + desktop ping; add --auto for hands-free relaunch)') + '\n');
-  process.stdout.write('\nRestart Claude Code once for the hooks to load.\n');
-  process.stdout.write('Dial it:   --autopilot <off|notify|resume>   --keep-working <on|off>\n');
-  process.stdout.write('Remove it: node "' + __filename + '" --uninstall-guardian\n');
+  process.stdout.write('Relentless mode is on: the session keeps working while todos remain.\n');
+  process.stdout.write('Limit Autopilot: ' + want + (want === 'resume'
+    ? '. It restarts your session on its own the moment the limit resets.'
+    : '. It saves your place and sends a desktop alert; add --auto to have it restart on its own.') + '\n');
+  process.stdout.write('\nAdjust it any time:  --autopilot <off|notify|resume>   --keep-working <on|off>\n');
+  process.stdout.write('Remove it with:  node "' + __filename + '" --uninstall-guardian\n');
+  process.stdout.write('\nRestart Claude Code once so the hooks load.\n');
   process.exit(0);
 }
 // remove the guardian hooks from ONE profile. Returns a result; never exits/throws.
@@ -2236,7 +2325,7 @@ function uninstallGuardianFrom(dir) {
     if (!res.removed) return { dir, sp, removed: 0 };
     const bak = backupSettings(dir);
     if (res.hooks === undefined) delete settings.hooks; else settings.hooks = res.hooks;
-    fs.writeFileSync(sp, JSON.stringify(settings, null, 2) + '\n');
+    if (!writeJsonAtomic(sp, settings)) throw new Error('could not save ' + sp + '; it was left unchanged');
     return { dir, sp, removed: res.removed, bak };
   } catch (e) { return { dir, sp: settingsPathOf(dir), removed: 0, err: e.message }; }
 }
@@ -2245,11 +2334,11 @@ function runUninstallGuardian() {
   const profiles = thisOnly ? [CFG] : detectProfiles();
   const results = profiles.map(uninstallGuardianFrom);
   const removedAny = results.filter((r) => r.removed);
-  for (const r of removedAny) process.stdout.write('ok  removed ' + r.removed + ' guardian hook(s) from ' + profileLabel(r.dir) + '  (' + r.sp + ')' + (r.bak ? '  [backup: ' + r.bak + ']' : '') + '\n');
-  for (const r of results.filter((r) => r.err)) process.stdout.write('!! ' + profileLabel(r.dir) + ': ' + r.err + '\n');
-  if (!removedAny.length) { process.stdout.write('nothing to remove: no guardian hooks on any profile.\n'); process.exit(0); }
+  for (const r of removedAny) process.stdout.write('Removed ' + r.removed + ' guardian ' + plural(r.removed, 'hook') + ' from the ' + profileLabel(r.dir) + ' profile.  (' + r.sp + ')' + (r.bak ? '  A backup was saved first.' : '') + '\n');
+  for (const r of results.filter((r) => r.err)) process.stdout.write('The ' + profileLabel(r.dir) + ' profile ran into a problem: ' + r.err + '\n');
+  if (!removedAny.length) { process.stdout.write('There is nothing to remove: no profile has guardian hooks.\n'); process.exit(0); }
   CONFIG.keepWorking = false; CONFIG.autopilot = 'off'; saveConfig();
-  process.stdout.write('ok  Relentless mode + Autopilot turned off in config; the status line stays\n');
+  process.stdout.write('Turned off Relentless mode and Autopilot. The status line itself stays in place.\n');
   process.exit(0);
 }
 // remove OUR status line (+ guardian hooks + slash command) from ONE profile. Never
@@ -2269,14 +2358,17 @@ function uninstallFrom(dir) {
     // these two files are unconditionally OURS regardless of statusLine ownership: clean them even
     // when the user switched status lines and runs --uninstall just to tidy up (hoisted above the early return).
     let removedCmd = false;
-    try { const cp = slashCommandPath(dir); if (fs.existsSync(cp)) { fs.unlinkSync(cp); removedCmd = true; } } catch {}
+    try {
+      for (const cf of ccrigCommandFiles(dir)) { try { if (fs.existsSync(cf)) { fs.unlinkSync(cf); removedCmd = true; } } catch {} }
+      try { fs.rmdirSync(path.join(slashCommandDir(dir), 'ccrig')); } catch {} // drop the now-empty /ccrig subdir
+    } catch {}
     try { fs.unlinkSync(path.join(dir, '.ccbsl-update.json')); } catch {}
     if (raw.state !== 'ok' || (!ownsStatusLine && !gres.removed)) return { dir, sp, removedSL: false, removedHooks: 0, foreign, removedCmd };
     const settings = raw.value;
     const bak = backupSettings(dir);
     if (ownsStatusLine) delete settings.statusLine;
     if (gres.removed) { if (gres.hooks === undefined) delete settings.hooks; else settings.hooks = gres.hooks; }
-    fs.writeFileSync(sp, JSON.stringify(settings, null, 2) + '\n');
+    if (!writeJsonAtomic(sp, settings)) throw new Error('could not save ' + sp + '; it was left unchanged');
     return { dir, sp, removedSL: ownsStatusLine, removedHooks: gres.removed, foreign, bak, removedCmd };
   } catch (e) { return { dir, sp: settingsPathOf(dir), err: e.message }; }
 }
@@ -2287,18 +2379,18 @@ function runUninstall() {
   const errs = results.filter((r) => r.err);
   let touched = 0;
   for (const r of results) {
-    if (r.err) { process.stdout.write('!! uninstall failed for ' + profileLabel(r.dir) + ': ' + r.err + '\n'); continue; }
-    if (r.removedSL) { process.stdout.write('ok  status line removed from ' + profileLabel(r.dir) + '  (' + r.sp + ')' + (r.bak ? '  [backup: ' + r.bak + ']' : '') + '\n'); touched++; }
-    else if (r.foreign) process.stdout.write('--  ' + profileLabel(r.dir) + ': a third-party status line was left untouched\n');
-    if (r.removedHooks) { process.stdout.write('ok  ' + r.removedHooks + ' guardian hook(s) removed from ' + profileLabel(r.dir) + '\n'); touched++; }
-    if (r.removedCmd) { process.stdout.write('--  removed the /statusline-config command from ' + profileLabel(r.dir) + '\n'); touched++; }
+    if (r.err) { process.stdout.write('Could not remove CCRig from the ' + profileLabel(r.dir) + ' profile: ' + r.err + '\n'); continue; }
+    if (r.removedSL) { process.stdout.write('Removed the status line from the ' + profileLabel(r.dir) + ' profile.  (' + r.sp + ')' + (r.bak ? '  A backup was saved first.' : '') + '\n'); touched++; }
+    else if (r.foreign) process.stdout.write('Left the ' + profileLabel(r.dir) + " profile's status line alone, since it belongs to another tool.\n");
+    if (r.removedHooks) { process.stdout.write('Removed ' + r.removedHooks + ' guardian ' + plural(r.removedHooks, 'hook') + ' from the ' + profileLabel(r.dir) + ' profile.\n'); touched++; }
+    if (r.removedCmd) { process.stdout.write('Removed the /ccrig commands from the ' + profileLabel(r.dir) + ' profile.\n'); touched++; }
   }
   if (!touched) {
     if (errs.length) process.exit(1); // a real permission/IO failure, not a clean no-op
-    process.stdout.write('nothing to remove: no status line of ours or guardian hooks on any profile.\n');
+    process.stdout.write('There is nothing to remove: no profile has our status line or guardian hooks.\n');
     process.exit(0);
   }
-  process.stdout.write('--  this file and statusline.config.json were left in place; delete them if you want.\n');
+  process.stdout.write('This file and statusline.config.json were left in place. You can delete them if you like.\n');
   process.exit(errs.length ? 1 : 0);
 }
 
@@ -2320,7 +2412,7 @@ function runDoctor() {
   const ok = (m) => process.stdout.write('  ok    ' + m + '\n');
   const bad = (m, fix) => { fails++; process.stdout.write('  FAIL  ' + m + (fix ? '\n        fix: ' + fix : '') + '\n'); };
   const info = (m) => process.stdout.write('  --    ' + m + '\n');
-  process.stdout.write('ccrig v' + VERSION + ' doctor\n');
+  process.stdout.write('CCRig v' + VERSION + ' doctor\n');
   process.stdout.write('  script:  ' + __filename + '\n  profile: ' + CFG + '\n\n');
 
   const major = parseInt(process.versions.node, 10);
@@ -2377,12 +2469,10 @@ function runDoctor() {
       if (cfgAutopilot() === 'resume') {
         try {
           if (process.platform === 'win32') {
-            // spawn() has no shell, so CreateProcess resolves only .exe/.com — a .cmd/.bat/.ps1 shim
-            // that `where` finds is un-spawnable at relaunch time; flag it rather than false-pass.
-            const out = execSync('where ' + claudeBin(), { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
-            const first = out.split('\n').map((l) => l.trim()).filter(Boolean)[0] || '';
-            if (/\.(cmd|bat|ps1)$/i.test(first)) bad('claudeBin resolves to a shell shim (' + first + ') that auto-resume cannot spawn directly', 'set "claudeBin" in config to the claude .exe path');
-            else ok('claude on PATH (auto-resume can relaunch)');
+            // auto-resume launches the `claude` shim via winLaunch (node against its cli.js), so a
+            // .cmd/.ps1 shim is fine now; just confirm claude resolves on PATH.
+            execSync('where ' + claudeBin(), { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+            ok('claude on PATH (auto-resume can relaunch)');
           } else {
             execSync('command -v ' + claudeBin(), { stdio: 'ignore', timeout: 2000 });
             ok('claude on PATH (auto-resume can relaunch)');
@@ -2549,7 +2639,7 @@ function saveConfig() {
     if (fs.existsSync(CONFIG_PATH)) fs.copyFileSync(CONFIG_PATH, CONFIG_PATH + '.bak');
     // persist only overrides, never a full snapshot, so future default changes still reach the user
     const sparse = diffFromDefaults(CONFIG, DEFAULTS) || {};
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(sparse, null, 2) + '\n');
+    if (!writeJsonAtomic(CONFIG_PATH, sparse)) throw new Error('could not save ' + CONFIG_PATH + '; it was left unchanged');
     JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); // validate round-trip
     return true;
   } catch (e) { process.stdout.write(`save failed: ${e.message}\n`); return false; }

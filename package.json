@@ -1,7 +1,7 @@
 {
   "name": "ccrig",
-  "version": "1.1.0",
-  "description": "Rig: a zero-dependency status line and usage-limit guardian for Claude Code.",
+  "version": "1.3.0",
+  "description": "CCRig: a zero-dependency status line and usage-limit guardian for Claude Code.",
   "keywords": ["claude", "claude-code", "statusline", "status-line", "cli", "terminal", "guardian", "anthropic"],
   "homepage": "https://gitlab.com/jordanallenlewis/ccrig",
   "bugs": { "url": "https://gitlab.com/jordanallenlewis/ccrig/-/issues" },
@@ -12,6 +12,7 @@
   "bin": { "ccrig": "statusline.js" },
   "files": [
     "statusline.js",
+    "postinstall.js",
     "claude-profiles.sh",
     "install.sh",
     "statusline.config.example.json",
@@ -20,6 +21,7 @@
   ],
   "engines": { "node": ">=18" },
   "scripts": {
+    "postinstall": "node postinstall.js",
     "test": "node --test",
     "selftest": "node statusline.js --selftest"
   }
