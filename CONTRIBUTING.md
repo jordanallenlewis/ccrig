@@ -42,6 +42,40 @@ that every change lands through a merge request that a maintainer approves.
   the README + `statusline.config.example.json`.
 - User-facing changes get a note in `CHANGELOG.md` under `Unreleased`.
 
+## Performance budget
+
+The status line runs on every refresh (about every 2 seconds), so the render is a
+hot path. Measured on a recent laptop:
+
+- Node interpreter startup is the floor, roughly 47ms, and about 75% of a render. A
+  spawned single-file script cannot avoid it.
+- Parsing and evaluating the script adds about 5ms.
+- All the render's own work is about 8 to 12ms of JavaScript, doing roughly 19 file
+  reads and zero writes and zero network at steady state.
+- A git cache miss adds 24 to 65ms depending on repo size, which is why git state is
+  TTL-cached (`gitCacheMs`).
+- Transcript reads are capped at 768KB (about 1.9ms on a cold cache).
+
+The rule that keeps it fast: **no new per-render work above about 1ms without a cache,
+and every cache keyed by something cheap (a file mtime or size).** Do not add network
+calls or un-cached subprocess spawns to the render.
+
+To benchmark a change, run the script in a throwaway sandbox so it never touches your
+real `~/.claude` or temp dir (the same isolation the tests use):
+
+```bash
+S=$(mktemp -d)
+IN='{"model":{"display_name":"Opus 4.8"},"context_window":{"used_percentage":42}}'
+for i in $(seq 1 30); do
+  echo "$IN" | env HOME="$S" CLAUDE_CONFIG_DIR="$S/.claude" TMPDIR="$S/tmp" CCBSL_NO_ACT=1 COLUMNS=120 \
+    node statusline.js >/dev/null
+done
+rm -rf "$S"
+```
+
+A render without those env overrides writes to your real `~/.claude` and real temp dir,
+so always sandbox a benchmark.
+
 ## Ideas that would help
 
 - A PowerShell version of `claude-profiles.sh` for Windows.

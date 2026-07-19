@@ -11,11 +11,63 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+### Added
+- Cell-accurate terminal width for CJK, Hangul, kana, and fullwidth characters, so the bar no
+  longer overflows a narrow terminal when a folder, branch, or session name is non-ASCII.
+- `resetStyle: "clock24"` for a 24-hour reset clock (the default stays `clock`).
+- `--dismiss-update` to silence the update badge for a version you choose to skip.
+- `updatePubkey`: pin an Ed25519 public key to require a signed `statusline.js.sig` on every
+  `--update`. Empty by default, so behavior is unchanged; see SECURITY.md for the signing commands.
+- The guardian re-arms on a second limit in one session (a window switch), and the watcher
+  re-reads its checkpoint each tick, so a refreshed reset time is honored.
+- A performance budget and a sandboxed benchmark recipe in CONTRIBUTING.md.
+- Mechanical quality gates (`test-gates.js`, run by `node --test`): a plain-voice scan of the docs
+  and CLI text, example-config-versus-defaults parity, config-key coverage, and README/help flag parity.
+
 ### Changed
 - Rewrote the docs (README, SECURITY, CONTRIBUTING, changelog prose) and the CLI's own output
   in a plainer, more human voice: dropped every em-dash and tightened the phrasing. No behavior
   change. Also corrected the README install section, which still claimed you had to re-run
   `--install` per profile (`1.0.1` made one run cover them all).
+- Raised the `gitCacheMs` default from 2500 to 10000, roughly halving how often a large repo
+  re-shells `git status` on the render. Branch and dirty state can lag by up to about 10 seconds;
+  one config line changes it back. Both `git status` calls now pass `--no-optional-locks`, so a
+  background render never takes the repo index lock.
+
+### Fixed
+- A missing desktop-notifier binary no longer crashes the render at critical usage (the detached
+  spawn now handles its asynchronous error event).
+- One-shot flags such as `--purge` and `--update` now respect the one-command-at-a-time gate, so a
+  combined command like `--purge --install` is rejected instead of silently running only one.
+- `--uninstall` removes the guardian hooks even when run from a moved or re-downloaded copy, and
+  leaves a genuinely third-party status line in place instead of deleting it just because its
+  script is also named `statusline.js`.
+- `--doctor` path-checks guardian hook commands and unquoted status-line commands and flags a stale
+  `/statusline-config` path, instead of reporting "All checks passed" on a broken install.
+- `--install` no longer wires a foreign `~/.claude-*` tool directory as a profile, announces when
+  it replaces an existing status line, and protects the original settings backup across re-installs.
+- The update badge stops nagging about a version that can never be fetched: staleness is now based
+  on the last successful check, not the last attempt.
+- An unwritable config dir no longer spawns a network-touching update checker on every render.
+- Update redirects are restricted to http(s) with no https-to-http downgrade; `isOurGitClone` no
+  longer matches an unrelated repo whose remote merely contains the project name as a substring;
+  `NO_PROXY` honors the `*.example.com` form; `--update --force` can re-apply the current version to
+  repair a modified copy; a malformed four-part remote version is refused.
+- Hostile or empty stdin (valid-JSON `null`, a non-string model name, a non-numeric `reserveCols`)
+  degrades per segment instead of crashing the render to the error banner.
+- The usage bar reserves its last block for a true 100%, so it no longer reads "full" at about 94%,
+  and it turns red at the warn threshold in step with the label.
+- `writeJsonAtomic` never strands a temp file when a rename fails; `--purge` now also removes the
+  render error log; `--sessions` and the resume ticket print a Windows-runnable `cd /d` command on
+  Windows.
+- The profile switcher rejects slashed or dot-dot profile names, so `claude-profile new`/`remove`
+  can no longer create or delete a directory outside the `.claude-*` namespace.
+
+### Security
+- On Windows, the guardian's PID-ownership check verifies the process command line before signaling,
+  so a recycled PID is never killed; the desktop notification passes its text through the
+  environment instead of a PowerShell command string, closing an injection path; and the
+  cross-profile ledger validates each profile name before it becomes a config-dir path.
 
 ## [1.0.1] - 2026-07-18
 

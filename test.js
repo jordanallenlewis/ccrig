@@ -18,12 +18,25 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-const SCRIPT = path.join(__dirname, 'statusline.js');
 const NODE = process.execPath;
 
 // every sandbox lives under one scratch root, removed at the end
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'ccsl-test-'));
 test.after(() => { try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch {} });
+
+// TEST-01: a suite-owned tmp dir. run() points the child's TMPDIR/TEMP/TMP here, so the
+// product's tmp reads/writes and --purge sweeps never touch the developer's real os.tmpdir().
+const TESTTMP = path.join(ROOT, 'tmp');
+fs.mkdirSync(TESTTMP, { recursive: true });
+
+// TEST-02: run against a clean copy of the script OUTSIDE the repo checkout, so a
+// statusline.config.json (or a dogfooded install) in the repo dir can't change test behavior.
+// CHANGELOG.md is copied alongside because --whatsnew reads it next to the script.
+const CLEAN = path.join(ROOT, 'clean');
+fs.mkdirSync(CLEAN, { recursive: true });
+fs.copyFileSync(path.join(__dirname, 'statusline.js'), path.join(CLEAN, 'statusline.js'));
+try { fs.copyFileSync(path.join(__dirname, 'CHANGELOG.md'), path.join(CLEAN, 'CHANGELOG.md')); } catch {}
+const SCRIPT = path.join(CLEAN, 'statusline.js');
 
 let n = 0;
 function sandbox() {
@@ -40,13 +53,24 @@ function scriptCopy(dir, config) {
   return p;
 }
 function run(args, { stdin = '', env = {}, script = SCRIPT } = {}) {
+  // TEST-01: start from a scrubbed copy of the environment so a contributor's own
+  // NO_UPDATE_NOTIFIER / API key / proxy / CCBSL_* settings can't change test behavior, and
+  // redirect every temp path at TESTTMP so the product never reads or deletes host os.tmpdir().
+  const base = { ...process.env };
+  for (const k of ['NO_UPDATE_NOTIFIER', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
+    'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
+    'CCBSL_UPDATE_BASE', 'CCBSL_UNATTENDED', 'CLAUDE_CONFIG_DIR']) delete base[k];
+  base.TMPDIR = base.TEMP = base.TMP = TESTTMP;
+  // CCBSL_NO_ACT keeps the guardian from spawning real notifications / watcher / relaunch
+  // processes during tests; file side effects (checkpoints, tickets) still run.
+  const merged = { ...base, COLUMNS: '120', CCBSL_NO_ACT: '1', ...env };
+  // on Windows os.homedir() reads USERPROFILE, not HOME; mirror it so HOME sandboxing works there too
+  if (merged.HOME) merged.USERPROFILE = merged.HOME;
   const r = spawnSync(NODE, [script, ...args], {
     input: stdin,
     encoding: 'utf8',
     timeout: 15000,
-    // CCBSL_NO_ACT keeps the guardian from spawning real notifications / watcher
-    // processes during tests; file side effects (checkpoints, tickets) still run.
-    env: { ...process.env, COLUMNS: '120', CCBSL_NO_ACT: '1', ...env },
+    env: merged,
   });
   return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
 }
@@ -106,8 +130,8 @@ test('billing: sub with rate_limits, api with an API key, hidden otherwise', () 
   assert.match(api, /💳 api/);
   const envNoKey = { ...env }; delete envNoKey.ANTHROPIC_API_KEY;
   const none = render(baseInput(), { env: envNoKey });
-  // guard: only when no key is inherited from the outer environment
-  if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) assert.ok(!strip(none.out).includes('💳'));
+  // run() scrubs ANTHROPIC_API_KEY/AUTH_TOKEN from the child env, so this is unconditional now
+  assert.ok(!strip(none.out).includes('💳'));
 });
 
 test('usage bars render with reset times', () => {
@@ -176,6 +200,7 @@ test('profile hides for a single-profile user on the default dir', () => {
 test('profile shows with two profiles and derives labels from dir names', () => {
   const sb = sandbox();
   fs.mkdirSync(path.join(sb.home, '.claude-acme'), { recursive: true });
+  fs.writeFileSync(path.join(sb.home, '.claude-acme', 'settings.json'), '{}'); // a real profile marker
   const env = { HOME: sb.home };
   const onDefault = strip(render(baseInput(), { env: { ...env, CLAUDE_CONFIG_DIR: sb.cfg } }).out);
   assert.match(onDefault, /👤/);
@@ -186,6 +211,7 @@ test('profile shows with two profiles and derives labels from dir names', () => 
 test('profileLabels config overrides the derived label', () => {
   const sb = sandbox();
   fs.mkdirSync(path.join(sb.home, '.claude-x'), { recursive: true });
+  fs.writeFileSync(path.join(sb.home, '.claude-x', 'settings.json'), '{}'); // a real profile marker
   const script = scriptCopy(sb.dir, { profileLabels: { '.claude': 'work' } });
   const out = strip(render(baseInput(), { env: { HOME: sb.home, CLAUDE_CONFIG_DIR: sb.cfg }, script }).out);
   assert.match(out, /👤 work/);
@@ -383,6 +409,7 @@ test('REGRESSION: --install wires EVERY profile, not just the active one (work +
   const sb = sandbox(); // creates ~/.claude (the default / "work" profile)
   const personal = path.join(sb.home, '.claude-personal');
   fs.mkdirSync(personal, { recursive: true });
+  fs.writeFileSync(path.join(personal, 'settings.json'), '{}'); // a Claude marker: a real profile, not a foreign tool dir
   // install pointed at the DEFAULT profile only — personal must still get wired
   const r = run(['--install'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
   assert.strictEqual(r.code, 0);
@@ -699,7 +726,7 @@ const userEntry = (text) => ({ type: 'user', message: { role: 'user', content: t
 const asstEntry = (text) => ({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] } });
 // djb2 mirror of statusline.js strHash, so tests can seed the forecast sample file
 function strHash(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return h.toString(36); }
-function seedSamples(sid, samples) { fs.writeFileSync(path.join(os.tmpdir(), 'ccbsl-usage-' + strHash(sid) + '.jsonl'), samples.map((s) => JSON.stringify(s)).join('\n') + '\n'); }
+function seedSamples(sid, samples) { fs.writeFileSync(path.join(TESTTMP, 'ccbsl-usage-' + strHash(sid) + '.jsonl'), samples.map((s) => JSON.stringify(s)).join('\n') + '\n'); }
 const hookRun = (event, payload, opts) => run(['--hook', event], { stdin: JSON.stringify(payload), ...opts });
 
 // ---- Feature 2: keep-working / anti-stop Stop hook ----
@@ -1104,6 +1131,7 @@ test('REGRESSION: --install-guardian and --uninstall span every profile', () => 
   const sb = sandbox();
   const personal = path.join(sb.home, '.claude-personal');
   fs.mkdirSync(personal, { recursive: true });
+  fs.writeFileSync(path.join(personal, 'settings.json'), '{}'); // a Claude marker: a real profile
   const script = scriptCopy(sb.dir);
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
   run(['--install-guardian'], { env, script });
@@ -1342,4 +1370,432 @@ test('config migration: a stale short `order` gets new segments unioned in (not 
   render(baseInput({ session_id: 'mig1', model: { display_name: 'Opus 4.8' }, rate_limits: hot }), { env, script });
   const out = strip(render(baseInput({ session_id: 'mig1', model: { display_name: 'Sonnet 5' }, rate_limits: hot }), { env, script }).out);
   assert.match(out, /⬇ Sonnet/, 'downgrade segment migrated into a stale order');
+});
+
+// ===========================================================================
+// harness hermeticity + Wave-0 unblocker regressions (TEST-01/02/03)
+// ===========================================================================
+// TEST-01: prove the suite never deletes host os.tmpdir() state. Planted before every
+// test (including the --purge test) and checked after the whole run.
+const HOST_TMP_CANARY = path.join(os.tmpdir(), 'ccbsl-usage-canary-' + process.pid + '.jsonl');
+test.before(() => { try { fs.writeFileSync(HOST_TMP_CANARY, 'canary'); } catch {} });
+test.after(() => {
+  const survived = fs.existsSync(HOST_TMP_CANARY);
+  try { fs.unlinkSync(HOST_TMP_CANARY); } catch {}
+  assert.ok(survived, 'REGRESSION: the suite deleted a host os.tmpdir() canary (not hermetic to TMPDIR)');
+});
+
+test('REGRESSION: the default test script is isolated from the repo checkout', () => {
+  assert.notStrictEqual(path.dirname(SCRIPT), __dirname);
+  assert.ok(!fs.existsSync(path.join(path.dirname(SCRIPT), 'statusline.config.json')),
+    'the clean script dir must have no statusline.config.json');
+});
+
+test('REGRESSION: host NO_UPDATE_NOTIFIER does not leak into spawned tests', () => {
+  const sb = sandbox();
+  const prev = process.env.NO_UPDATE_NOTIFIER;
+  process.env.NO_UPDATE_NOTIFIER = '1';
+  try {
+    const now = Date.now();
+    fs.writeFileSync(path.join(sb.cfg, '.ccbsl-update.json'),
+      JSON.stringify({ current: '1.0.0', latest: '9.9.9', checkedAt: now, lastSuccessAt: now }));
+    const out = strip(render(baseInput(), { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } }).out);
+    assert.match(out, /⬆ v9\.9\.9/, 'update badge should still render; host NO_UPDATE_NOTIFIER must be scrubbed');
+  } finally {
+    if (prev === undefined) delete process.env.NO_UPDATE_NOTIFIER; else process.env.NO_UPDATE_NOTIFIER = prev;
+  }
+});
+
+test('REGRESSION: --watch under CCBSL_NO_ACT never spawns claudeBin', () => {
+  const sb = sandbox();
+  const guardDir = path.join(sb.cfg, 'guardian');
+  fs.mkdirSync(guardDir, { recursive: true });
+  const marker = path.join(sb.dir, 'RELAUNCHED');
+  const stub = path.join(sb.dir, 'claude-stub.sh');
+  fs.writeFileSync(stub, '#!/bin/sh\ntouch "' + marker + '"\n');
+  fs.chmodSync(stub, 0o755);
+  const sid = 'watch-noact-1';
+  // a checkpoint whose reset is already in the past -> the watcher fires on its first tick
+  fs.writeFileSync(path.join(guardDir, sid + '.checkpoint.json'), JSON.stringify({
+    session_id: sid, cwd: sb.dir, window: 'session',
+    resets_at: Math.floor(Date.now() / 1000) - 60,
+  }));
+  const script = scriptCopy(sb.dir, { claudeBin: stub, autopilotBuffer: 0 });
+  const r = run(['--watch', sid], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, script });
+  assert.strictEqual(r.code, 0, 'watcher exits cleanly under CCBSL_NO_ACT');
+  assert.ok(!fs.existsSync(marker), 'claudeBin must NOT be spawned under CCBSL_NO_ACT');
+  const log = fs.readFileSync(path.join(guardDir, 'logs', sid + '.log'), 'utf8');
+  assert.match(log, /would relaunch/, 'watcher logs the suppressed relaunch');
+});
+
+test('REGRESSION: statusline.js exports DEFAULTS/DEFAULT_ORDER/MODES/helpText (quality-gate prereq)', () => {
+  const SL = require(SCRIPT);
+  assert.ok(SL.DEFAULTS && typeof SL.DEFAULTS === 'object', 'DEFAULTS exported');
+  assert.ok(Array.isArray(SL.DEFAULT_ORDER) && SL.DEFAULT_ORDER.length > 0, 'DEFAULT_ORDER exported');
+  assert.ok(Array.isArray(SL.MODES) && SL.MODES.includes('normal'), 'MODES exported');
+  assert.strictEqual(typeof SL.helpText, 'function', 'helpText exported');
+  assert.match(SL.helpText(), /--install/, 'helpText renders the flag list');
+});
+
+// ===========================================================================
+// Wave 1: HIGH bugs + render quick wins (XPLAT-01, CLI-01, RENDER-01, RENDER-02)
+// ===========================================================================
+test("REGRESSION: a missing notifier binary never crashes the live render", () => {
+  const sb = sandbox();
+  const now = Math.floor(Date.now() / 1000);
+  const script = scriptCopy(sb.dir, { autopilot: 'notify', updateCheck: false });
+  const emptyBin = path.join(sb.dir, 'emptybin'); fs.mkdirSync(emptyBin, { recursive: true });
+  const input = baseInput({
+    session_id: 'xp1',
+    rate_limits: { five_hour: { used_percentage: 99, resets_at: now + 3600 } },
+  });
+  // CCBSL_NO_ACT='' re-enables real spawns; an empty PATH makes the notifier binary ENOENT
+  const r = render(input, { env: {
+    CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home,
+    CCBSL_NO_ACT: '', PATH: emptyBin, NO_UPDATE_NOTIFIER: '1',
+  }, script });
+  assert.strictEqual(r.code, 0, 'render must not crash when the notifier binary is missing');
+  assert.ok(!/Unhandled 'error'/.test(r.out), 'no unhandled error event in the output');
+});
+
+test('REGRESSION: one-shot flags respect the exclusive gate', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const r1 = run(['--purge', '--install'], { env });
+  assert.strictEqual(r1.code, 1, '--purge --install must exit 1');
+  assert.match(r1.out, /pick one of/);
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'settings.json')), 'neither action ran');
+  const r2 = run(['--disarm', '--purge'], { env });
+  assert.strictEqual(r2.code, 1, '--disarm --purge must exit 1');
+});
+
+test('REGRESSION: a non-numeric reserveCols does not disable wrapping', () => {
+  const SL = require(SCRIPT);
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { reserveCols: 'oops' });
+  const out = render(baseInput({
+    session_id: 'rc1',
+    rate_limits: { five_hour: { used_percentage: 40 }, seven_day: { used_percentage: 30 } },
+  }), { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, cols: '50', script }).out;
+  for (const line of out.split('\n')) {
+    assert.ok(SL.dispWidth(line) <= 50, 'line exceeds 50 cells (wrapping disabled): ' + strip(line));
+  }
+});
+
+test('REGRESSION: hostile stdin degrades per-segment, never to the error banner', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  for (const stdin of ['null', '42', '"str"', '[]', '{"model":{"display_name":123}}', '{"workspace":42}', '{"session_name":99}']) {
+    const r = run([], { stdin, env });
+    assert.strictEqual(r.code, 0, 'exit 0 for stdin ' + stdin);
+    assert.ok(!/statusline error/.test(r.out), 'no error banner for stdin ' + stdin);
+    assert.ok(!fs.existsSync(path.join(sb.cfg, 'statusline-error.log')), 'no error log written for stdin ' + stdin);
+  }
+});
+
+// ===========================================================================
+// Wave 2: safety envelope + width + guardian state machine
+// ===========================================================================
+test('REGRESSION: a CJK folder does not overflow a narrow terminal', () => {
+  const SL = require(SCRIPT);
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const out = render({ workspace: { current_dir: '/tmp/日本語のプロジェクト名前', project_dir: '/tmp/日本語のプロジェクト名前' }, model: { display_name: 'Opus 4.8' }, context_window: { used_percentage: 30 } }, { env, cols: '30' }).out;
+  for (const line of out.split('\n')) assert.ok(SL.dispWidth(line) <= 30, 'CJK line exceeds 30 cells: ' + strip(line));
+});
+
+test('REGRESSION: the usage bar tracks the warn threshold, not yellow', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const now = Math.floor(Date.now() / 1000);
+  const at = (p) => render(baseInput({ session_id: 'uc' + p, rate_limits: { five_hour: { used_percentage: p, resets_at: now + 3600 } } }), { env }).out;
+  assert.ok(!at(85).includes('\x1b[38;5;203m'), 'no red anywhere at 85% (below warn 90)');
+  assert.ok(at(91).includes('\x1b[38;5;203m'), 'red present at 91%');
+});
+
+test('REGRESSION: a second limit in a switched window re-arms/refreshes the checkpoint', () => {
+  const sb = sandbox();
+  const now = Math.floor(Date.now() / 1000);
+  const script = scriptCopy(sb.dir, { autopilot: 'resume', autopilotWeekly: true, updateCheck: false });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const sid = 'rearm1';
+  const cpPath = path.join(sb.cfg, 'guardian', sid + '.checkpoint.json');
+  render(baseInput({ session_id: sid, rate_limits: { five_hour: { used_percentage: 99, resets_at: now + 3600 }, seven_day: { used_percentage: 50, resets_at: now + 5 * 86400 } } }), { env, script });
+  assert.strictEqual(JSON.parse(fs.readFileSync(cpPath, 'utf8')).window, 'session');
+  render(baseInput({ session_id: sid, rate_limits: { five_hour: { used_percentage: 40, resets_at: now + 3600 }, seven_day: { used_percentage: 99, resets_at: now + 5 * 86400 } } }), { env, script });
+  const cp = JSON.parse(fs.readFileSync(cpPath, 'utf8'));
+  assert.strictEqual(cp.window, 'weekly', 'checkpoint re-armed for the weekly window');
+  assert.strictEqual(cp.resets_at, now + 5 * 86400);
+});
+
+test('REGRESSION: failover ignores a ledger entry with a traversal profile name', () => {
+  const sb = sandbox();
+  const now = Math.floor(Date.now() / 1000);
+  const script = scriptCopy(sb.dir, { ledger: true, updateCheck: false });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const ldir = path.join(sb.home, '.claude-usage-ledger'); fs.mkdirSync(ldir, { recursive: true });
+  fs.writeFileSync(path.join(ldir, '.claude-evil.json'), JSON.stringify({ profile: '../../etc', session: 1, weekly: 1, ts: now }));
+  const crit = baseInput({ session_id: 'fo1', rate_limits: { five_hour: { used_percentage: 99, resets_at: now + 3600 } } });
+  const out = strip(render(crit, { env, script }).out);
+  assert.ok(!out.includes('..') && !out.includes('etc'), 'traversal profile never surfaces in a failover hint');
+  fs.writeFileSync(path.join(ldir, '.claude-spare.json'), JSON.stringify({ profile: '.claude-spare', session: 1, weekly: 1, ts: now }));
+  assert.match(strip(render(crit, { env, script }).out), /spare/, 'a valid profile still surfaces');
+});
+
+test('REGRESSION: guardian ignores an inline subagent (isSidechain) turn', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const script = scriptCopy(sb.dir, { keepWorking: true });
+  const tp = transcript(sb.dir, [
+    todoEntry([{ content: 'main', status: 'completed' }]),
+    { type: 'assistant', isSidechain: true, message: { role: 'assistant', content: [{ type: 'tool_use', name: 'TodoWrite', input: { todos: [{ content: 'sub', status: 'pending' }] } }] } },
+  ]);
+  const r = hookRun('stop', { session_id: 'sc1', transcript_path: tp }, { env, script });
+  assert.strictEqual(r.code, 0);
+  assert.strictEqual(r.out.trim(), '', 'a sidechain pending todo must not block stop');
+});
+
+test('REGRESSION: --uninstall from a moved copy removes the guardian hooks too', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const dirA = path.join(sb.dir, 'a'); fs.mkdirSync(dirA, { recursive: true });
+  const scriptA = path.join(dirA, 'statusline.js'); fs.copyFileSync(SCRIPT, scriptA);
+  run(['--install-guardian'], { env, script: scriptA });
+  const dirB = path.join(sb.dir, 'b'); fs.mkdirSync(dirB, { recursive: true });
+  const scriptB = path.join(dirB, 'statusline.js'); fs.copyFileSync(SCRIPT, scriptB);
+  run(['--uninstall'], { env, script: scriptB });
+  const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  const anyHook = j.hooks && ['Stop', 'SessionStart', 'PreCompact'].some((e) => Array.isArray(j.hooks[e]) && j.hooks[e].some((g) => g.hooks && g.hooks.some((h) => (h.command || '').includes('--hook'))));
+  assert.ok(!anyHook, 'guardian hooks removed even though uninstall ran from a moved copy');
+});
+
+test('REGRESSION: --uninstall leaves a LIVE third-party statusline.js untouched', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const bin = path.join(sb.home, 'bin'); fs.mkdirSync(bin, { recursive: true });
+  const foreign = path.join(bin, 'statusline.js'); fs.writeFileSync(foreign, '// someone else\n');
+  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: 'node "' + foreign + '"' } }));
+  const r = run(['--uninstall'], { env });
+  assert.ok(JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8')).statusLine, 'live foreign statusline.js preserved');
+  assert.match(r.out, /left untouched|nothing to remove/);
+});
+
+test('REGRESSION: --doctor fails on a dead UNQUOTED statusLine command', () => {
+  const sb = sandbox();
+  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: 'node /dead/nowhere/statusline.js' } }));
+  const r = run(['--doctor'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
+  assert.strictEqual(r.code, 1);
+  assert.match(r.out, /do not exist/);
+});
+
+test('REGRESSION: --doctor fails when guardian hook paths are dead', () => {
+  const sb = sandbox();
+  const gn = process.execPath;
+  const hc = (slug) => '"' + gn + '" "/dead/gone/statusline.js" --hook ' + slug;
+  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), JSON.stringify({
+    statusLine: { type: 'command', command: '"' + gn + '" "' + SCRIPT + '"' },
+    hooks: {
+      Stop: [{ hooks: [{ type: 'command', command: hc('stop') }] }],
+      SessionStart: [{ hooks: [{ type: 'command', command: hc('session-start') }] }],
+      PreCompact: [{ hooks: [{ type: 'command', command: hc('pre-compact') }] }],
+    },
+  }));
+  const r = run(['--doctor'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
+  assert.strictEqual(r.code, 1);
+  assert.match(r.out, /guardian hook|re-run --install-guardian/);
+});
+
+test('REGRESSION: --doctor flags a stale /statusline-config command path', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  run(['--install'], { env });
+  const scp = path.join(sb.cfg, 'commands', 'statusline-config.md');
+  fs.writeFileSync(scp, fs.readFileSync(scp, 'utf8').split(SCRIPT).join('/dead/moved/statusline.js'));
+  const r = run(['--doctor'], { env });
+  assert.strictEqual(r.code, 1);
+  assert.match(r.out, /statusline-config command points at a missing script|re-run --install/);
+});
+
+test('REGRESSION: replacing a foreign status line is announced and its backup survives a second install', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: '/usr/local/bin/my-custom-bar --fancy' } }));
+  const first = run(['--install'], { env });
+  assert.match(first.out, /replaced an existing status line/);
+  run(['--install'], { env });
+  const backups = fs.readdirSync(sb.cfg).filter((f) => f.startsWith('settings.json.bak'));
+  assert.ok(backups.some((f) => fs.readFileSync(path.join(sb.cfg, f), 'utf8').includes('my-custom-bar')), 'a backup still holds the original custom bar');
+});
+
+test('REGRESSION: --install does not wire a marker-less .claude-* directory', () => {
+  const sb = sandbox();
+  const foreign = path.join(sb.home, '.claude-code-router'); fs.mkdirSync(foreign, { recursive: true });
+  const r = run(['--install'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
+  assert.strictEqual(r.code, 0);
+  assert.ok(!fs.existsSync(path.join(foreign, 'settings.json')), 'a foreign tool dir must not be wired');
+});
+
+test('REGRESSION: --uninstall removes the /statusline-config command even when the status line is foreign', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  run(['--install'], { env });
+  const sp = path.join(sb.cfg, 'settings.json');
+  const j = JSON.parse(fs.readFileSync(sp, 'utf8')); j.statusLine = { type: 'command', command: 'npx other-bar' };
+  fs.writeFileSync(sp, JSON.stringify(j));
+  run(['--uninstall'], { env });
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'commands', 'statusline-config.md')), 'slash command removed even for a foreign bar');
+});
+
+test('REGRESSION: --install summary does not claim all profiles wired when one was skipped', () => {
+  const sb = sandbox();
+  const personal = path.join(sb.home, '.claude-personal');
+  fs.mkdirSync(personal, { recursive: true });
+  fs.writeFileSync(path.join(personal, 'settings.json'), '{broken');
+  const r = run(['--install'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
+  assert.ok(!/All your Claude profiles now show the bar/.test(r.out), 'no false all-profiles claim');
+  assert.match(r.out, /of 2|skipped/);
+});
+
+test('REGRESSION: an unknown flag errors instead of rendering', () => {
+  const r = run(['--instal'], { stdin: '{}' });
+  assert.strictEqual(r.code, 1);
+  assert.match(r.out, /unknown flag/);
+});
+
+test('--purge names its target profile', () => {
+  const sb = sandbox();
+  const r = run(['--purge'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
+  assert.strictEqual(r.code, 0);
+  assert.ok(r.out.includes(sb.cfg), '--purge output names the profile dir');
+});
+
+test('REGRESSION: --sessions resume command is runnable on this platform', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const proj = path.join(sb.cfg, 'projects', '-tmp-proj'); fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, 'abc-123.jsonl'), JSON.stringify({ cwd: '/tmp/proj', type: 'user', message: { role: 'user', content: 'hi' } }) + '\n');
+  const out = run(['--sessions'], { env }).out;
+  if (process.platform === 'win32') assert.match(out, /cd \/d "/);
+  else assert.match(out, /cd '/);
+});
+
+test('REGRESSION: writeJsonAtomic never strands a .tmp file', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  fs.mkdirSync(path.join(sb.cfg, '.ccbsl-update.json'), { recursive: true }); // force renameSync to fail
+  const base = path.join(sb.dir, 'ub'); fs.mkdirSync(base, { recursive: true });
+  fs.writeFileSync(path.join(base, 'statusline.js'), "const VERSION = '1.0.1';\n");
+  run(['--check-update'], { env: { ...env, CCBSL_UPDATE_BASE: base } });
+  assert.ok(fs.readdirSync(sb.cfg).every((f) => !f.endsWith('.tmp')), 'no stranded .tmp in the config dir');
+});
+
+test('resetStyle clock24 renders 24-hour times', () => {
+  const sb = sandbox();
+  const now = Math.floor(Date.now() / 1000);
+  const script = scriptCopy(sb.dir, { resetStyle: 'clock24' });
+  const out = strip(render(baseInput({ session_id: 'c24', rate_limits: { five_hour: { used_percentage: 20, resets_at: now + 3 * 3600 + 25 * 60 } } }), { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, script }).out);
+  assert.match(out, /↺\d{2}:\d{2}\b/, 'a 24-hour HH:MM reset time');
+  assert.ok(!/↺\d{1,2}:\d{2}[ap]\b/.test(out), 'no 12-hour a/p suffix');
+});
+
+// ===========================================================================
+// Wave 3: update subsystem + perf
+// ===========================================================================
+test('REGRESSION: the update badge stays suppressed after a failed check refreshes a 40-day-old cache', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const old = Date.now() - 40 * 86400 * 1000;
+  fs.writeFileSync(path.join(sb.cfg, '.ccbsl-update.json'), JSON.stringify({ current: '1.0.1', latest: '99.0.0', checkedAt: old, lastSuccessAt: old }));
+  run(['--check-update'], { env: { ...env, CCBSL_UPDATE_BASE: path.join(sb.dir, 'nope-does-not-exist') } }); // fails: refreshes checkedAt, NOT lastSuccessAt
+  const out = strip(render(baseInput(), { env }).out);
+  assert.ok(!out.includes('⬆'), 'a failed check must not resurrect a stale badge');
+});
+
+test('--dismiss-update silences the badge for the cached version', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const now = Date.now();
+  fs.writeFileSync(path.join(sb.cfg, '.ccbsl-update.json'), JSON.stringify({ current: '1.0.1', latest: '9.9.9', checkedAt: now, lastSuccessAt: now }));
+  assert.match(run(['--dismiss-update'], { env }).out, /dismissed/);
+  assert.ok(!strip(render(baseInput(), { env }).out).includes('⬆'), 'badge gone after dismiss');
+});
+
+test('REGRESSION: --update in a repo whose remote merely CONTAINS ccrig uses the download path', () => {
+  const sb = sandbox();
+  const { execFileSync } = require('child_process');
+  const repo = path.join(sb.dir, 'repo'); fs.mkdirSync(repo, { recursive: true });
+  const s = path.join(repo, 'statusline.js');
+  const G = (...a) => execFileSync('git', ['-C', repo, ...a], { stdio: 'ignore', timeout: 8000 });
+  try {
+    G('init', '-q');
+    G('config', 'user.email', 't@t.co'); G('config', 'user.name', 't'); G('config', 'commit.gpgsign', 'false');
+    G('remote', 'add', 'origin', 'https://gitlab.invalid/mccrigan/dotfiles.git'); // CONTAINS "ccrig" but not as a path segment
+    fs.copyFileSync(SCRIPT, s);
+    G('add', 'statusline.js'); G('commit', '-q', '-m', 'x');
+  } catch { return; } // git unavailable -> skip
+  const base = path.join(sb.dir, 'rem'); fs.mkdirSync(base, { recursive: true });
+  fs.writeFileSync(path.join(base, 'statusline.js'), fs.readFileSync(SCRIPT, 'utf8').replace(/const VERSION = '[^']+'/, "const VERSION = '99.0.0'"));
+  fs.copyFileSync(path.join(__dirname, 'CHANGELOG.md'), path.join(base, 'CHANGELOG.md'));
+  const r = run(['--update'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_UPDATE_BASE: base }, script: s });
+  assert.ok(!/git pull/.test(r.out), 'must not take the git-pull path for an unrelated remote');
+  assert.match(r.out, /updated v.+ -> v99|What changed/, 'took the download path');
+});
+
+test('REGRESSION: --update --force re-applies the same version (repair a modified copy)', () => {
+  const sb = sandbox();
+  const inst = path.join(sb.dir, 'inst'); fs.mkdirSync(inst, { recursive: true });
+  const s = path.join(inst, 'statusline.js'); fs.copyFileSync(SCRIPT, s);
+  const pristine = fs.readFileSync(SCRIPT, 'utf8');
+  fs.appendFileSync(s, '\n// locally corrupted\n');
+  const base = path.join(sb.dir, 'rem'); fs.mkdirSync(base, { recursive: true });
+  fs.writeFileSync(path.join(base, 'statusline.js'), pristine);
+  fs.copyFileSync(path.join(__dirname, 'CHANGELOG.md'), path.join(base, 'CHANGELOG.md'));
+  const noForce = run(['--update'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_UPDATE_BASE: base }, script: s });
+  assert.match(noForce.out, /already at/, 'without --force, same-version is a no-op');
+  const r = run(['--update', '--force'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_UPDATE_BASE: base }, script: s });
+  assert.match(r.out, /updated|integrity/);
+  assert.strictEqual(fs.readFileSync(s, 'utf8'), pristine, 'file repaired to the pristine remote');
+  assert.ok(fs.readdirSync(inst).some((f) => f.startsWith('statusline.js.bak')), 'a backup was written');
+});
+
+// ===========================================================================
+// Wave 4: shell + coverage gaps (SHELL-02, TEST-09)
+// ===========================================================================
+test('REGRESSION: claude-profile rejects slashed/dot-dot profile names (bash + zsh)', () => {
+  const { execFileSync, spawnSync } = require('child_process');
+  const sh = path.join(__dirname, 'claude-profiles.sh');
+  let ran = 0;
+  for (const shell of ['bash', 'zsh']) {
+    try { execFileSync(shell, ['-c', 'true'], { stdio: 'ignore' }); } catch { continue; } // shell absent -> skip
+    ran++;
+    const sb = sandbox();
+    const victim = path.join(path.dirname(sb.home), 'outside-victim');
+    const r = spawnSync(shell, ['-c', 'source "' + sh + '"; claude-profile new "x/../../outside-victim"'], { env: { ...process.env, HOME: sb.home }, encoding: 'utf8' });
+    assert.notStrictEqual(r.status, 0, shell + ': a slashed name must be rejected');
+    assert.ok(!fs.existsSync(victim), shell + ': nothing created outside the .claude-* namespace');
+  }
+  assert.ok(ran > 0, 'at least one of bash/zsh should be available to exercise the guard');
+});
+
+test('--board notes when sessionBoard is off and lists no live sessions', () => {
+  const sb = sandbox();
+  const r = run(['--board'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
+  assert.strictEqual(r.code, 0);
+  assert.match(r.out, /sessionBoard is off|no live sessions/);
+});
+
+test('billing shows api for ANTHROPIC_AUTH_TOKEN too', () => {
+  const sb = sandbox();
+  const out = strip(render(baseInput(), { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, ANTHROPIC_AUTH_TOKEN: 'x' } }).out);
+  assert.match(out, /💳 api/);
+});
+
+test('reinjectOnCompact re-injects an absolute rules file, capped at 8000 chars', () => {
+  const sb = sandbox();
+  const rules = path.join(sb.dir, 'RULES.md');
+  fs.writeFileSync(rules, 'RULETOKEN ' + 'x'.repeat(9000));
+  const script = scriptCopy(sb.dir, { reinjectOnCompact: rules });
+  const r = hookRun('session-start', { session_id: 'ric1', source: 'compact', cwd: sb.dir }, { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, script });
+  assert.strictEqual(r.code, 0);
+  assert.match(r.out, /RULETOKEN/, 'the rules file is re-injected on a compaction');
 });

@@ -164,3 +164,102 @@ test('bar: fills proportionally and clamps', () => {
   assert.strictEqual((strip(SL.bar(150, 10, t)).match(/█/g) || []).length, 10, 'clamped at 100%');
   assert.strictEqual((strip(SL.bar(50, 10, t)).match(/█/g) || []).length, 5, '50% -> half');
 });
+
+// ---------------------------------------------------------------------------
+// Wave 2 units: RENDER-03/04, GUARD-04, XPLAT-04
+test('glyphWidth/dispWidth: East Asian Wide counts as 2 cells', () => {
+  assert.strictEqual(SL.dispWidth('漢字'), 4);
+  assert.strictEqual(SL.dispWidth('ＡＢ'), 4, 'fullwidth latin');
+  assert.strictEqual(SL.dispWidth('한글'), 4, 'Hangul');
+  assert.strictEqual(SL.dispWidth('日本語'), 6, 'kanji');
+  assert.strictEqual(SL.dispWidth('ｱｲｳ'), 3, 'halfwidth kana stays 1 cell');
+  assert.strictEqual(SL.dispWidth('abc'), 3, 'ascii unchanged');
+  assert.strictEqual(SL.dispWidth('🤖'), 2);
+  assert.strictEqual(SL.dispWidth('👩‍💻'), 4, 'ZWJ sequence over-counts (conscious, safe: wraps early)');
+  assert.strictEqual(SL.glyphWidth(0x200D), 0, 'ZWJ is zero-width');
+  assert.strictEqual(SL.glyphWidth(0x4E00), 2);
+  assert.strictEqual(SL.glyphWidth(0x41), 1);
+});
+
+test('truncFolder: cell-aware, never emits a lone surrogate', () => {
+  const t = SL.truncFolder('😀😀😀😀😀', 6);
+  assert.ok(![...t].some((ch) => { const c = ch.codePointAt(0); return c >= 0xD800 && c <= 0xDFFF; }), 'no lone surrogate');
+  assert.ok(SL.dispWidth(t) <= 6);
+  assert.ok(SL.dispWidth(SL.truncFolder('非常に長いフォルダ名です', 10)) <= 10, 'CJK folder shortened to its cell budget');
+  assert.strictEqual(SL.truncFolder('short', 20), 'short', 'untouched when it fits');
+});
+
+test('bar: reserves the final block for a true 100%', () => {
+  const t = { green: 50, yellow: 80 };
+  const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
+  const filled = (p, w) => (strip(SL.bar(p, w, t)).match(/█/g) || []).length;
+  assert.ok(filled(94, 8) < 8, '94% must not read full');
+  assert.strictEqual(filled(100, 8), 8, '100% fills all blocks');
+  assert.strictEqual(filled(0, 10), 0);
+  assert.strictEqual(filled(50, 10), 5);
+});
+
+test('watcherCmdMatches: only a --watch <sid> cmdline is ours', () => {
+  assert.ok(SL.watcherCmdMatches('node statusline.js --watch abc', 'abc'));
+  assert.ok(!SL.watcherCmdMatches('node other.js', 'abc'));
+  assert.ok(!SL.watcherCmdMatches('node --watch xyz', 'abc'));
+  assert.ok(!SL.watcherCmdMatches(null, 'abc'));
+});
+
+test('notifySpec: win32 keeps the payload out of code position (injection-safe)', () => {
+  const title = 'Claude', msg = 'Fix $(Get-Date) `whoami` "x" bug';
+  const w = SL.notifySpec('win32', title, msg);
+  assert.ok(w.args.includes('-EncodedCommand'), 'uses -EncodedCommand');
+  const script = Buffer.from(w.args[w.args.indexOf('-EncodedCommand') + 1], 'base64').toString('utf16le');
+  assert.ok(script.includes('$env:CCBSL_N_TITLE') && script.includes('$env:CCBSL_N_MSG'), 'reads title/msg from env');
+  assert.ok(!script.includes('Get-Date') && !script.includes('whoami'), 'payload is NOT embedded in the script');
+  assert.strictEqual(w.env.CCBSL_N_TITLE, title);
+  assert.strictEqual(w.env.CCBSL_N_MSG, msg);
+  const mac = SL.notifySpec('darwin', 't', 'm');
+  assert.strictEqual(mac.cmd, 'osascript');
+  assert.ok(mac.args[1].includes('display notification'), 'macOS args shape unchanged');
+  const lin = SL.notifySpec('linux', 't', 'm');
+  assert.strictEqual(lin.cmd, 'notify-send');
+  assert.deepStrictEqual(lin.args, ['t', 'm']);
+});
+
+// ---------------------------------------------------------------------------
+// Wave 3 units: UPD-02/03/06/09
+test('parseRemoteVersion: strict x.y.z (4-part or suffixed -> null)', () => {
+  assert.strictEqual(SL.parseRemoteVersion("const VERSION = '99.2.0.1';"), null, '4-part is refused');
+  assert.strictEqual(SL.parseRemoteVersion("const VERSION = '1.2.3';"), '1.2.3');
+  assert.strictEqual(SL.parseRemoteVersion("const VERSION = '2.2.0-rc1';"), null);
+});
+
+test('maybeCheckUpdate: throttled on a fresh cache; gated by CCBSL_NO_ACT (no spawn)', () => {
+  const prev = process.env.CCBSL_NO_ACT; process.env.CCBSL_NO_ACT = '1';
+  try {
+    assert.strictEqual(SL.maybeCheckUpdate({ checkedAt: Date.now() }), false, 'fresh cache -> throttled');
+    assert.strictEqual(SL.maybeCheckUpdate(null), false, 'CCBSL_NO_ACT gates the spawn');
+  } finally { if (prev === undefined) delete process.env.CCBSL_NO_ACT; else process.env.CCBSL_NO_ACT = prev; }
+});
+
+test('httpGetText refuses a redirect to a non-http(s) scheme', async () => {
+  const http = require('http');
+  const server = http.createServer((req, res) => { res.writeHead(302, { location: 'file:///etc/hosts' }); res.end(); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+  const err = await new Promise((resolve) => SL.httpGetText('http://127.0.0.1:' + port + '/x', 0, (e) => resolve(e && e.message)));
+  server.close();
+  assert.match(err, /unsupported redirect/);
+});
+
+test('NO_PROXY *.example.com bypasses the proxy', async () => {
+  const http = require('http');
+  let proxyHits = 0;
+  const proxy = http.createServer((req, res) => { proxyHits++; res.writeHead(200); res.end('via proxy'); });
+  await new Promise((r) => proxy.listen(0, '127.0.0.1', r));
+  const pport = proxy.address().port;
+  const restore = { HTTP_PROXY: process.env.HTTP_PROXY, NO_PROXY: process.env.NO_PROXY };
+  process.env.HTTP_PROXY = 'http://127.0.0.1:' + pport;
+  process.env.NO_PROXY = '*.example.com';
+  await new Promise((resolve) => SL.httpGetText('http://sub.example.com/x', 0, () => resolve())); // resolves via error or data; we only care about the proxy
+  proxy.close();
+  for (const k of ['HTTP_PROXY', 'NO_PROXY']) { if (restore[k] === undefined) delete process.env[k]; else process.env[k] = restore[k]; }
+  assert.strictEqual(proxyHits, 0, 'a *.example.com host must bypass the proxy (direct, not via proxy)');
+});
