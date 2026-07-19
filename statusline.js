@@ -395,14 +395,15 @@ function writeResumeTicket(input, pct, windowName, resetEpoch) {
       'Claude Code saves the transcript continuously, so nothing was lost. This ticket is the pointer back.',
       '',
       'Session: "' + name + '"',
+      'Profile: ' + profileLabel(CFG) + '  (' + CFG + ')',
       'Project: ' + cwd,
       '',
-      'Pick up exactly where you left off:',
+      'Pick up exactly where you left off (this pins the profile the session ran under, so it',
+      'resumes on the right account even from a shell set to a different profile):',
       '',
-      '    ' + (process.platform === 'win32' ? 'cd /d "' + cwd.replace(/"/g, '') + '"' : 'cd "' + cwd + '"'),
-      '    claude --resume ' + sid,
+      '    ' + resumeCmdLine(CFG, cwd, sid),
       '',
-      'Or run `claude --continue` in that directory for its most recent session.',
+      'Or, from that project directory with this profile active, run `claude --continue`.',
       '',
     ].join('\n'));
     for (const f of fs.readdirSync(dir)) { // keep the drawer tidy: 14-day retention
@@ -600,6 +601,7 @@ function writeCheckpoint(input, meta) {
       session_id: sid,
       session_name: input.session_name || '',
       cwd,
+      config_dir: CFG,   // the profile that OWNS this session; the resume MUST run under it
       saved_at: new Date().toISOString(),
       reason,
       window,
@@ -1680,6 +1682,8 @@ function relaunchResume(cp, profileDir) {
     env.CLAUDE_CONFIG_DIR = profileDir;
     args = [...bypass, '-p', prompt];
   } else {
+    // resume UNDER THE OWNING PROFILE, not whatever profile the watcher happened to inherit
+    if (cp.config_dir) env.CLAUDE_CONFIG_DIR = cp.config_dir;
     args = [...bypass, '--resume', sid, '-p', prompt];
   }
   let fd = 'ignore';
@@ -1826,6 +1830,17 @@ function runPurge() {
 }
 function pad(s, n) { s = String(s == null ? '' : s); return s.length >= n ? s.slice(0, n) : s + ' '.repeat(n - s.length); }
 function shellQuote(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; } // safe for copy-paste, even with spaces/quotes
+// a copy-pasteable resume command that PINS the owning profile's CLAUDE_CONFIG_DIR, so a session
+// started under one profile (e.g. personal) resumes under THAT profile even if the current shell is
+// pointed at another (e.g. work). Platform-aware: cmd.exe `set` + `cd /d` vs POSIX inline env.
+function resumeCmdLine(cfgDir, cwd, sid) {
+  if (process.platform === 'win32') {
+    const cd = cwd ? 'cd /d "' + cwd.replace(/"/g, '') + '" && ' : '';
+    return cd + 'set "CLAUDE_CONFIG_DIR=' + String(cfgDir).replace(/"/g, '') + '" && claude --resume ' + sid;
+  }
+  const cd = cwd ? 'cd ' + shellQuote(cwd) + ' && ' : '';
+  return cd + 'CLAUDE_CONFIG_DIR=' + shellQuote(cfgDir) + ' claude --resume ' + sid;
+}
 function readHead(p, bytes) { try { const fd = fs.openSync(p, 'r'); const buf = Buffer.alloc(bytes); const n = fs.readSync(fd, buf, 0, bytes, 0); fs.closeSync(fd); return buf.slice(0, n).toString('utf8'); } catch { return ''; } }
 // --board: every live session across your worktrees/profiles (opt-in via sessionBoard)
 function runBoard() {
@@ -1859,22 +1874,27 @@ function runBoard() {
 }
 // --sessions: recent sessions in this profile, newest first, with the resume command
 function runSessions() {
-  const base = path.join(CFG, 'projects');
+  // scan EVERY profile, not just the active one: a session you want back may live under a different
+  // profile (personal vs work). Each row is labelled with its profile and its resume command pins it.
+  const profiles = detectProfiles();
   const rows = [];
-  try {
-    for (const proj of fs.readdirSync(base)) {
+  for (const cfgDir of profiles) {
+    const base = path.join(cfgDir, 'projects');
+    let projs; try { projs = fs.readdirSync(base); } catch { continue; }
+    for (const proj of projs) {
       const pdir = path.join(base, proj);
       let files; try { files = fs.readdirSync(pdir); } catch { continue; }
       for (const f of files) {
         if (!f.endsWith('.jsonl')) continue;
         const p = path.join(pdir, f);
-        try { const st = fs.statSync(p); rows.push({ sid: f.replace(/\.jsonl$/, ''), path: p, size: st.size, mtime: st.mtimeMs }); } catch {}
+        try { const st = fs.statSync(p); rows.push({ sid: f.replace(/\.jsonl$/, ''), path: p, size: st.size, mtime: st.mtimeMs, cfgDir }); } catch {}
       }
     }
-  } catch {}
+  }
   rows.sort((a, b) => b.mtime - a.mtime);
-  process.stdout.write('ccrig v' + VERSION + ': recent sessions in ' + CFG + '\n\n');
-  if (!rows.length) { process.stdout.write('  none found under ' + base + '\n'); process.exit(0); }
+  const multi = profiles.length > 1;
+  process.stdout.write('ccrig v' + VERSION + ': recent sessions across ' + profiles.length + ' profile(s)\n\n');
+  if (!rows.length) { process.stdout.write('  none found\n'); process.exit(0); }
   const now = Date.now();
   for (const r of rows.slice(0, 15)) {
     let cwd = '';
@@ -1883,14 +1903,13 @@ function runSessions() {
       cwd = o.cwd || (o.workspace && o.workspace.current_dir) || '';
       if (cwd) break;
     }
-    const req = (latestUserText(r.path) || '').replace(/\s+/g, ' ').slice(0, 52) || '(no request found)';
+    const req = (latestUserText(r.path) || '').replace(/\s+/g, ' ').slice(0, 48) || '(no request found)';
     const ageM = Math.round((now - r.mtime) / 60000);
     const age = ageM < 60 ? ageM + 'm' : ageM < 1440 ? Math.round(ageM / 60) + 'h' : Math.round(ageM / 1440) + 'd';
     const sz = r.size > 1e6 ? (r.size / 1e6).toFixed(1) + 'MB' : Math.round(r.size / 1e3) + 'KB';
-    process.stdout.write('  ' + pad(age + ' ago', 8) + ' ' + pad(sz, 7) + ' ' + pad(path.basename(cwd) || '?', 18) + '  ' + req + '\n');
-    // platform-aware cd: cmd.exe needs `cd /d "..."`; POSIX uses shell-quoted single quotes
-    const cd = cwd ? (process.platform === 'win32' ? 'cd /d "' + cwd.replace(/"/g, '') + '" && ' : 'cd ' + shellQuote(cwd) + ' && ') : '';
-    process.stdout.write('    ' + cd + 'claude --resume ' + r.sid + (cwd ? '' : '   (run from its project dir)') + '\n');
+    const prof = multi ? pad('[' + profileLabel(r.cfgDir) + ']', 11) + ' ' : '';
+    process.stdout.write('  ' + pad(age + ' ago', 8) + ' ' + prof + pad(sz, 7) + ' ' + pad(path.basename(cwd) || '?', 16) + '  ' + req + '\n');
+    process.stdout.write('    ' + resumeCmdLine(r.cfgDir, cwd, r.sid) + (cwd ? '' : '   (run from its project dir)') + '\n');
   }
   process.exit(0);
 }
