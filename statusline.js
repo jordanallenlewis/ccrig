@@ -1714,6 +1714,9 @@ function runWatch(sid) {
   // would relaunch while the window is still exhausted. Leave it to the resume ticket.
   if (!cp.resets_at) { watchLog(sid, 'no reset time in checkpoint; not auto-resuming (use the resume ticket)'); process.exit(1); }
   const bufferMs = () => (typeof CONFIG.autopilotBuffer === 'number' && CONFIG.autopilotBuffer >= 0 ? CONFIG.autopilotBuffer : 45) * 1000;
+  // wall-clock poll interval, default 30s; overridable ONLY via env so the end-to-end resume test can
+  // exercise the real wait-then-fire timeline in seconds instead of minutes. Not a user-facing knob.
+  const pollMs = Math.max(50, parseInt(process.env.CCBSL_WATCH_INTERVAL_MS, 10) || 30000);
   let target = cp.resets_at * 1000 + bufferMs();
   // a PID file makes the watcher inspectable (--status) and killable (--disarm), not an invisible daemon
   try { fs.writeFileSync(watchPidFile(sid), String(process.pid) + '\n' + target); } catch {}
@@ -1745,7 +1748,7 @@ function runWatch(sid) {
       }
       if (Date.now() >= target) return fireIfIdle(null, 'reset reached; relaunching');
     } catch (e) { watchLog(sid, 'tick error: ' + e.message); }
-    setTimeout(tick, 30000);
+    setTimeout(tick, pollMs);
   };
   tick();
 }
