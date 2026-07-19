@@ -9,20 +9,27 @@ that every change lands through a merge request that a maintainer approves.
 1. Fork the repo (or create a branch if you have access) and make your change.
 2. Keep it **zero-dependency**: `statusline.js` runs on the Node that ships with
    Claude Code, with no npm install. The shell tooling targets bash and zsh.
-3. Test locally before opening the MR:
-   - `node --test` (runs **both** suites: `test-unit.js` + `test.js`)
+3. Test locally before opening the MR (there is no CI pipeline; the maintainer runs
+   these on review, so please run them yourself first):
+   - `node --test` (runs all three suites: `test-unit.js` + `test.js` + `test-gates.js`)
    - `node statusline.js --selftest` (quick rendering check on edge inputs)
    - `node statusline.js --demo` (eyeball the result)
    - `shellcheck claude-profiles.sh install.sh` if you touched the shell files
 
-   There are two layers, both run in CI on every push:
+   The suite has three layers:
    - **`test-unit.js`**: fast unit tests of the pure helpers (version compare, model
-     tier, changelog/version parsing, transcript parsing, wrapping/bars). It `require()`s
-     `statusline.js`, which exports its internals only when required (the CLI never runs).
+     tier, changelog/version parsing, transcript parsing, wrapping/bars, glyph width). It
+     `require()`s `statusline.js`, which exports its internals only when required (the CLI never runs).
    - **`test.js`**: black-box regression/integration tests that spawn the real script as
-     a subprocess against a throwaway `HOME`/`CLAUDE_CONFIG_DIR` sandbox, covering
+     a subprocess against a throwaway `HOME`/`CLAUDE_CONFIG_DIR`/`TMPDIR` sandbox, covering
      rendering, wrapping, the guardian hooks, auto-resume, updates, and every CLI mode.
      Tests prefixed `REGRESSION:` encode a specific bug found in review. Keep them passing.
+   - **`test-gates.js`**: mechanical quality gates (plain-voice scan of docs and CLI text,
+     example-config-versus-defaults parity, config-key coverage, README/help flag parity).
+     These keep the docs and config honest; keep them green.
+
+   The suite is hermetic (it never touches your real `~/.claude` or temp dir), and it
+   passes on Node 18, 20, and 22 (the supported floor is Node 18).
 
    **A bug fix must ship with a test:** a unit test in `test-unit.js` if the logic is
    pure, a `REGRESSION:` test in `test.js` if it's behavioral. A new feature ships with
