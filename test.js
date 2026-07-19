@@ -1851,3 +1851,132 @@ test('--options reports the bypass-permissions setting', () => {
   const r = run(['--options'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, script });
   assert.match(r.out, /bypass perms:\s*on/);
 });
+
+// ===========================================================================
+// END-TO-END: the limit pause -> wait-for-reset -> resume-exactly flow, emulated
+// in full (real detached watcher, a stub `claude` that records the relaunch).
+// CCBSL_WATCH_INTERVAL_MS shrinks the watcher's 30s poll so the real timeline
+// runs in a few seconds. This is the flagship guardian test.
+// ===========================================================================
+test('END-TO-END: guardian checkpoints at the limit, WAITS for the reset, then auto-resumes exactly where it left off', async () => {
+  const { execFileSync } = require('child_process');
+  const sb = sandbox();
+  // a real git repo so the checkpoint captures HEAD + a dirty tree (the reconcile hint)
+  const repo = path.join(sb.dir, 'proj'); fs.mkdirSync(repo, { recursive: true });
+  let gitReady = false;
+  try {
+    const G = (...a) => execFileSync('git', ['-C', repo, ...a], { stdio: 'ignore', timeout: 8000 });
+    G('init', '-q'); G('config', 'user.email', 't@t.co'); G('config', 'user.name', 't'); G('config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(repo, 'billing.js'), 'module.exports = 1;\n');
+    G('add', '-A'); G('commit', '-q', '-m', 'init');
+    fs.writeFileSync(path.join(repo, 'billing.js'), 'module.exports = 2; // wip\n'); // leave the tree dirty
+    gitReady = true;
+  } catch { /* git absent: still exercises the todo/request/resume core */ }
+
+  // the exact work state at the moment the limit hits: one done, one in-progress, one pending
+  const tp = transcript(sb.dir, [
+    userEntry('Refactor the billing module and add regression tests'),
+    todoEntry([
+      { content: 'Read the billing module', status: 'completed', activeForm: 'Reading the billing module' },
+      { content: 'Refactor calculateTotal', status: 'in_progress', activeForm: 'Refactoring calculateTotal' },
+      { content: 'Add regression tests', status: 'pending', activeForm: 'Adding regression tests' },
+    ]),
+  ]);
+
+  const sid = 'e2e-resume-1';
+  const marker = path.join(sb.dir, 'RELAUNCH_ARGS.txt');
+  const stub = path.join(sb.dir, 'claude-emu.sh');
+  // emulate `claude`: record every argument (the last is the resume prompt) and exit
+  fs.writeFileSync(stub, '#!/bin/sh\nprintf "%s\\n" "$@" > "' + marker + '"\n');
+  fs.chmodSync(stub, 0o755);
+
+  const script = scriptCopy(sb.dir, { autopilot: 'resume', autopilotBuffer: 0, updateCheck: false, claudeBin: stub });
+  const gd = path.join(sb.cfg, 'guardian');
+  const now = Math.floor(Date.now() / 1000);
+  const resetIn = 4; // seconds until the window "resets"
+  const input = {
+    session_id: sid, session_name: 'billing refactor', transcript_path: tp,
+    workspace: { current_dir: repo, project_dir: repo },
+    model: { id: 'claude-opus-4-8[1m]', display_name: 'Opus 4.8' },
+    context_window: { used_percentage: 55 },
+    rate_limits: { five_hour: { used_percentage: 99, resets_at: now + resetIn }, seven_day: { used_percentage: 60, resets_at: now + 5 * 86400 } },
+  };
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+  const pidFile = path.join(gd, sid + '.watch.pid');
+  const cpFile = path.join(gd, sid + '.checkpoint.json');
+  const watcherPids = [];
+  try {
+    // 1) the live render at 99%: writes the checkpoint and arms a REAL detached watcher.
+    //    CCBSL_NO_ACT='' re-enables the real spawn; CCBSL_WATCH_INTERVAL_MS makes the poll fast.
+    const r = run([], { stdin: JSON.stringify(input), env: {
+      CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_NO_ACT: '', CCBSL_WATCH_INTERVAL_MS: '250', NO_UPDATE_NOTIFIER: '1',
+    }, script });
+    assert.strictEqual(r.code, 0, 'the render itself never fails');
+    assert.match(strip(r.out), /limit imminent|autopilot armed/, 'the bar shows the armed state');
+
+    // the checkpoint captured the exact left-off state
+    const cp = JSON.parse(fs.readFileSync(cpFile, 'utf8'));
+    assert.strictEqual(cp.window, 'session');
+    assert.strictEqual(cp.resets_at, now + resetIn);
+    assert.match(cp.last_request, /Refactor the billing module/);
+    assert.strictEqual(cp.todos.length, 3);
+    if (gitReady) { assert.ok(cp.git && cp.git.head, 'HEAD captured'); assert.strictEqual(cp.git.dirty, true, 'dirty tree captured'); }
+
+    // the watcher is armed (an inspectable PID file) and has NOT fired yet (still before the reset)
+    for (let i = 0; i < 20 && !fs.existsSync(pidFile); i++) await sleep(100);
+    assert.ok(fs.existsSync(pidFile), 'watcher armed a PID file');
+    watcherPids.push(parseInt(fs.readFileSync(pidFile, 'utf8').split('\n')[0], 10) || 0);
+    assert.ok(!fs.existsSync(marker), 'the watcher must NOT relaunch before the reset (it waits in its tracks)');
+
+    // 2) wait past the reset -> the watcher relaunches `claude --resume`
+    for (let i = 0; i < 75 && !fs.existsSync(marker); i++) await sleep(200);
+    assert.ok(fs.existsSync(marker), 'the watcher relaunched after the reset');
+    const relaunch = fs.readFileSync(marker, 'utf8');
+
+    // 3) it resumed the EXACT session, headless, picking up exactly where it left off
+    assert.match(relaunch, /--resume/);
+    assert.match(relaunch, new RegExp(sid));
+    assert.match(relaunch, /(^|\n)-p(\n|$)/);
+    assert.match(relaunch, /Refactor the billing module/, 'carries the original request');
+    assert.match(relaunch, /Already DONE[\s\S]*Read the billing module/, 'tells it NOT to repeat the finished step');
+    assert.match(relaunch, /Remaining TODO[\s\S]*Refactor calculateTotal[\s\S]*Add regression tests/, 'continues from the unfinished steps');
+    assert.match(relaunch, /UNATTENDED/, 'flagged as an unattended relaunch');
+    if (gitReady) assert.match(relaunch, /git status/, 'tells it to reconcile the working tree');
+
+    // 4) the checkpoint is consumed once the relaunch starts, so it cannot double-run
+    for (let i = 0; i < 20 && fs.existsSync(cpFile); i++) await sleep(100);
+    assert.ok(!fs.existsSync(cpFile), 'checkpoint consumed after the relaunch');
+  } finally {
+    for (const pid of watcherPids) { try { if (pid) process.kill(pid); } catch {} }
+  }
+});
+
+test('END-TO-END: if the user manually resumes during the wait, the watcher stands down instead of double-running', async () => {
+  const sb = sandbox();
+  const sid = 'e2e-standdown-1';
+  const marker = path.join(sb.dir, 'RELAUNCH2.txt');
+  const stub = path.join(sb.dir, 'claude-emu2.sh');
+  fs.writeFileSync(stub, '#!/bin/sh\nprintf "%s\\n" "$@" > "' + marker + '"\n'); fs.chmodSync(stub, 0o755);
+  const script = scriptCopy(sb.dir, { autopilot: 'resume', autopilotBuffer: 0, updateCheck: false, claudeBin: stub });
+  const gd = path.join(sb.cfg, 'guardian'); fs.mkdirSync(gd, { recursive: true });
+  const now = Math.floor(Date.now() / 1000);
+  // a transcript that will be touched AFTER the reset -> looks like the user picked it back up by hand
+  const tp = transcript(sb.dir, [userEntry('do the thing'), todoEntry([{ content: 'step', status: 'pending' }])]);
+  fs.writeFileSync(path.join(gd, sid + '.checkpoint.json'), JSON.stringify({
+    session_id: sid, cwd: sb.dir, window: 'session', resets_at: now - 1, transcript_path: tp,
+  }));
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+  const watcherPids = [];
+  try {
+    // touch the transcript "after" the reset (mtime > resets_at + 2) so resumedManuallySince() is true
+    const future = (now + 10) * 1000; fs.utimesSync(tp, future / 1000, future / 1000);
+    const r = run(['--watch', sid], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_NO_ACT: '', CCBSL_WATCH_INTERVAL_MS: '200' }, script });
+    assert.strictEqual(r.code, 0);
+    await sleep(400);
+    assert.ok(!fs.existsSync(marker), 'a manual resume means the watcher must NOT also relaunch');
+    const log = fs.readFileSync(path.join(gd, 'logs', sid + '.log'), 'utf8');
+    assert.match(log, /standing down/);
+  } finally {
+    for (const pid of watcherPids) { try { if (pid) process.kill(pid); } catch {} }
+  }
+});
