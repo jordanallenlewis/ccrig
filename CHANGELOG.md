@@ -11,6 +11,10 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+### Added
+- Published to npm as `ccrig`. Install with `npm install -g ccrig && ccrig --install`, or preview with
+  `npx ccrig --demo`. The clone and curl paths are unchanged.
+
 ## [1.1.0] - 2026-07-19
 
 ### Added
