@@ -77,6 +77,7 @@ function run(args, { stdin = '', env = {}, script = SCRIPT } = {}) {
 function render(input, { env = {}, script = SCRIPT, cols = '120' } = {}) {
   return run([], { stdin: JSON.stringify(input), env: { ...env, COLUMNS: cols }, script });
 }
+function shellQuoteJs(s){return "'"+String(s).replace(/'/g,"'\\''")+"'";}
 const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
 const baseInput = (extra = {}) => ({
   model: { id: 'claude-opus-4-8[1m]', display_name: 'Opus 4.8 (1M context)' },
@@ -1886,8 +1887,8 @@ test('END-TO-END: guardian checkpoints at the limit, WAITS for the reset, then a
   const sid = 'e2e-resume-1';
   const marker = path.join(sb.dir, 'RELAUNCH_ARGS.txt');
   const stub = path.join(sb.dir, 'claude-emu.sh');
-  // emulate `claude`: record every argument (the last is the resume prompt) and exit
-  fs.writeFileSync(stub, '#!/bin/sh\nprintf "%s\\n" "$@" > "' + marker + '"\n');
+  // emulate `claude`: record every argument (the last is the resume prompt) AND the profile it ran under
+  fs.writeFileSync(stub, '#!/bin/sh\n{ printf "%s\\n" "$@"; echo "CFG=$CLAUDE_CONFIG_DIR"; } > "' + marker + '"\n');
   fs.chmodSync(stub, 0o755);
 
   const script = scriptCopy(sb.dir, { autopilot: 'resume', autopilotBuffer: 0, updateCheck: false, claudeBin: stub });
@@ -1942,6 +1943,8 @@ test('END-TO-END: guardian checkpoints at the limit, WAITS for the reset, then a
     assert.match(relaunch, /Remaining TODO[\s\S]*Refactor calculateTotal[\s\S]*Add regression tests/, 'continues from the unfinished steps');
     assert.match(relaunch, /UNATTENDED/, 'flagged as an unattended relaunch');
     if (gitReady) assert.match(relaunch, /git status/, 'tells it to reconcile the working tree');
+    // resumes UNDER THE OWNING PROFILE, not whatever profile the watcher inherited
+    assert.ok(relaunch.includes('CFG=' + sb.cfg), 'relaunch pins CLAUDE_CONFIG_DIR to the session owner profile');
 
     // 4) the checkpoint is consumed once the relaunch starts, so it cannot double-run
     for (let i = 0; i < 20 && fs.existsSync(cpFile); i++) await sleep(100);
@@ -1979,4 +1982,51 @@ test('END-TO-END: if the user manually resumes during the wait, the watcher stan
   } finally {
     for (const pid of watcherPids) { try { if (pid) process.kill(pid); } catch {} }
   }
+});
+
+// ===========================================================================
+// profile-aware resume: a session belongs to a profile, and every resume path
+// must resume UNDER that profile (not whatever profile the shell is set to).
+// ===========================================================================
+test('--sessions spans every profile and pins CLAUDE_CONFIG_DIR per session', () => {
+  const sb = sandbox();
+  // a work session (default ~/.claude) and a personal session (~/.claude-personal)
+  const personal = path.join(sb.home, '.claude-personal');
+  fs.mkdirSync(path.join(personal, 'projects', '-p-app'), { recursive: true });
+  fs.writeFileSync(path.join(personal, 'projects', '-p-app', 'psess-1.jsonl'),
+    JSON.stringify({ type: 'user', cwd: '/p/app', message: { role: 'user', content: 'personal work' } }) + '\n');
+  fs.mkdirSync(path.join(sb.cfg, 'projects', '-w-app'), { recursive: true });
+  fs.writeFileSync(path.join(sb.cfg, 'projects', '-w-app', 'wsess-1.jsonl'),
+    JSON.stringify({ type: 'user', cwd: '/w/app', message: { role: 'user', content: 'work work' } }) + '\n');
+  const r = run(['--sessions'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
+  assert.strictEqual(r.code, 0);
+  // both profiles' sessions listed
+  assert.match(r.out, /psess-1/, 'personal-profile session listed');
+  assert.match(r.out, /wsess-1/, 'work-profile session listed');
+  assert.match(r.out, /\[personal\]/, 'rows are labelled with their profile');
+  // each resume command pins the OWNING profile's config dir
+  assert.ok(r.out.includes('CLAUDE_CONFIG_DIR=' + shellQuoteJs(personal) + ' claude --resume psess-1')
+    || r.out.includes('CLAUDE_CONFIG_DIR=\'' + personal + '\' claude --resume psess-1'),
+    'personal session resume pins the personal profile:\n' + r.out);
+  assert.ok(r.out.includes('claude --resume wsess-1') && r.out.includes('CLAUDE_CONFIG_DIR='),
+    'work session resume pins a profile');
+});
+
+test('a resume ticket pins the owning profile so it resumes on the right account', () => {
+  const sb = sandbox();
+  const personal = path.join(sb.home, '.claude-personal', '.claude'); // treat this cfg as the owner
+  const cfg = path.join(sb.home, '.claude-personal');
+  fs.mkdirSync(cfg, { recursive: true });
+  const now = Math.floor(Date.now() / 1000);
+  const input = baseInput({
+    session_id: 'tick-1', session_name: 'personal task',
+    workspace: { current_dir: '/p/app', project_dir: '/p/app' },
+    rate_limits: { five_hour: { used_percentage: 99, resets_at: now + 3600 } },
+  });
+  // resumeTickets are on by default; render at critical under the personal profile writes one
+  run([], { stdin: JSON.stringify(input), env: { CLAUDE_CONFIG_DIR: cfg, HOME: sb.home } });
+  const ticket = fs.readFileSync(path.join(cfg, 'resume-tickets', 'tick-1.md'), 'utf8');
+  assert.match(ticket, /Profile: personal/, 'names the owning profile');
+  assert.ok(ticket.includes('CLAUDE_CONFIG_DIR=') && ticket.includes(cfg) && ticket.includes('claude --resume tick-1'),
+    'the ticket command pins CLAUDE_CONFIG_DIR to the owning profile:\n' + ticket);
 });
