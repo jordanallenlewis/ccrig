@@ -22,7 +22,7 @@ The bars are color-coded (green, then yellow, then red) and the line wraps to yo
 session ████████░ 96% ↺2h14m │ weekly ██████░░ 71% ↺7/22 │ ⏳ ~9m to session limit · slow down │ ⚠ limit imminent: checkpoint saved, autopilot armed
 ```
 
-Once you have the file (download or clone below), you can preview it with sample data before wiring anything: `node statusline.js --demo`.
+Once you have the file (download or clone below), you can preview it with sample data before wiring anything: `node statusline.js --demo` (add `--cols 80` to size it for a screenshot). `node statusline.js --selftest` sanity-checks rendering on edge inputs, and `node statusline.js --version` prints the version.
 
 > If it earns a spot in your terminal, please **star the project** on GitLab. It is free and it is the whole ask, and a star is how the next person finds it.
 
@@ -64,7 +64,7 @@ To wire it by hand instead, add this to `~/.claude/settings.json` (use an absolu
 
 If anything looks wrong, `node statusline.js --doctor` diagnoses the usual suspects (unwired settings, a node path broken by a version manager upgrade, invalid config).
 
-**Backing out** is clean and total: `--uninstall` removes the status line (and any guardian hooks), `--uninstall-guardian` removes just the guardian, and `--purge` deletes every local file it ever wrote (checkpoints, tickets, caches). Every write is backed up first, and nothing it touches lives outside your home dir.
+**Backing out** is clean and total: `--uninstall` removes the status line (and any guardian hooks) across every profile, `--uninstall-guardian` removes just the guardian, and `--purge` deletes the local state it wrote for the active profile (checkpoints, resume tickets, watcher files, the update cache, this profile's ledger entry, the shared session board, temp caches, and the render error log). Your `statusline.config.json`, the settings backups, and the script itself stay in place; delete them by hand if you want. Every settings write is backed up first, and nothing it touches lives outside your home dir.
 
 ## What the status line shows
 
@@ -119,7 +119,7 @@ node statusline.js --keep-working on
 
 **5. Compaction-proof checkpoints.** A `PreCompact` hook snapshots your work state before Claude Code compacts the context, and restores it afterward, so a compaction never quietly drops your plan.
 
-`node statusline.js --doctor` reports which hooks are wired and, in `resume` mode, whether `claude` is reachable on `PATH` for the relaunch. Every knob (`autopilot`, `keepWorking`, `autopilotBuffer`, `autopilotWeekly`, `autopilotFailover`, `forecast`, `ledger`, `claudeBin`) lives in `statusline.config.json`.
+`node statusline.js --doctor` reports which hooks are wired and, in `resume` mode, whether `claude` is reachable on `PATH` for the relaunch. Nothing runs as a hidden daemon: `node statusline.js --status` lists any armed auto-resume watchers, and `node statusline.js --disarm` stops them. Every knob (`autopilot`, `keepWorking`, `autopilotBuffer`, `autopilotWeekly`, `autopilotFailover`, `forecast`, `ledger`, `claudeBin`) lives in `statusline.config.json`.
 
 **What it can and can't do, honestly.** Auto-resume needs a Claude.ai Pro/Max plan (Claude Code only sends rate-limit data to subscribers) and a machine that's awake when the window resets. Claude Code gives no way to reach into your open terminal session, so auto-resume launches a *fresh headless* run of the session and reconciles the working tree via the git snapshot. Nothing is lost because the transcript is continuous, and the checkpoint keeps it from redoing finished work. Weekly (7-day) auto-relaunch is off by default (`autopilotWeekly`), because a watcher sleeping for days across reboots is less reliable than the checkpoint + `SessionStart` restore you get on a manual resume. If you're on an API key rather than a subscription, the forecast and auto-resume have no usage data to work from. The rest of the status line is unaffected.
 
@@ -128,14 +128,15 @@ node statusline.js --keep-working on
 Once a day, a tiny background check asks the public repo whether a newer `statusline.js` exists and, if so, shows an `⬆ v<new> update` badge in the bar. **The status-line render itself makes no network calls**. It only reads a small local cache (`$CLAUDE_CONFIG_DIR/.ccbsl-update.json`) that the background check writes. The check is throttled to once every 24 hours and fails silently when you're offline or behind a proxy. So if you share this with your team, they find out about new features instead of silently drifting behind.
 
 ```bash
-node statusline.js --update         # pull the newest version
+node statusline.js --update          # pull the newest version
 node statusline.js --check-update    # check right now
 node statusline.js --whatsnew        # what changed in the version you have
+node statusline.js --dismiss-update  # silence the badge for a version you want to skip
 ```
 
 `--update` does a `git pull` if you cloned, or for a downloaded copy it fetches the new file, **validates it** (`node --check` plus a shape check that it really is `statusline.js`), **backs up** your current file, and does an **atomic swap**, rolling back untouched if anything fails. It refuses to downgrade (unless you pass `--force`) and refuses anything that doesn't look like the real script (so a proxy login page can't overwrite your file). It honors `HTTPS_PROXY` / `NO_PROXY` and a corporate root CA. Turn the whole thing off with `"updateCheck": false` (or `NO_UPDATE_NOTIFIER=1`).
 
-Trust note: over-the-wire integrity rests on HTTPS/TLS to GitLab (there's no separate code signature yet), which is why `--update` validates and backs up before it ever swaps, and never runs anything without you asking.
+Trust note: by default, over-the-wire integrity rests on HTTPS/TLS to GitLab, which is why `--update` validates and backs up before it ever swaps, and never runs anything without you asking. For a stronger guarantee you can pin an Ed25519 public key in `updatePubkey` (see `statusline.config.example.json`); once pinned, `--update` refuses any download without a matching `statusline.js.sig` signature. See [SECURITY.md](SECURITY.md) for the signing commands.
 
 ## Running many sessions
 
@@ -147,7 +148,7 @@ node statusline.js --sessions    # recent sessions + the command to resume each
 ```
 
 - **`--board`**: turn on `"sessionBoard": true` and each session publishes a small state file to a shared dir. `--board` then shows them all in one table: project, model, session/weekly usage, context, running subagents, and whether one is near or at a limit. Stale entries (older than an hour) are pruned. It's off by default because it writes outside your config dir (like the ledger). `--purge` clears it.
-- **`--sessions`**: read-only, no opt-in. Lists your recent sessions newest-first with the project, size, last request, and the exact `cd … && claude --resume <id>` to pick one back up.
+- **`--sessions`**: read-only, no opt-in. Lists your recent sessions newest-first with the project, size, last request, and the exact `cd … && claude --resume <id>` to pick one back up. It prints a `cd /d "…"` form on Windows; in PowerShell 5.1 (where `&&` is not a separator) run the `cd` and `claude --resume` parts as two commands.
 
 And **`"reinjectOnCompact": true`** (or a file path) re-includes your `CLAUDE.md` (or a named rules file) after Claude Code compacts context, in case compaction dropped it. Off by default.
 
@@ -165,7 +166,7 @@ node statusline.js --config
 
 It shows a live preview, lets you toggle any segment, cycle the mode (`m`), and writes your choices to `statusline.config.json` next to the script.
 
-**By hand:** copy `statusline.config.example.json` to `statusline.config.json` and edit colors, thresholds, segment order, reset style, and profile labels. Your config is a separate file, so updating `statusline.js` never wipes it.
+**By hand:** copy `statusline.config.example.json` to `statusline.config.json` and edit colors, thresholds, segment order, reset style (`clock`, `clock24` for a 24-hour clock, or `relative`), and profile labels. Your config is a separate file, so updating `statusline.js` never wipes it.
 
 ## Display modes
 
@@ -188,6 +189,8 @@ A profile is an isolated `CLAUDE_CONFIG_DIR` with its own login, settings, and h
 source /path/to/ccrig/claude-profiles.sh
 ```
 
+The profile switcher is a bash/zsh helper. On Windows, set the profile yourself in PowerShell with `$env:CLAUDE_CONFIG_DIR = "$HOME\.claude-work"` before running `claude`.
+
 Then:
 
 ```bash
@@ -203,7 +206,7 @@ The status line's `👤` badge shows which profile is active, so you always know
 
 ## Staying responsive
 
-Claude Code refreshes the status line after each message (debounced at 300ms) and, since Claude Code 2.1.97, `refreshInterval` re-runs it on a timer too (see the [status line docs](https://code.claude.com/docs/en/statusline)). The installer sets `refreshInterval: 2`, so time-based segments like reset countdowns stay current even while a session is idle; on an older Claude Code the key is ignored harmlessly. Git state is cached briefly (`gitCacheMs`, default 2500ms) so a large repository doesn't slow down every render.
+Claude Code refreshes the status line after each message (debounced at 300ms) and, since Claude Code 2.1.97, `refreshInterval` re-runs it on a timer too (see the [status line docs](https://code.claude.com/docs/en/statusline)). The installer sets `refreshInterval: 2`, so time-based segments like reset countdowns stay current even while a session is idle; on an older Claude Code the key is ignored harmlessly. Git state is cached briefly (`gitCacheMs`, default 10000ms) so a large repository doesn't re-shell `git status` on every render; branch and dirty state can lag by up to about that long, which is invisible in normal use and one config line to change.
 
 ## Credit
 

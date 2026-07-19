@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # claude-profiles.sh: manage & switch Claude Code account profiles.
 #
 # Source this from your ~/.bashrc or ~/.zshrc:
@@ -10,6 +11,12 @@
 #
 # Works in bash and zsh.
 
+_cc_valid_name() {   # reject names that would escape the .claude-* namespace (slashes, .., leading - or .)
+  case "$1" in
+    ''|*/*|*..*|-*|.*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
 _cc_profile_dir() {   # name -> dir
   case "$1" in
     ""|default) printf '%s/.claude' "$HOME" ;;
@@ -39,6 +46,7 @@ claude-profile() {
       ;;
     use|switch)
       [ -z "$1" ] && { echo "usage: claude-profile use <name>"; return 1; }
+      _cc_valid_name "$1" || { echo "invalid profile name '$1' (letters, digits, . _ - only)"; return 1; }
       local dir; dir="$(_cc_profile_dir "$1")"
       [ -d "$dir" ] || { echo "profile '$1' not found. create it:  claude-profile new $1"; return 1; }
       export CLAUDE_CONFIG_DIR="$dir"
@@ -47,12 +55,14 @@ claude-profile() {
       ;;
     run)
       [ -z "$1" ] && { echo "usage: claude-profile run <name> [claude args]"; return 1; }
+      _cc_valid_name "$1" || { echo "invalid profile name '$1' (letters, digits, . _ - only)"; return 1; }
       local name="$1"; shift; local dir; dir="$(_cc_profile_dir "$name")"
       [ -d "$dir" ] || { echo "profile '$name' not found. create it:  claude-profile new $name"; return 1; }
       CLAUDE_CONFIG_DIR="$dir" claude "$@"
       ;;
     new|create)
       [ -z "$1" ] && { echo "usage: claude-profile new <name>"; return 1; }
+      _cc_valid_name "$1" || { echo "invalid profile name '$1' (letters, digits, . _ - only)"; return 1; }
       local dir; dir="$(_cc_profile_dir "$1")"
       [ -d "$dir" ] && { echo "profile '$1' already exists ($dir)"; return 1; }
       mkdir -p "$dir" && echo "✅ created profile '$1'.  Start it:  claude-profile use $1 && claude   (then /login)"
@@ -64,11 +74,12 @@ claude-profile() {
     remove|rm)
       [ -z "$1" ] && { echo "usage: claude-profile remove <name>"; return 1; }
       [ "$1" = "default" ] && { echo "refusing to remove the default profile (~/.claude)"; return 1; }
+      _cc_valid_name "$1" || { echo "invalid profile name '$1' (letters, digits, . _ - only)"; return 1; }
       local dir; dir="$(_cc_profile_dir "$1")"
       [ -d "$dir" ] || { echo "profile '$1' not found"; return 1; }
       printf "remove profile '%s' and ALL its data (%s)? [y/N] " "$1" "$dir"
       local ans; read -r ans
-      case "$ans" in [yY]*) rm -rf "$dir" && echo "removed '$1'";; *) echo "cancelled";; esac
+      case "$ans" in [yY]*) rm -rf "$dir" && rm -f "$HOME/.claude-usage-ledger/.claude-$1.json" && echo "removed '$1'";; *) echo "cancelled";; esac
       ;;
     -h|--help|help)
       cat <<'EOF'

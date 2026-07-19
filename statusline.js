@@ -153,7 +153,11 @@ const DEFAULTS = {
   // newer version and shows an ⬆ badge. The RENDER stays zero-network (it only reads a local
   // cache the background check wrote). A single unauthenticated GET; set false to disable.
   updateCheck: true,
-  gitCacheMs: 2500,     // cache git state this long so big repos don't slow each render (0 = off)
+  // Supply-chain: paste an Ed25519 PUBLIC key (PEM) here to REQUIRE that every downloaded --update
+  // carries a matching statusline.js.sig signature (see the header for the openssl commands). Empty =
+  // TLS-only (the default): the download is still validated + backed up, just not signature-checked.
+  updatePubkey: '',
+  gitCacheMs: 10000,    // cache git state this long so big repos don't re-shell each ~2s render (0 = off)
   reserveCols: 1,       // safety margin subtracted from terminal width
   // Map a Claude config-dir name to a profile label. Unlisted dirs derive their
   // label from the name (e.g. .claude-work -> "work"). Leave {} for pure auto.
@@ -196,6 +200,12 @@ function loadConfig() {
   for (const k of Object.keys(DEFAULTS.color)) {
     if (typeof merged.color[k] !== 'number') merged.color[k] = DEFAULTS.color[k];
   }
+  // numeric keys flow straight into width math / cache TTLs; a hand-edited non-numeric or
+  // negative value must not disable wrapping (NaN width) or inflate the terminal width.
+  const rc = Number(merged.reserveCols);
+  merged.reserveCols = (Number.isFinite(rc) && rc >= 0) ? Math.floor(rc) : DEFAULTS.reserveCols;
+  const gc = Number(merged.gitCacheMs);
+  merged.gitCacheMs = (Number.isFinite(gc) && gc >= 0) ? Math.floor(gc) : DEFAULTS.gitCacheMs;
   if (!Array.isArray(merged.order) || !merged.order.length) merged.order = clone(DEFAULT_ORDER);
   else {
     // MIGRATION: a saved/example `order` from an older version is missing segments added
@@ -230,17 +240,26 @@ function settingsVal(key) {
   try { return JSON.parse(readFileSafe(path.join(CFG, 'settings.json')))[key]; } catch { return undefined; }
 }
 
-// display width: strip ANSI, count emoji / wide glyphs as 2 cells
+// terminal cell width of ONE codepoint: 0 (VS16/ZWJ), 2 (wide/fullwidth/emoji-presentation), else 1.
+// Flat integer comparisons only (this is on the hot path, C3): no regex, no per-call allocation.
+function glyphWidth(cp) {
+  if (cp === 0xFE0F || cp === 0x200D) return 0;                 // variation selector / ZWJ
+  if (cp >= 0x1F000) return 2;                                  // astral emoji & symbols
+  if (cp === 0x26A1 || cp === 0x2600 || cp === 0x26A0 || cp === 0x23F3) return 2; // ⚡ ☀ ⚠ ⏳ (⬆/⬇ stay 1)
+  // East Asian Wide / Fullwidth ranges that actually occur in folder/branch/session names.
+  // 0xFF00-0xFF60 is fullwidth (wide); halfwidth kana 0xFF61-0xFF9F stays 1 (deliberately excluded).
+  if ((cp >= 0x1100 && cp <= 0x115F) || (cp >= 0x2E80 && cp <= 0x303E) ||
+      (cp >= 0x3041 && cp <= 0x33FF) || (cp >= 0x3400 && cp <= 0x4DBF) ||
+      (cp >= 0x4E00 && cp <= 0x9FFF) || (cp >= 0xAC00 && cp <= 0xD7A3) ||
+      (cp >= 0xF900 && cp <= 0xFAFF) || (cp >= 0xFE30 && cp <= 0xFE4F) ||
+      (cp >= 0xFF00 && cp <= 0xFF60) || (cp >= 0xFFE0 && cp <= 0xFFE6)) return 2;
+  return 1;
+}
+// display width: strip ANSI, then sum per-codepoint cell widths
 function dispWidth(s) {
   s = s.replace(/\x1b\[[0-9;]*m/g, '');
   let w = 0;
-  for (const ch of s) {
-    const cp = ch.codePointAt(0);
-    if (cp === 0xFE0F || cp === 0x200D) continue;               // variation selector / ZWJ = 0
-    // emoji + ⚡ ☀ ⚠ ⏳ (⏳ U+23F3 is Emoji_Presentation, 2 cells; ⬆/⬇ are text-presentation, 1 cell)
-    if (cp >= 0x1F000 || cp === 0x26A1 || cp === 0x2600 || cp === 0x26A0 || cp === 0x23F3) w += 2;
-    else w += 1;
-  }
+  for (const ch of s) w += glyphWidth(ch.codePointAt(0));
   return w;
 }
 
@@ -259,11 +278,14 @@ function wrapSegments(segs, width) {
   return lines.join('\n');
 }
 
-// color-coded block bar
-function bar(pct, width, t) {
+// color-coded block bar. `redAt` (default t.yellow) is the % at which the fill turns red;
+// usageSeg passes the warn threshold so the bar escalates WITH the ⚠ label, not a tier early.
+function bar(pct, width, t, redAt) {
   pct = Math.max(0, Math.min(100, pct));
-  const filled = Math.round((pct / 100) * width);
-  const col = pct <= t.green ? K.green : pct <= t.yellow ? K.yellow : K.red;
+  // reserve the final block for a TRUE 100%, so a limit bar does not read "full" at ~94% (Math.round did)
+  const filled = pct >= 100 ? width : Math.min(width - 1, Math.floor((pct / 100) * width));
+  const red = redAt == null ? t.yellow : redAt;
+  const col = pct <= t.green ? K.green : pct < red ? K.yellow : K.red;
   return c(col, '█'.repeat(filled)) + c(K.dim, '░'.repeat(width - filled));
 }
 
@@ -288,10 +310,21 @@ function getWidth() {
   return 100;
 }
 
-// truncate a folder path (keep the tail: the most specific dir) to fit
+// truncate a folder to fit `max` terminal CELLS, keeping the tail (the most specific dir),
+// never slicing a surrogate pair; prefixes '…' when trimmed. Cell-aware via glyphWidth.
 function truncFolder(f, max) {
-  if (max < 2 || f.length <= max) return f;
-  return '…' + f.slice(-(max - 1));
+  if (max < 2) return f;
+  const chars = [...f];
+  let w = 0; for (const ch of chars) w += glyphWidth(ch.codePointAt(0));
+  if (w <= max) return f;
+  const budget = max - 1;                         // room for the leading '…'
+  let acc = 0; const kept = [];
+  for (let i = chars.length - 1; i >= 0; i--) {
+    const cw = glyphWidth(chars[i].codePointAt(0));
+    if (acc + cw > budget) break;
+    acc += cw; kept.unshift(chars[i]);
+  }
+  return '…' + kept.join('');
 }
 
 function nowSec() { return Math.floor(Date.now() / 1000); }
@@ -314,10 +347,14 @@ function fmtReset(epochSec) {
     return `${m}m`;
   }
   const d = new Date(epochSec * 1000), now = new Date();
+  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  if (CONFIG.resetStyle === 'clock24') {   // 24-hour locales: 14:40, dated M/D 14:40 when not today
+    const c24 = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    return sameDay ? c24 : `${d.getMonth() + 1}/${d.getDate()} ${c24}`;
+  }
   let h = d.getHours(); const m = d.getMinutes();
   const ap = h >= 12 ? 'p' : 'a'; h = h % 12 || 12;
   const clock = `${h}:${String(m).padStart(2, '0')}${ap}`;
-  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
   return sameDay ? clock : `${d.getMonth() + 1}/${d.getDate()} ${clock}`;
 }
 const cBold = (n, s) => `\x1b[1m\x1b[38;5;${n}m${s}\x1b[0m`;
@@ -327,7 +364,7 @@ const usageSeg = (label, pct, reset) => {
   const near = pct >= warnAtOf(t) && windowActive(reset); // a passed reset means the window refreshed: no warning
   const lbl = near ? cBold(K.red, '⚠ ' + label) : c(K.dim, label);
   const val = near ? cBold(K.red, Math.round(pct) + '%') : c(K.dim, Math.round(pct) + '%');
-  return `${lbl} ${bar(pct, 8, t)} ${val}` + (reset ? c(K.dim, ' ↺' + fmtReset(reset)) : '');
+  return `${lbl} ${bar(pct, 8, t, warnAtOf(t))} ${val}` + (reset ? c(K.dim, ' ↺' + fmtReset(reset)) : '');
 };
 // At >= thresholds.usage.critical (default 98%), drop a resume ticket: a tiny file
 // with the exact command to reopen THIS session after the limit resets. Claude Code
@@ -356,7 +393,7 @@ function writeResumeTicket(input, pct, windowName, resetEpoch) {
       '',
       'Pick up exactly where you left off:',
       '',
-      '    cd "' + cwd + '"',
+      '    ' + (process.platform === 'win32' ? 'cd /d "' + cwd.replace(/"/g, '') + '"' : 'cd "' + cwd + '"'),
       '    claude --resume ' + sid,
       '',
       'Or run `claude --continue` in that directory for its most recent session.',
@@ -408,6 +445,7 @@ function readTranscriptTail(tp, bytes) {
 function scanTodos(lines) {
   for (let i = lines.length - 1; i >= 0; i--) {
     let o; try { o = JSON.parse(lines[i]); } catch { continue; }
+    if (o && o.isSidechain) continue;   // defense-in-depth: never treat a subagent turn as the main agent's
     const content = o && o.message && o.message.content;
     if (!Array.isArray(content)) continue;
     for (const b of content) {
@@ -431,7 +469,7 @@ function latestUserText(tp) {
   const lines = readTranscriptTail(tp, 524288);
   for (let i = lines.length - 1; i >= 0; i--) {
     let o; try { o = JSON.parse(lines[i]); } catch { continue; }
-    if (!o || o.type !== 'user' || !o.message) continue;
+    if (!o || o.isSidechain || o.type !== 'user' || !o.message) continue;
     const cnt = o.message.content;
     if (typeof cnt === 'string') { if (cnt.trim()) return cnt.trim().slice(0, 500); continue; }
     if (Array.isArray(cnt)) {
@@ -446,7 +484,7 @@ function latestAssistantText(tp) {
   const lines = readTranscriptTail(tp, 262144);
   for (let i = lines.length - 1; i >= 0; i--) {
     let o; try { o = JSON.parse(lines[i]); } catch { continue; }
-    if (!o || o.type !== 'assistant' || !o.message) continue;
+    if (!o || o.isSidechain || o.type !== 'assistant' || !o.message) continue;
     const cnt = o.message.content;
     if (typeof cnt === 'string') return cnt.trim();
     if (Array.isArray(cnt)) {
@@ -498,7 +536,7 @@ function agentsSeg(input) {
 }
 // ⬇ segment: Claude Code silently drops Opus → Sonnet when you approach the Opus cap.
 // Track the highest model tier seen this session and shout if the current one is lower.
-function modelTier(name) { const n = (name || '').toLowerCase(); return /opus/.test(n) ? 3 : /sonnet/.test(n) ? 2 : /haiku/.test(n) ? 1 : 0; }
+function modelTier(name) { const n = String(name == null ? '' : name).toLowerCase(); return /opus/.test(n) ? 3 : /sonnet/.test(n) ? 2 : /haiku/.test(n) ? 1 : 0; }
 let DEMO_DOWNGRADE = null; // [fromName, toName] set by --demo
 function downgradeSeg(input, live) {
   if (CONFIG.downgradeAlert === false) return '';
@@ -534,7 +572,7 @@ function inputCwd(input) { return (input.workspace && input.workspace.current_di
 function gitSnapshot(cwd) {
   try {
     const head = execSync('git rev-parse HEAD', { cwd, stdio: ['ignore', 'pipe', 'ignore'], timeout: 700, encoding: 'utf8' }).trim();
-    const status = execSync('git status --porcelain', { cwd, stdio: ['ignore', 'pipe', 'ignore'], timeout: 700, encoding: 'utf8' });
+    const status = execSync('git --no-optional-locks status --porcelain', { cwd, stdio: ['ignore', 'pipe', 'ignore'], timeout: 700, encoding: 'utf8' });
     return { head, dirty: status.trim().length > 0 };
   } catch { return null; }
 }
@@ -548,13 +586,16 @@ function writeCheckpoint(input, meta) {
     // must not wipe the resets_at/window an armed auto-resume watcher depends on.
     let resets_at = (meta && meta.resets_at) || null;
     let window = (meta && meta.window) || '';
-    if (resets_at == null) { const ex = readCheckpoint(sid); if (ex && ex.resets_at) { resets_at = ex.resets_at; if (!window) window = ex.window || ''; } }
+    let reason = (meta && meta.reason) || 'checkpoint';
+    // a PreCompact (no resets_at) after a limit checkpoint must keep the limit schedule AND its reason,
+    // so the resume prompt still says "interrupted by a usage limit", not "context was just compacted".
+    if (resets_at == null) { const ex = readCheckpoint(sid); if (ex && ex.resets_at) { resets_at = ex.resets_at; if (!window) window = ex.window || ''; if (ex.reason && /limit/.test(ex.reason)) reason = ex.reason; } }
     const data = {
       session_id: sid,
       session_name: input.session_name || '',
       cwd,
       saved_at: new Date().toISOString(),
-      reason: (meta && meta.reason) || 'checkpoint',
+      reason,
       window,
       resets_at,
       transcript_path: input.transcript_path || '',
@@ -624,17 +665,38 @@ function spawnDetached(cmd, args, opts) {
     const { spawn } = require('child_process');
     // windowsHide: no flashing console window when a background helper fires on Windows
     const child = spawn(cmd, args, Object.assign({ detached: true, stdio: 'ignore', windowsHide: true }, opts || {}));
+    // spawn ENOENT (a missing notifier binary) is delivered ASYNC as an 'error' event, after the
+    // caller's try/catch has returned; without this handler it crashes the live render. Best-effort: swallow.
+    child.on('error', () => {});
     child.unref();
     return true;
   } catch { return false; }
 }
+// build the platform notification command. On win32 the payload travels via env (never in code
+// position), so a $(…)/backtick/quote in a session name cannot inject into PowerShell.
+function notifySpec(platform, title, msg) {
+  if (platform === 'darwin') return { cmd: 'osascript', args: ['-e', 'display notification ' + JSON.stringify(msg) + ' with title ' + JSON.stringify(title)], env: {} };
+  if (platform === 'linux') return { cmd: 'notify-send', args: [title, msg], env: {} };
+  if (platform === 'win32') {
+    // zero-dep WinRT toast (no BurntToast); reads $env:CCBSL_N_TITLE/$env:CCBSL_N_MSG, so no injection
+    const script = [
+      '$ErrorActionPreference="SilentlyContinue"',
+      '[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]|Out-Null',
+      '$t=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)',
+      '$x=$t.GetElementsByTagName("text")',
+      '$x.Item(0).AppendChild($t.CreateTextNode($env:CCBSL_N_TITLE))|Out-Null',
+      '$x.Item(1).AppendChild($t.CreateTextNode($env:CCBSL_N_MSG))|Out-Null',
+      '$n=[Windows.UI.Notifications.ToastNotification]::new($t)',
+      '[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Claude Code").Show($n)',
+    ].join(';');
+    return { cmd: 'powershell', args: ['-NoProfile', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], env: { CCBSL_N_TITLE: title, CCBSL_N_MSG: msg } };
+  }
+  return null;
+}
 function notify(title, msg) {
   if (!actAllowed()) return;
-  const p = process.platform;
-  if (p === 'darwin') spawnDetached('osascript', ['-e', 'display notification ' + JSON.stringify(msg) + ' with title ' + JSON.stringify(title)]);
-  else if (p === 'linux') spawnDetached('notify-send', [title, msg]);
-  else if (p === 'win32') spawnDetached('powershell', ['-NoProfile', '-Command',
-    'New-BurntToastNotification -Text ' + JSON.stringify(title) + ',' + JSON.stringify(msg) + ' 2>$null']);
+  const spec = notifySpec(process.platform, String(title == null ? '' : title), String(msg == null ? '' : msg));
+  if (spec) spawnDetached(spec.cmd, spec.args, { env: Object.assign({}, process.env, spec.env) });
 }
 // do a once-per-session action, guarded by a marker file under guardian/
 function oncePerSession(sid, tag, fn) {
@@ -688,6 +750,10 @@ function pickFreshProfile(maxPct, maxAgeSec) {
       if (!f.endsWith('.json')) continue;
       let e; try { e = JSON.parse(fs.readFileSync(path.join(ledgerDir(), f), 'utf8')); } catch { continue; }
       if (!e || e.profile === here) continue;
+      // e.profile becomes CLAUDE_CONFIG_DIR on failover; reject anything that is not a real .claude*
+      // basename (never a traversal), matching writeLedger's own name gate, and confirm it stays under HOME.
+      if (typeof e.profile !== 'string' || !/^\.claude(-[A-Za-z0-9._-]+)?$/.test(e.profile)) continue;
+      if (!path.resolve(HOME, e.profile).startsWith(HOME + path.sep)) continue;
       const age = Math.floor(Date.now() / 1000) - (e.ts || 0);
       if (age > (maxAgeSec || 6 * 3600)) continue;                 // too stale to trust
       const s = typeof e.session === 'number' ? e.session : 100;
@@ -769,13 +835,19 @@ function armAutopilot(input, which, pct, resetEpoch) {
   const mode = cfgAutopilot();
   if (mode === 'off') return; // plain --install (default): no checkpoint, no notify, no watcher
   const willResume = mode === 'resume' && (which === 'session' || CONFIG.autopilotWeekly === true);
-  // Checkpoint: when we'll actually relaunch, REFRESH it for THIS window so the watcher's
-  // schedule matches — a session watcher must not inherit a weekly reset written earlier.
-  if (willResume) {
-    const ex = readCheckpoint(sid);
-    if (!ex || ex.window !== which || ex.resets_at !== resetEpoch) writeCheckpoint(input, { reason: which + ' limit critical', window: which, resets_at: resetEpoch });
-  } else {
-    oncePerSession(sid, 'checkpoint', () => writeCheckpoint(input, { reason: which + ' limit critical', window: which, resets_at: resetEpoch }));
+  // A second limit in one session (a later window hitting critical) must re-arm, not go stale.
+  // Detect a changed binding window/reset and, in resume mode, disarm the old watcher + clear its
+  // once-markers so a fresh watcher/notification fires for the NEW schedule.
+  const ex = readCheckpoint(sid);
+  const windowChanged = !ex || ex.window !== which || ex.resets_at !== resetEpoch;
+  if (windowChanged) {
+    writeCheckpoint(input, { reason: which + ' limit critical', window: which, resets_at: resetEpoch });
+    if (willResume) {
+      try { const pid = parseInt(fs.readFileSync(watchPidFile(sid), 'utf8'), 10) || 0; if (isOurWatcher(pid, sid)) process.kill(pid); } catch {}
+      for (const tag of ['watch', 'notified']) { try { fs.unlinkSync(path.join(guardDir(), sid + '.' + tag)); } catch {} }
+    } else {
+      try { fs.unlinkSync(path.join(guardDir(), sid + '.notified')); } catch {} // renotify for the new window
+    }
   }
   const label = which === 'session' ? 'session (5h)' : 'weekly (7d)';
   const when = resetEpoch ? fmtReset(resetEpoch) : 'the next window';
@@ -860,7 +932,14 @@ function readUpdateInfo() { try { return JSON.parse(fs.readFileSync(updateCacheF
 // atomic JSON write (tmp + rename) so a killed writer never leaves half-written JSON
 function writeJsonAtomic(file, obj) {
   // pid-unique tmp so two concurrent same-profile writers don't clobber each other's temp
-  try { fs.mkdirSync(path.dirname(file), { recursive: true }); const tmp = file + '.' + process.pid + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(obj, null, 2)); fs.renameSync(tmp, file); return true; } catch { return false; }
+  let tmp;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    tmp = file + '.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
+    fs.renameSync(tmp, file);
+    return true;
+  } catch { try { if (tmp) fs.unlinkSync(tmp); } catch {} return false; } // never strand the tmp (Windows EPERM on rename-over-open)
 }
 function updateNotifierOff() { return !!process.env.NO_UPDATE_NOTIFIER; }
 // compare dotted numeric versions; true if a > b (non-numeric parts ignored safely).
@@ -881,20 +960,26 @@ function updateSeg(info) {
   if (!latest || !semverGt(latest, VERSION)) return '';
   if (!DEMO_UPDATE_LATEST) {
     if (info && info.seen && !semverGt(latest, info.seen)) return '';              // dismissed / already applied
-    if (info && info.checkedAt && (Date.now() - info.checkedAt) > 30 * 86400 * 1000) return ''; // stale: stop nagging
+    // stop nagging about a version we can't re-fetch: base staleness on the last SUCCESSFUL check
+    // (falling back to checkedAt for old caches), so a failing daily check can't keep it fresh forever.
+    const stale = info && (info.lastSuccessAt != null ? info.lastSuccessAt : info.checkedAt);
+    if (stale != null && (Date.now() - stale) > 30 * 86400 * 1000) return '';
   }
   return cBold(K.update, '⬆ v' + latest) + c(K.dim, ' update');
 }
 // once-a-day, spawn the detached background check; never blocks the render. Takes the
 // cache already read this render (no second read on the hot path).
 function maybeCheckUpdate(info) {
-  if (CONFIG.updateCheck === false || updateNotifierOff() || !actAllowed()) return;
+  if (CONFIG.updateCheck === false || updateNotifierOff() || !actAllowed()) return false;
   const day = 24 * 3600 * 1000;
-  if (info && info.checkedAt && (Date.now() - info.checkedAt) < day) return; // throttled
-  // stamp the attempt NOW (atomically) so a blocked network can't respawn a checker every render
-  writeJsonAtomic(updateCacheFile(), Object.assign({ current: VERSION }, info || {}, { checkedAt: Date.now() }));
+  if (info && info.checkedAt && (Date.now() - info.checkedAt) < day) return false; // throttled
+  // stamp the attempt NOW (atomically) so a blocked network can't respawn a checker every render.
+  // If the stamp can't persist (unwritable CFG), do NOT spawn — else every ~2s render would launch a
+  // network-touching child (a C2 violation + a process leak). Fail closed on the throttle.
+  if (!writeJsonAtomic(updateCacheFile(), Object.assign({ current: VERSION }, info || {}, { checkedAt: Date.now() }))) return false;
   // NODE_USE_SYSTEM_CA lets the child trust a corporate root CA (no-op on older Node)
   spawnDetached(process.execPath, [__filename, '--check-update'], { env: Object.assign({}, process.env, { NODE_USE_SYSTEM_CA: '1' }) });
+  return true;
 }
 
 // fetch text from an http(s) URL OR, when CCBSL_UPDATE_BASE points at a local path
@@ -905,7 +990,10 @@ function fetchText(url, cb) {
 }
 function noProxy(host) {
   const np = (process.env.NO_PROXY || process.env.no_proxy || '').split(',').map((s) => s.trim()).filter(Boolean);
-  return np.some((p) => p === '*' || host === p || (p.startsWith('.') && host.endsWith(p)) || host.endsWith('.' + p) || host === p);
+  return np.some((raw) => {
+    const p = raw.startsWith('*.') ? raw.slice(1) : raw;   // curl/Go-style *.example.com -> .example.com
+    return p === '*' || host === p || (p.startsWith('.') && host.endsWith(p)) || host.endsWith('.' + p);
+  });
 }
 function httpGetText(url, depth, cb) {
   if (depth > 5) return cb(new Error('too many redirects'));
@@ -921,8 +1009,11 @@ function httpGetText(url, depth, cb) {
     const finish = (err, data) => { if (settled) return; settled = true; cb(err, data); };
     if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
       res.resume();
-      let next; try { next = new URL(res.headers.location, url).toString(); } catch { return finish(new Error('bad redirect')); }
-      return httpGetText(next, depth + 1, finish);
+      let nextU; try { nextU = new URL(res.headers.location, url); } catch { return finish(new Error('bad redirect')); }
+      // the network layer refuses, not mangles: only http(s), and never an https->http downgrade
+      if (!/^https?:$/.test(nextU.protocol)) return finish(new Error('unsupported redirect scheme: ' + nextU.protocol));
+      if (isHttps && nextU.protocol === 'http:') return finish(new Error('refusing an https->http downgrade redirect'));
+      return httpGetText(nextU.toString(), depth + 1, finish);
     }
     if (res.statusCode !== 200) { res.resume(); return finish(new Error('HTTP ' + res.statusCode)); }
     let d = '';
@@ -984,7 +1075,7 @@ function httpViaProxy(u, proxy, isHttps, headers, onRes, cb) {
 }
 
 // pull the VERSION constant out of a fetched statusline.js
-function parseRemoteVersion(js) { const m = /const VERSION\s*=\s*'([0-9.]+)'/.exec(js || ''); return m ? m[1] : null; }
+function parseRemoteVersion(js) { const m = /const VERSION\s*=\s*'(\d+\.\d+\.\d+)'/.exec(js || ''); return m ? m[1] : null; } // strict x.y.z: a 4-part or suffixed value -> null (the loud "no VERSION marker" refusal)
 // pull the newest released section (heading + bullets) out of a fetched CHANGELOG.md
 function parseChangelogTop(md) {
   if (!md) return '';
@@ -1003,8 +1094,8 @@ function runCheckUpdate() {
     const latest = err ? null : parseRemoteVersion(js);
     const prev = readUpdateInfo() || {};
     const finish = (notes) => {
-      writeJsonAtomic(updateCacheFile(), { current: VERSION, latest: latest || prev.latest || null, notes: notes || prev.notes || '', seen: prev.seen || null, checkedAt: Date.now(), source: UPDATE_BASE });
-      if (!latest) process.stdout.write('update check failed (offline, blocked, or behind a proxy). Nothing changed.\n');
+      writeJsonAtomic(updateCacheFile(), { current: VERSION, latest: latest || prev.latest || null, notes: notes || prev.notes || '', seen: prev.seen || null, checkedAt: Date.now(), lastSuccessAt: latest ? Date.now() : (prev.lastSuccessAt || null), source: UPDATE_BASE });
+      if (!latest) process.stdout.write('update check failed (offline, blocked, or behind a proxy); the cached version info is unchanged.\n');
       else if (semverGt(latest, VERSION)) process.stdout.write('update available: v' + latest + ' (you have v' + VERSION + ').\nApply:  node "' + __filename + '" --update\n');
       else process.stdout.write('up to date (v' + VERSION + ').\n');
       process.exit(0);
@@ -1022,7 +1113,7 @@ function isOurGitClone() {
   try {
     g(['rev-parse', '--is-inside-work-tree']);
     g(['ls-files', '--error-unmatch', path.basename(__filename)]);         // our script is version-controlled here
-    return /ccrig|claude-code-(better-)?status-line/.test(g(['remote', '-v'])); // remote is this project (any name it's used)
+    return /[\/:](ccrig|claude-code-(better-)?status-line)(\.git)?(\s|$)/m.test(g(['remote', '-v'])); // remote is THIS project (path-segment anchored, not a bare substring)
   } catch { return false; }
 }
 // --update: pull the newest version. our git clone -> git pull; standalone copy -> download,
@@ -1046,7 +1137,7 @@ function runUpdate() {
     // trust gates before we ever overwrite: it must parse as our script and be a sane size
     if (!latest) { process.stdout.write('refusing to apply: the downloaded file has no VERSION marker (not our script, or a proxy error page).\n'); process.exit(1); }
     if (js.length < 10000 || !/ccrig|claude-code-better-status-line/.test(js)) { process.stdout.write('refusing to apply: the downloaded file did not look like statusline.js (failed the shape check).\n'); process.exit(1); }
-    if (latest === VERSION) { process.stdout.write('already at v' + VERSION + '; nothing to apply.\n'); process.exit(0); }
+    if (latest === VERSION && !force) { process.stdout.write('already at v' + VERSION + '; nothing to apply. Use --update --force to re-apply (repair a modified copy).\n'); process.exit(0); }
     if (!semverGt(latest, VERSION) && !force) { process.stdout.write('remote is v' + latest + ', which is not newer than your v' + VERSION + '. Not applying (run `--update --force` to override).\n'); process.exit(0); }
     // keep a .js extension so `node --check` parses it as CommonJS (top-level return is legal there)
     const tmp = __filename + '.download-' + process.pid + '.js';
@@ -1097,6 +1188,16 @@ function runWhatsnew() {
   let md = ''; try { md = fs.readFileSync(path.join(__dirname, 'CHANGELOG.md'), 'utf8'); } catch {}
   const notes = parseChangelogTop(md) || (readUpdateInfo() || {}).notes || '';
   process.stdout.write('ccrig v' + VERSION + '\n\n' + (notes || '(no CHANGELOG.md next to the script)') + '\n');
+  process.exit(0);
+}
+
+// --dismiss-update: silence the ⬆ badge for the currently-cached version (it returns for the next one).
+// The only other writer of `seen` is a successful --update; this lets a user skip a version they don't want.
+function runDismissUpdate() {
+  const info = readUpdateInfo();
+  if (!info || !info.latest || !semverGt(info.latest, VERSION)) { process.stdout.write('nothing to dismiss (no newer version is cached).\n'); process.exit(0); }
+  writeJsonAtomic(updateCacheFile(), Object.assign({}, info, { seen: info.latest }));
+  process.stdout.write('dismissed the update badge for v' + info.latest + ' (it returns when a newer version appears).\n');
   process.exit(0);
 }
 
@@ -1162,6 +1263,10 @@ const NON_PROFILE_DIRS = new Set(['.claude-usage-ledger', '.claude-rig-sessions'
 // one the user is explicitly targeting) and created if missing; every other ~/.claude*
 // dir is included only if it already exists. This is what lets ONE --install cover a
 // heavy user's work + personal profiles instead of silently wiring only the active one.
+// a dir that already looks like a Claude profile (a real marker) — not a foreign ~/.claude-* tool dir
+function hasClaudeMarker(dir) {
+  return fs.existsSync(path.join(dir, 'settings.json')) || fs.existsSync(path.join(dir, '.credentials.json')) || fs.existsSync(path.join(dir, 'projects'));
+}
 function detectProfiles() {
   const seen = new Set();
   const out = [];
@@ -1172,8 +1277,24 @@ function detectProfiles() {
       if (NON_PROFILE_DIRS.has(e)) continue;
       if (e === '.claude' || e.startsWith('.claude-')) {
         const p = path.join(HOME, e);
-        try { if (fs.statSync(p).isDirectory()) add(p); } catch {}
+        // require a Claude marker for NON-active dirs, so --install never writes settings.json into a
+        // foreign ~/.claude-* tool dir (claude-code-router, claude-flow, backup dirs, ...).
+        try { if (p === CFG || (fs.statSync(p).isDirectory() && hasClaudeMarker(p))) add(p); } catch {}
       }
+    }
+  } catch {}
+  return out;
+}
+// ~/.claude-* dirs that look like a profile by name but lack any marker (skipped by --install);
+// surfaced as a note so a real-but-empty profile can still be wired explicitly with --this-profile.
+function markerlessClaudeDirs() {
+  const out = [];
+  try {
+    for (const e of fs.readdirSync(HOME).sort()) {
+      if (NON_PROFILE_DIRS.has(e) || !(e === '.claude' || e.startsWith('.claude-'))) continue;
+      const p = path.join(HOME, e);
+      if (p === CFG) continue;
+      try { if (fs.statSync(p).isDirectory() && !hasClaudeMarker(p)) out.push(p); } catch {}
     }
   } catch {}
   return out;
@@ -1217,7 +1338,7 @@ function strHash(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h *
 function gitProbe(cwd) {
   let out;
   try {
-    out = execSync('git status --porcelain=v2 --branch', { cwd, stdio: ['ignore', 'pipe', 'ignore'], timeout: 700, encoding: 'utf8' });
+    out = execSync('git --no-optional-locks status --porcelain=v2 --branch', { cwd, stdio: ['ignore', 'pipe', 'ignore'], timeout: 700, encoding: 'utf8' });
   } catch { return null; }
   let branch = '', ahead = 0, behind = 0, dirty = 0;
   for (const line of out.split('\n')) {
@@ -1270,7 +1391,8 @@ function collectSegments(input, width, gitOverride) {
   if (cwd && projectDir && cwd !== projectDir && cwd.startsWith(projectDir) && (cwd[projectDir.length] === '/' || cwd[projectDir.length] === '\\')) folder += cwd.slice(projectDir.length);
   out.folder = `\u{1F4C2} ${c(K.folder, truncFolder(folder, width - 4))}`;
 
-  let model = (input.model && input.model.display_name) || (input.model && input.model.id) || 'Claude';
+  // String-coerce at the source: a hostile non-string display_name/id (e.g. 123) must not reach .replace()
+  let model = String((input.model && input.model.display_name) || (input.model && input.model.id) || 'Claude');
   model = model.replace(/\s*\(1M context\)/i, '').trim();
   const oneM = /\[?1m\]?/i.test(((input.model && input.model.id) || '') + ' ' + (settingsVal('model') || ''));
   out.model = `${c(K.dim, '★')} ${c(K.model, model)}${oneM ? c(K.dim, ' [1m]') : ''}`;
@@ -1321,7 +1443,7 @@ function collectSegments(input, width, gitOverride) {
     out.cost = s;
   } else out.cost = '';
 
-  const name = input.session_name;
+  const name = typeof input.session_name === 'string' ? input.session_name : '';
   out.sessionName = name ? c(K.dim, name.length > 28 ? name.slice(0, 27) + '…' : name) : '';
 
   const order = Array.isArray(CONFIG.order) ? CONFIG.order : DEFAULT_ORDER;
@@ -1368,9 +1490,10 @@ const argv = process.argv.slice(2);
 if (require.main !== module) {
   module.exports = {
     semverGt, modelTier, parseRemoteVersion, parseChangelogTop, inflightAgents,
-    computeInflightAgents, latestTodos, latestUserText, dispWidth, deepMerge,
+    computeInflightAgents, latestTodos, latestUserText, dispWidth, glyphWidth, deepMerge,
     truncFolder, fmtReset, resumePromptFromCheckpoint, wrapSegments, bar,
     fetchText, httpGetText, VERSION,
+    DEFAULTS, DEFAULT_ORDER, MODES, helpText, watcherCmdMatches, notifySpec, maybeCheckUpdate,
   };
   return;
 }
@@ -1381,6 +1504,7 @@ function helpText() {
     'Claude Code calls this automatically (JSON on stdin). Manual commands:',
     '  --install            wire Claude Code to this file, for ALL your profiles (backs up settings.json first)',
     '  --install-guardian   also wire the guardian: keep-working + auto-resume at limits (all profiles)',
+    '  --auto               with --install-guardian: hands-free relaunch (autopilot resume)',
     '  --uninstall          remove the status line + any guardian hooks (all profiles)',
     '  --uninstall-guardian remove only the guardian hooks; keep the status line (all profiles)',
     '  --this-profile       with any install/uninstall command: scope it to the active profile only',
@@ -1394,8 +1518,10 @@ function helpText() {
     '  --disarm [id]        stop auto-resume watcher(s) and clear their state',
     '  --purge              delete all local guardian state (checkpoints, tickets, cache)',
     '  --update             pull the newest version (git pull or download, backed up)',
+    '  --force              with --update: apply even when the remote is not newer (repair)',
     '  --check-update       check now whether a newer version is available',
     '  --whatsnew           print the newest changelog section',
+    '  --dismiss-update     silence the update badge for the current newest version',
     '  --options            print every current setting and its choices',
     '  --config             interactive editor (segments, mode, live preview, save)',
     '  --demo [--cols N]     preview with sample data',
@@ -1526,6 +1652,9 @@ function watchLog(sid, m) {
 }
 function relaunchResume(cp, profileDir) {
   const sid = cp.session_id;
+  // process-spawning safety: under CCBSL_NO_ACT (the test guard) never launch the real
+  // claude, mirroring armWatcher/notify. Makes the watcher runtime testable without a relaunch.
+  if (!actAllowed()) { watchLog(sid, 'CCBSL_NO_ACT: would relaunch ' + (profileDir ? 'cross-profile' : '--resume ' + sid)); process.exit(0); }
   const prompt = resumePromptFromCheckpoint(cp, !!profileDir, true); // watcher relaunch = unattended
   // CCBSL_UNATTENDED disables keep-working inside the relaunched run, so an auto-resume
   // does its reviewable steps and STOPS instead of looping unattended overnight.
@@ -1563,13 +1692,13 @@ function resumedManuallySince(cp) {
 function watchPidFile(sid) { return path.join(guardDir(), sid + '.watch.pid'); }
 function runWatch(sid) {
   if (!sid || !SID_RE.test(sid)) process.exit(1);
-  const cp = readCheckpoint(sid);
+  let cp = readCheckpoint(sid);
   if (!cp) { watchLog(sid, 'no checkpoint; exiting'); process.exit(1); }
   // Without a known reset time we cannot schedule safely: firing on a bare timer
   // would relaunch while the window is still exhausted. Leave it to the resume ticket.
   if (!cp.resets_at) { watchLog(sid, 'no reset time in checkpoint; not auto-resuming (use the resume ticket)'); process.exit(1); }
-  const buffer = (typeof CONFIG.autopilotBuffer === 'number' && CONFIG.autopilotBuffer >= 0 ? CONFIG.autopilotBuffer : 45) * 1000;
-  const target = cp.resets_at * 1000 + buffer;
+  const bufferMs = () => (typeof CONFIG.autopilotBuffer === 'number' && CONFIG.autopilotBuffer >= 0 ? CONFIG.autopilotBuffer : 45) * 1000;
+  let target = cp.resets_at * 1000 + bufferMs();
   // a PID file makes the watcher inspectable (--status) and killable (--disarm), not an invisible daemon
   try { fs.writeFileSync(watchPidFile(sid), String(process.pid) + '\n' + target); } catch {}
   process.on('exit', () => { try { fs.unlinkSync(watchPidFile(sid)); } catch {} });
@@ -1580,11 +1709,18 @@ function runWatch(sid) {
     try { return Date.now() - fs.statSync(cp.transcript_path).mtimeMs < 120000; } catch { return false; }
   };
   const fireIfIdle = (profileDir, why) => {
-    if (resumedManuallySince(cp)) { watchLog(sid, 'session already continued after the reset; standing down'); process.exit(0); }
+    if (resumedManuallySince(cp)) { watchLog(sid, 'session already continued after the reset; standing down'); clearSessionGuardState(sid); process.exit(0); }
     watchLog(sid, why); return relaunchResume(cp, profileDir);
   };
   const tick = () => {
     try {
+      // Re-read the checkpoint each tick: a refreshed schedule (a later window hitting critical) or an
+      // autopilotBuffer change is honored WITHOUT re-arming; a vanished checkpoint means stand down.
+      const fresh = readCheckpoint(sid);
+      if (!fresh || !fresh.resets_at) { watchLog(sid, 'checkpoint gone or lost its reset; standing down'); process.exit(0); }
+      cp = fresh;
+      const newTarget = cp.resets_at * 1000 + bufferMs();
+      if (newTarget !== target) { target = newTarget; try { fs.writeFileSync(watchPidFile(sid), String(process.pid) + '\n' + target); } catch {} watchLog(sid, 'target refreshed to ' + new Date(target).toISOString()); }
       // Failover can fire before the reset (that's the point), but NOT while you're still
       // working in the foreground session — two agents in one worktree would collide.
       if (CONFIG.autopilotFailover && !foregroundActive()) {
@@ -1600,13 +1736,22 @@ function runWatch(sid) {
 function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
 // only signal a pid we can confirm is OUR watcher (its cmdline still has `--watch <sid>`),
 // so a stale pid file that was reused by an unrelated process is never killed.
+// pure + testable: does a process cmdline belong to a watcher for this sid?
+function watcherCmdMatches(cmdline, sid) { return typeof cmdline === 'string' && cmdline.includes('--watch') && cmdline.includes(sid); }
 function isOurWatcher(pid, sid) {
   if (!pid || !pidAlive(pid)) return false;
-  if (process.platform === 'win32') return true; // no cheap portable cmdline check; accept
   try {
+    if (process.platform === 'win32') {
+      // real cmdline check (was: blindly return true). pid is Number-coerced and sid is SID_RE-validated
+      // by every caller, so the Win32_Process filter string is injection-safe.
+      const cmd = require('child_process').execFileSync('powershell', ['-NoProfile', '-Command',
+        '(Get-CimInstance Win32_Process -Filter "ProcessId=' + Number(pid) + '").CommandLine'],
+        { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] });
+      return watcherCmdMatches(cmd, sid);
+    }
     const cmd = require('child_process').execFileSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] });
-    return cmd.includes('--watch') && cmd.includes(sid);
-  } catch { return false; }
+    return watcherCmdMatches(cmd, sid);
+  } catch { return false; }   // fail closed: never signal a process we cannot confirm is our watcher
 }
 // --status: list armed auto-resume watchers (nothing is a hidden daemon)
 function runStatus() {
@@ -1620,7 +1765,7 @@ function runStatus() {
       let pid = 0, target = 0;
       try { const p = fs.readFileSync(path.join(guardDir(), f), 'utf8').split('\n'); pid = parseInt(p[0], 10) || 0; target = parseInt(p[1], 10) || 0; } catch {}
       const cp = readCheckpoint(sid) || {};
-      const alive = pid && pidAlive(pid);
+      const alive = isOurWatcher(pid, sid);   // a recycled-PID orphan must not report ARMED
       process.stdout.write('  ' + (alive ? 'ARMED' : 'stale') + '  session ' + sid + '  pid ' + pid + (alive ? '' : ' (not running)') +
         (target ? '  fires ~' + new Date(target).toLocaleString() : '') + (cp.window ? '  [' + cp.window + ']' : '') + '\n');
     }
@@ -1631,6 +1776,7 @@ function runStatus() {
 }
 // --disarm [sid]: stop watcher(s) and clear their state
 function runDisarm(sid) {
+  process.stdout.write('ccrig v' + VERSION + ': disarm\n  profile: ' + CFG + '\n');
   const targets = [];
   try { for (const f of fs.readdirSync(guardDir())) { if (!f.endsWith('.watch.pid')) continue; const s = f.slice(0, -'.watch.pid'.length); if (!sid || s === sid) targets.push(s); } } catch {}
   let killed = 0;
@@ -1646,11 +1792,13 @@ function runDisarm(sid) {
 // --purge: delete everything the guardian wrote locally (checkpoints, tickets, watchers,
 // update cache, this profile's ledger entry, temp samples). Nothing here ever left the machine.
 function runPurge() {
+  process.stdout.write('ccrig v' + VERSION + ': purge\n  profile: ' + CFG + '\n');
   const rm = (p) => { try { fs.rmSync(p, { recursive: true, force: true }); } catch {} };
   try { for (const f of fs.readdirSync(guardDir())) if (f.endsWith('.watch.pid')) { const s = f.slice(0, -'.watch.pid'.length); let pid = 0; try { pid = parseInt(fs.readFileSync(path.join(guardDir(), f), 'utf8'), 10) || 0; } catch {} if (isOurWatcher(pid, s)) { try { process.kill(pid); } catch {} } } } catch {}
   rm(guardDir());
   rm(path.join(CFG, 'resume-tickets'));
   try { fs.unlinkSync(updateCacheFile()); } catch {}
+  try { fs.unlinkSync(path.join(CFG, 'statusline-error.log')); } catch {} // pure state, squarely inside purge's contract
   try { fs.unlinkSync(path.join(ledgerDir(), path.basename(CFG) + '.json')); } catch {}
   try { for (const f of fs.readdirSync(os.tmpdir())) if (f.startsWith('ccbsl-usage-') || f.startsWith('ccbsl-agents-') || f.startsWith('ccsl-git-')) { try { fs.unlinkSync(path.join(os.tmpdir(), f)); } catch {} } } catch {}
   rm(boardDir()); // shared session-board files (live sessions republish on their next render)
@@ -1711,7 +1859,7 @@ function runSessions() {
   const now = Date.now();
   for (const r of rows.slice(0, 15)) {
     let cwd = '';
-    for (const line of readHead(r.path, 16384).split('\n')) { // cwd may not be on the very first line
+    for (const line of readHead(r.path, 65536).split('\n')) { // cwd may not be on the very first line; a big first record still yields it
       if (!line) continue; let o; try { o = JSON.parse(line); } catch { continue; }
       cwd = o.cwd || (o.workspace && o.workspace.current_dir) || '';
       if (cwd) break;
@@ -1721,20 +1869,38 @@ function runSessions() {
     const age = ageM < 60 ? ageM + 'm' : ageM < 1440 ? Math.round(ageM / 60) + 'h' : Math.round(ageM / 1440) + 'd';
     const sz = r.size > 1e6 ? (r.size / 1e6).toFixed(1) + 'MB' : Math.round(r.size / 1e3) + 'KB';
     process.stdout.write('  ' + pad(age + ' ago', 8) + ' ' + pad(sz, 7) + ' ' + pad(path.basename(cwd) || '?', 18) + '  ' + req + '\n');
-    process.stdout.write('    ' + (cwd ? 'cd ' + shellQuote(cwd) + ' && ' : '') + 'claude --resume ' + r.sid + '\n');
+    // platform-aware cd: cmd.exe needs `cd /d "..."`; POSIX uses shell-quoted single quotes
+    const cd = cwd ? (process.platform === 'win32' ? 'cd /d "' + cwd.replace(/"/g, '') + '" && ' : 'cd ' + shellQuote(cwd) + ' && ') : '';
+    process.stdout.write('    ' + cd + 'claude --resume ' + r.sid + (cwd ? '' : '   (run from its project dir)') + '\n');
   }
   process.exit(0);
 }
+// one mode at a time: silently ignoring the second flag misleads the user. This gate sits ABOVE
+// the one-shot dispatch so a combined command (e.g. `--purge --install`) is rejected, not half-run.
+// --hook/--watch are installer-wired internals, never user-typed, so they are exempt.
+const EXCLUSIVE = ['--install', '--install-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--config', '--demo', '--selftest', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--options', '--update', '--check-update', '--whatsnew', '--dismiss-update'];
+const picked = EXCLUSIVE.filter((m) => argv.includes(m));
+if (picked.length > 1) {
+  process.stdout.write('pick one of: ' + picked.join(', ') + '\n');
+  process.exit(1);
+}
+
 if (argv.includes('--hook')) { let inp = {}; try { inp = JSON.parse(fs.readFileSync(0, 'utf8')); } catch {} runHook(argv[argv.indexOf('--hook') + 1], inp); }
 if (argv.includes('--watch')) { runWatch(argv[argv.indexOf('--watch') + 1]); return; }
 if (argv.includes('--status')) runStatus();
-if (argv.includes('--disarm')) runDisarm(argv[argv.indexOf('--disarm') + 1]);
+if (argv.includes('--disarm')) {
+  const v = argv[argv.indexOf('--disarm') + 1];
+  // a bare `--disarm` (no value) disarms all; a value must be a real session id, never another flag
+  if (v !== undefined && (v.startsWith('--') || !SID_RE.test(v))) { process.stdout.write('usage: --disarm [session-id]\n'); process.exit(1); }
+  runDisarm(v);
+}
 if (argv.includes('--purge')) runPurge();
 if (argv.includes('--board')) runBoard();
 if (argv.includes('--sessions')) runSessions();
 if (argv.includes('--check-update')) { runCheckUpdate(); return; } // async: exits in its callback
 if (argv.includes('--update')) { runUpdate(); return; }             // async: exits in its callback
 if (argv.includes('--whatsnew')) runWhatsnew();
+if (argv.includes('--dismiss-update')) runDismissUpdate();
 
 // ---- --options: print every current setting + its choices (human + agent readable) ----
 function runOptions() {
@@ -1745,7 +1911,7 @@ function runOptions() {
   let o = 'ccrig v' + VERSION + ' options\n';
   o += 'config file: ' + CONFIG_PATH + (fs.existsSync(CONFIG_PATH) ? '' : '  (not present: using defaults)') + '\n\n';
   o += 'display mode:   ' + CONFIG.mode + '        choices: ' + MODES.join(' | ') + '\n';
-  o += 'reset style:    ' + CONFIG.resetStyle + '        choices: clock | relative\n';
+  o += 'reset style:    ' + CONFIG.resetStyle + '        choices: clock | clock24 | relative\n';
   o += 'resume tickets: ' + (CONFIG.resumeTickets === false ? 'off' : 'on') + '\n';
   o += 'update check:   ' + (CONFIG.updateCheck === false ? 'off' : 'on') + '        once/day background check for a newer version\n';
   o += 'git cache:      ' + (CONFIG.gitCacheMs || 0) + 'ms\n';
@@ -1786,8 +1952,17 @@ function readSettingsRaw(dir = CFG) {
 }
 function backupSettings(dir = CFG) {
   const sp = settingsPathOf(dir);
-  if (fs.existsSync(sp)) { fs.copyFileSync(sp, sp + '.bak'); return sp + '.bak'; }
-  return null;
+  if (!fs.existsSync(sp)) return null;
+  const bak = sp + '.bak';
+  // protect a pristine pre-Rig backup: if a .bak exists that predates us (no statusline.js reference),
+  // don't clobber it — write the current content to .bak.1 instead, so a user's original custom bar
+  // survives repeated installs/guardian-installs.
+  try {
+    if (fs.existsSync(bak) && !/statusline\.js/.test(fs.readFileSync(bak, 'utf8'))) {
+      const bak1 = sp + '.bak.1'; fs.copyFileSync(sp, bak1); return bak1;
+    }
+  } catch {}
+  fs.copyFileSync(sp, bak); return bak;
 }
 // the in-session command: writing it to <dir>/commands makes `/statusline-config`
 // available in Claude Code sessions on that profile. The script path is baked in.
@@ -1849,13 +2024,16 @@ function installStatusLineInto(dir) {
     if (raw.state === 'invalid') return { dir, sp, err: 'settings.json is not valid JSON (fix or delete it, then re-run)' };
     if (raw.state === 'notObject') return { dir, sp, err: 'settings.json is not a JSON object (fix it, then re-run)' };
     const settings = raw.value || {};
+    // announce (and via backupSettings, preserve) a foreign status line we are about to replace
+    const prevSl = isPlainObject(settings.statusLine) && typeof settings.statusLine.command === 'string' ? settings.statusLine.command : '';
+    const replacedForeign = (prevSl && !isOurCmd(prevSl)) ? prevSl : null;
     const bak = backupSettings(dir);
     // process.execPath = the node running this installer: absolute, exists, cross-platform
     settings.statusLine = { type: 'command', command: `"${process.execPath}" "${__filename}"`, refreshInterval: 2 };
     fs.writeFileSync(sp, JSON.stringify(settings, null, 2) + '\n');
     JSON.parse(fs.readFileSync(sp, 'utf8')); // round-trip validate
     const cmd = writeSlashCommand(dir);
-    return { dir, sp, bak, cmd };
+    return { dir, sp, bak, cmd, replacedForeign };
   } catch (e) { return { dir, sp: settingsPathOf(dir), err: e.message }; }
 }
 function runInstall() {
@@ -1869,13 +2047,18 @@ function runInstall() {
   for (const r of okd) {
     process.stdout.write('ok  status line wired for ' + profileLabel(r.dir) + '  (' + r.sp + ')'
       + (r.bak ? '  [backup: ' + r.bak + ']' : '') + '\n');
+    if (r.replacedForeign) process.stdout.write('--  replaced an existing status line: ' + r.replacedForeign + (r.bak ? '  (kept in ' + r.bak + ')' : '') + '\n');
   }
   if (okd.some((r) => r.cmd)) process.stdout.write('ok  in-session command installed: run /statusline-config in Claude Code to see and change options\n');
   for (const r of failed) process.stdout.write('!! skipped ' + profileLabel(r.dir) + ' (' + r.sp + '): ' + r.err + '\n');
+  if (!thisOnly) for (const d of markerlessClaudeDirs()) process.stdout.write('--  skipped ' + profileLabel(d) + ': no Claude settings found (wire it with  CLAUDE_CONFIG_DIR=' + d + ' node "' + __filename + '" --install --this-profile)\n');
   if (!okd.length) { process.stdout.write('install failed: no profile could be wired.\n'); process.exit(1); }
   if (!thisOnly && profiles.length > 1) {
-    process.stdout.write('\n' + okd.length + ' profile(s) wired' + (failed.length ? ', ' + failed.length + ' skipped' : '')
-      + '. All your Claude profiles now show the bar. (Scope to one with --this-profile.)\n');
+    // honest summary: only claim "all profiles" when nothing was skipped (Q1). Exit stays 0 on a
+    // partial success so the one-line curl installer's `&&` chain is not broken (owner open question).
+    process.stdout.write('\n' + okd.length + ' of ' + profiles.length + ' profile(s) wired'
+      + (failed.length ? ', ' + failed.length + ' skipped. Fix the skipped one(s) and re-run.' : '. All your Claude profiles now show the bar.')
+      + ' (Scope to one with --this-profile.)\n');
   }
   const helper = path.join(__dirname, 'claude-profiles.sh');
   if (fs.existsSync(helper)) process.stdout.write('--  switch accounts from your shell:  source "' + helper + '"\n');
@@ -1893,7 +2076,37 @@ function runInstall() {
 // ---- guardian: wire the Stop / SessionStart / PreCompact hooks (Features 1, 2, 5) ----
 const GUARD_EVENTS = [['Stop', 'stop'], ['SessionStart', 'session-start'], ['PreCompact', 'pre-compact']];
 function guardianHookCommand(slug) { return `"${process.execPath}" "${__filename}" --hook ${slug}`; }
-function isGuardianHookCmd(h) { return h && typeof h.command === 'string' && h.command.includes(__filename) && h.command.includes('--hook'); }
+// paths a settings command references (quoted tokens first, then whitespace-split bare tokens)
+function cmdPaths(cmd) {
+  const quoted = [...String(cmd).matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  return quoted.concat(String(cmd).split(/\s+/));
+}
+// does the command reference a statusline.js path at all — i.e. THIS tool by name, any install
+// (existence-agnostic). Used to strip guardian hooks even from a moved/deleted copy (reversibility).
+function refsStatuslineJs(cmd) {
+  if (typeof cmd !== 'string') return false;
+  if (cmd.includes(__filename)) return true;
+  return cmdPaths(cmd).some((t) => /(^|[\/\\])statusline\.js$/.test(t));
+}
+// does this statusLine command belong to THIS install to REMOVE safely? our exact file, OR a
+// stale reference to a now-MISSING statusline.js (a moved/partial install) — never a LIVE foreign
+// script that merely shares the name. Guards --uninstall against deleting someone else's bar.
+function isOurCmd(cmd) {
+  if (typeof cmd !== 'string') return false;
+  if (cmd.includes(__filename)) return true;
+  let selfReal; try { selfReal = fs.realpathSync(__filename); } catch { selfReal = __filename; }
+  for (const t of cmdPaths(cmd)) {
+    if (/(^|[\/\\])statusline\.js$/.test(t)) {
+      // symlink-aware same-file check (a symlinked TMPDIR spells our own path two ways); a
+      // MISSING path is a stale reference to a moved/deleted copy of ours, so still ours to clean.
+      try { const real = fs.realpathSync(t); return real === selfReal || real === __filename; }
+      catch { return true; }
+    }
+  }
+  return false;
+}
+// a guardian hook of ours: the --hook convention + any statusline.js reference (any install).
+function isGuardianHookCmd(h) { return h && typeof h.command === 'string' && h.command.includes('--hook') && refsStatuslineJs(h.command); }
 function isGuardianHookGroup(g) { return g && Array.isArray(g.hooks) && g.hooks.some(isGuardianHookCmd); }
 // remove ONLY our individual hook entries, per-hook, so a user's hook that shares a
 // group object with ours is never dropped. Empty groups (and events) are pruned.
@@ -2012,17 +2225,20 @@ function uninstallFrom(dir) {
     // as ours: it's almost certainly a stale/partial entry from a moved install).
     const sl = raw.state === 'ok' ? raw.value.statusLine : undefined;
     const slCmd = isPlainObject(sl) && typeof sl.command === 'string' ? sl.command : (sl ? '' : null);
-    const ownsStatusLine = slCmd != null && (slCmd === '' || slCmd.includes(__filename) || slCmd.includes('statusline.js'));
+    const ownsStatusLine = slCmd != null && (slCmd === '' || isOurCmd(slCmd));
     const foreign = !!(sl && !ownsStatusLine);
-    if (raw.state !== 'ok' || (!ownsStatusLine && !gres.removed)) return { dir, sp, removedSL: false, removedHooks: 0, foreign };
+    // these two files are unconditionally OURS regardless of statusLine ownership: clean them even
+    // when the user switched status lines and runs --uninstall just to tidy up (hoisted above the early return).
+    let removedCmd = false;
+    try { const cp = slashCommandPath(dir); if (fs.existsSync(cp)) { fs.unlinkSync(cp); removedCmd = true; } } catch {}
+    try { fs.unlinkSync(path.join(dir, '.ccbsl-update.json')); } catch {}
+    if (raw.state !== 'ok' || (!ownsStatusLine && !gres.removed)) return { dir, sp, removedSL: false, removedHooks: 0, foreign, removedCmd };
     const settings = raw.value;
     const bak = backupSettings(dir);
     if (ownsStatusLine) delete settings.statusLine;
     if (gres.removed) { if (gres.hooks === undefined) delete settings.hooks; else settings.hooks = gres.hooks; }
     fs.writeFileSync(sp, JSON.stringify(settings, null, 2) + '\n');
-    try { const cp = slashCommandPath(dir); if (fs.existsSync(cp)) fs.unlinkSync(cp); } catch {}
-    try { fs.unlinkSync(path.join(dir, '.ccbsl-update.json')); } catch {} // drop this profile's update cache
-    return { dir, sp, removedSL: ownsStatusLine, removedHooks: gres.removed, foreign, bak };
+    return { dir, sp, removedSL: ownsStatusLine, removedHooks: gres.removed, foreign, bak, removedCmd };
   } catch (e) { return { dir, sp: settingsPathOf(dir), err: e.message }; }
 }
 function runUninstall() {
@@ -2036,6 +2252,7 @@ function runUninstall() {
     if (r.removedSL) { process.stdout.write('ok  status line removed from ' + profileLabel(r.dir) + '  (' + r.sp + ')' + (r.bak ? '  [backup: ' + r.bak + ']' : '') + '\n'); touched++; }
     else if (r.foreign) process.stdout.write('--  ' + profileLabel(r.dir) + ': a third-party status line was left untouched\n');
     if (r.removedHooks) { process.stdout.write('ok  ' + r.removedHooks + ' guardian hook(s) removed from ' + profileLabel(r.dir) + '\n'); touched++; }
+    if (r.removedCmd) { process.stdout.write('--  removed the /statusline-config command from ' + profileLabel(r.dir) + '\n'); touched++; }
   }
   if (!touched) {
     if (errs.length) process.exit(1); // a real permission/IO failure, not a clean no-op
@@ -2046,6 +2263,18 @@ function runUninstall() {
   process.exit(errs.length ? 1 : 0);
 }
 
+// paths a command references that must exist on disk: prefer quoted absolute tokens; if NONE are
+// quoted, fall back to whitespace-split absolute tokens, so an unquoted dead path is still caught.
+function checkCmdPaths(cmd) {
+  if (typeof cmd !== 'string') return { checked: 0, missing: [] };
+  const quoted = [...cmd.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  // Prefer quoted tokens; fall back to whitespace-split ONLY when there are no quoted tokens at all,
+  // so an unquoted dead path is caught but an `sh -c "node /path"` wrapper is not mis-split into a
+  // fake absolute token (the quoted `node /path` is one non-absolute token, so nothing is checked).
+  const toks = (quoted.length ? quoted : cmd.split(/\s+/)).filter((t) => !t.startsWith('-') && path.isAbsolute(t));
+  const missing = toks.filter((t) => { try { return !fs.existsSync(t); } catch { return true; } });
+  return { checked: toks.length, missing };
+}
 // ---- doctor: diagnose the failure modes users actually hit ----
 function runDoctor() {
   let fails = 0;
@@ -2072,14 +2301,12 @@ function runDoctor() {
     else if (!cmd) bad('statusLine is not configured', 'run: node "' + __filename + '" --install');
     else {
       ok('statusLine is configured');
-      if (!cmd.includes(__filename)) info('statusLine points at a different script: ' + cmd);
-      // check every quoted absolute path in the command (node binary AND script);
-      // non-path tokens (sh -c bodies, env values) are ignored on purpose
-      const pathish = [...cmd.matchAll(/"([^"]+)"/g)].map((m) => m[1]).filter((t) => path.isAbsolute(t));
-      const missing = pathish.filter((t) => !fs.existsSync(t));
-      if (missing.length) bad('path(s) in the statusLine command do not exist: ' + missing.join(', ') + ' (moved? node upgrade?)', 're-run: node "' + __filename + '" --install');
-      else if (pathish.length) ok('command paths exist (' + pathish.length + ' checked)');
-      else info('no quoted absolute paths in the command to check');
+      if (!isOurCmd(cmd)) info('statusLine points at a different script: ' + cmd);
+      // check the absolute paths (node binary AND script); an UNQUOTED dead path is caught too
+      const slp = checkCmdPaths(cmd);
+      if (slp.missing.length) bad('path(s) in the statusLine command do not exist: ' + slp.missing.join(', ') + ' (moved? node upgrade?)', 're-run: node "' + __filename + '" --install');
+      else if (slp.checked) ok('command paths exist (' + slp.checked + ' checked)');
+      else info('no absolute paths in the command to check');
       if (sl.refreshInterval) ok('refreshInterval: ' + sl.refreshInterval + 's'); else info('refreshInterval not set: bars update only on session events');
     }
   }
@@ -2100,10 +2327,28 @@ function runDoctor() {
     else if (wired.length) info('guardian partly wired (' + wired.join(', ') + '); re-run --install-guardian for all three');
     else info('guardian hooks not wired (Relentless mode + auto-resume off); enable with --install-guardian');
     if (wired.length) {
+      // path-check the hook commands too (doctor only checked statusLine before): after a node-version
+      // upgrade, --install fixes statusLine but the hooks still point at a dead node path.
+      const hookCmds = [];
+      for (const [Event] of GUARD_EVENTS) for (const g of (Array.isArray(hooks[Event]) ? hooks[Event] : [])) for (const h of (g && Array.isArray(g.hooks) ? g.hooks : [])) if (isGuardianHookCmd(h)) hookCmds.push(h.command);
+      const hookMissing = [];
+      for (const hc of hookCmds) for (const m of checkCmdPaths(hc).missing) if (!hookMissing.includes(m)) hookMissing.push(m);
+      if (hookMissing.length) bad('path(s) in guardian hook commands do not exist: ' + hookMissing.join(', '), 're-run: node "' + __filename + '" --install-guardian');
       info('  keep-working: ' + (cfgKeepWorking() ? 'on' : 'off') + '   autopilot: ' + cfgAutopilot());
       if (cfgAutopilot() === 'resume') {
-        try { execSync((process.platform === 'win32' ? 'where ' : 'command -v ') + claudeBin(), { stdio: 'ignore', timeout: 2000 }); ok('claude on PATH (auto-resume can relaunch)'); }
-        catch { bad('autopilot is "resume" but "' + claudeBin() + '" is not on PATH', 'set "claudeBin" in config to an absolute claude path'); }
+        try {
+          if (process.platform === 'win32') {
+            // spawn() has no shell, so CreateProcess resolves only .exe/.com — a .cmd/.bat/.ps1 shim
+            // that `where` finds is un-spawnable at relaunch time; flag it rather than false-pass.
+            const out = execSync('where ' + claudeBin(), { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+            const first = out.split('\n').map((l) => l.trim()).filter(Boolean)[0] || '';
+            if (/\.(cmd|bat|ps1)$/i.test(first)) bad('claudeBin resolves to a shell shim (' + first + ') that auto-resume cannot spawn directly', 'set "claudeBin" in config to the claude .exe path');
+            else ok('claude on PATH (auto-resume can relaunch)');
+          } else {
+            execSync('command -v ' + claudeBin(), { stdio: 'ignore', timeout: 2000 });
+            ok('claude on PATH (auto-resume can relaunch)');
+          }
+        } catch { bad('autopilot is "resume" but "' + claudeBin() + '" is not on PATH', 'set "claudeBin" in config to an absolute claude path'); }
       }
     }
   }
@@ -2115,6 +2360,14 @@ function runDoctor() {
     else if (u.latest && semverGt(u.latest, VERSION)) info('update check: on, v' + u.latest + ' available (run --update); you have v' + VERSION);
     else info('update check: on, up to date (v' + VERSION + ')');
   }
+  // the /statusline-config command bakes in the script path; flag a stale one after a move
+  try {
+    const scp = slashCommandPath();
+    if (fs.existsSync(scp)) {
+      const m = fs.readFileSync(scp, 'utf8').split('\n').map((l) => l.trim()).find((l) => path.isAbsolute(l) && /statusline\.js$/.test(l));
+      if (m && !fs.existsSync(m)) bad('the /statusline-config command points at a missing script (' + m + ')', 're-run: node "' + __filename + '" --install');
+    }
+  } catch {}
   try { render(demoInput(), 80, DEMO_GIT()); ok('test render'); }
   catch (e) { bad('rendering throws: ' + e.message, 'update this file, or report it'); }
   const elog = path.join(CFG, 'statusline-error.log');
@@ -2122,14 +2375,6 @@ function runDoctor() {
 
   process.stdout.write(fails ? '\n' + fails + ' problem(s) found.\n' : '\nAll checks passed.\n');
   process.exit(fails ? 1 : 0);
-}
-
-// one mode at a time: silently ignoring the second flag misleads the user
-const EXCLUSIVE = ['--install', '--install-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--config', '--demo', '--selftest', '--mode', '--autopilot', '--keep-working'];
-const picked = EXCLUSIVE.filter((m) => argv.includes(m));
-if (picked.length > 1) {
-  process.stdout.write('pick one of: ' + picked.join(', ') + '\n');
-  process.exit(1);
 }
 
 // ---- --autopilot / --keep-working: one-command toggles for the guardian, saved to config ----
@@ -2219,6 +2464,11 @@ if (argv.includes('--selftest')) {
     'near-limit': {
       model: { display_name: 'Sonnet 5' },
       rate_limits: { five_hour: { used_percentage: 96, resets_at: now + 900 }, seven_day: { used_percentage: 40, resets_at: now + 4 * 86400 } },
+    },
+    'cjk names': {
+      workspace: { current_dir: '/tmp/日本語プロジェクト', project_dir: '/tmp/日本語プロジェクト' },
+      model: { display_name: 'Opus 4.8' }, session_name: '中文会话名称一二三四五六七八',
+      context_window: { used_percentage: 30 },
     },
   };
   let ok = true;
@@ -2310,6 +2560,14 @@ async function runConfigEditor() {
   process.exit(0);
 }
 
+// strict unknown-flag rejection: a typo like `--instal` should error, not silently render a bar.
+// Claude Code always invokes with argv.length===0, so this never runs on the render hot path (C3).
+if (argv.some((a) => a.startsWith('--'))) {
+  const KNOWN = new Set(['--install', '--install-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--options', '--config', '--demo', '--selftest', '--version', '--help', '--cols', '--this-profile', '--auto', '--force', '--hook', '--watch']);
+  const unknown = argv.find((a) => a.startsWith('--') && !KNOWN.has(a));
+  if (unknown) { process.stdout.write('unknown flag: ' + unknown + '\nRun  node "' + __filename + '" --help  for the flag list.\n'); process.exit(1); }
+}
+
 // ===========================================================================
 // normal path: Claude Code pipes the status JSON on stdin
 // ===========================================================================
@@ -2322,6 +2580,9 @@ if (!argv.includes('--config')) {
   try {
     let input = {};
     try { input = JSON.parse(fs.readFileSync(0, 'utf8')); } catch {}
+    // JSON.parse('null')/'42'/'[]' all succeed and overwrite the {} fallback; render() reads
+    // input.workspace etc, so coerce anything that is not a plain object back to {}.
+    if (!input || typeof input !== 'object' || Array.isArray(input)) input = {};
     process.stdout.write(render(input, getWidth() - CONFIG.reserveCols));
   } catch (e) {
     // the status line must never die silently: leave a trail and a next step
