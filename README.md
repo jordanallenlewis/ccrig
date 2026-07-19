@@ -28,7 +28,15 @@ Once you have the file (download or clone below), you can preview it with sample
 
 ## Install
 
-One line on macOS / Linux:
+**Via npm** (the quick path for Node users):
+
+```bash
+npm install -g ccrig && ccrig --install
+```
+
+`npx ccrig --demo` previews the bar without installing. When installed this way, update with `npm install -g ccrig@latest` (the built-in `--update` knows to defer to npm).
+
+**Or one line on macOS / Linux** (no npm, downloads the single file):
 
 ```bash
 mkdir -p ~/.claude && curl -fsSL https://gitlab.com/jordanallenlewis/ccrig/-/raw/main/statusline.js -o ~/.claude/statusline.js && node ~/.claude/statusline.js --install
