@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to **Rig** are documented here. The format follows
+All notable changes to **CCRig** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
@@ -10,6 +10,81 @@ install, config, or documented behavior; **MINOR** for a backward-compatible fea
 In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
+
+## [1.3.0] - 2026-07-19
+
+### Added
+- **Native `/ccrig` commands in Claude Code.** Installing now adds a `/ccrig` hub plus focused
+  `/ccrig:status`, `/ccrig:sessions`, `/ccrig:doctor`, `/ccrig:update`, and `/ccrig:config` commands to
+  the Claude Code `/` menu (the classic `/statusline-config` stays). Each runs the matching CCRig command
+  and presents the result in plain language. `--uninstall` removes them all.
+
+### Changed
+- Every command's output was rewritten to read as polished, user-facing text: friendly phrasing, real
+  plurals ("1 watcher", not "watcher(s)"), and no developer jargon (for example, "refusing to apply" is
+  now "Update skipped") across install, uninstall, the guardian, update, status, board, sessions, and purge.
+
+### Fixed
+- All writes to `settings.json` (and `statusline.config.json`) now go through an atomic write-and-rename,
+  so an interrupted or locked write can never leave the file every tool shares half-written. A failed
+  write now reports honestly that the file was left unchanged.
+
+## [1.2.0] - 2026-07-19
+
+### Added
+- `ccrig init` sets up the status line in Claude Code (the same action as `ccrig --install`), following
+  the `init` convention of tools like starship and husky. Short subcommand forms now work alongside the
+  flags: `ccrig init`, `ccrig update`, `ccrig doctor`, `ccrig preview`.
+- Installing with `npm install -g ccrig` also best-effort-runs that setup through an npm postinstall, so
+  a single command can be enough. Because npm v12, pnpm, yarn, and bun turn install scripts off by
+  default, that step may be skipped, so `ccrig init` is the reliable way to wire it and is safe to
+  re-run. The postinstall never fails the install, never runs from the project's own source checkout,
+  and can be turned off with `CCRIG_NO_POSTINSTALL=1`.
+
+### Changed
+- The official name is now **CCRig** (the npm package and the `ccrig` command stay lowercase, as npm
+  requires). The CLI banner, the README, and the rest of the docs use it.
+- Full README revision: a two-step quick start (install, then `ccrig init`), an npm badges row, an
+  npm-first update path, the `ccrig ...` command form throughout, and tighter prose.
+- A friendlier `--help` header and a clearer first-run message after install.
+
+### Fixed
+- **Cross-platform: Guardian auto-resume now works on Windows.** The relaunch used to spawn `claude`
+  directly, which fails on Windows because `claude` is a `.cmd`/`.ps1` shim, not a `.exe`. It now resolves
+  the shim to the Node entry it runs and launches that, passing the resume prompt verbatim with no shell
+  in the loop.
+- The `--sessions` and resume-ticket command is PowerShell-native on Windows now
+  (`cd '...'; $env:CLAUDE_CONFIG_DIR='...'; claude --resume ...`), instead of cmd.exe syntax that would not
+  paste into PowerShell and never exported the profile (so a copied command resumed under the wrong account).
+- `--install` no longer prints a bash `source` hint on Windows, where PowerShell cannot source a `.sh` file.
+- `--doctor` no longer warns that a Windows `.cmd` shim is un-spawnable (auto-resume can launch it now).
+- The test suite runs green on Windows as well as macOS and Linux (a POSIX-only profile-switcher test
+  skips cleanly where no bash or zsh is present).
+
+## [1.1.2] - 2026-07-19
+
+### Changed
+- The user install docs are now npm-only. The git clone was removed from the README's install options,
+  so nobody is told to clone just to run ccrig: npm is the install (`npm install -g ccrig && ccrig
+  --install`), the update (`npm install -g ccrig@latest`), and where the profile switcher is sourced
+  from (`source "$(npm root -g)/ccrig/claude-profiles.sh"`). The curl one-liner stays as a fallback for
+  a machine that has Node but not npm. Cloning is now documented only in CONTRIBUTING.md, for people
+  hacking on ccrig.
+
+## [1.1.1] - 2026-07-19
+
+### Changed
+- The tool's official name is **ccrig**, matching the npm package and the `ccrig` command. The docs no
+  longer call it "Rig"; the phrase "your Claude Code rig" stays only as the origin of the name. No code
+  or on-disk paths changed (the `.claude-rig-sessions` board directory keeps its name).
+- **npm is now the primary, official way to install ccrig and to get updates.** The README leads with
+  `npm install -g ccrig && ccrig --install`, and `npm install -g ccrig@latest` for updates; the curl
+  one-liner and the git clone stay documented as alternatives for people without a Node package manager
+  or who prefer `git pull`. SECURITY.md is reframed the same way. No behavior change to the render or
+  the guardian.
+- `--check-update` now prints the npm upgrade command (`npm install -g ccrig@latest`) when the running
+  copy was installed from npm, instead of pointing at `--update` (which already defers to npm). The
+  `--help` line for `--update` names the npm path too.
 
 ### Added
 - Published to npm as `ccrig`. Install with `npm install -g ccrig && ccrig --install`, or preview with
@@ -92,15 +167,15 @@ In-progress work lives under `[Unreleased]` until it's cut.
   and quietly skip the others. So you'd fire up the second profile and the bar just wasn't there.
   Now install finds all of them, wires each, and prints exactly which ones it touched. The same
   goes for `--install-guardian`, `--uninstall`, and `--uninstall-guardian`. Want the old behavior?
-  Add `--this-profile` to scope any of them to the active profile. Rig's own state folders
+  Add `--this-profile` to scope any of them to the active profile. ccrig's own state folders
   (`.claude-usage-ledger`, `.claude-rig-sessions`) are never mistaken for a profile, and one
   profile with a broken `settings.json` no longer blocks the rest.
 
 ## [1.0.0] - 2026-07-18
 
-The first public release of **Rig**: the operational layer you run Claude Code from.
+The first public release of **ccrig**: the operational layer you run Claude Code from.
 
-Rig began life as "Claude Code Better Status Line," a single-file status line that read
+ccrig began life as "Claude Code Better Status Line," a single-file status line that read
 [Claude Code](https://claude.com/claude-code)'s own stdin. It grew into a full rig: a live
 command bar plus an opt-in guardian that survives usage limits, self-update, and tools for
 running many sessions. This release consolidates all of that into one intentional 1.0.0.
@@ -162,7 +237,11 @@ everything that touches your machine is opt-in, backed up, and reversible.
   (by AstroHan) noted the plan-usage numbers are already in the status line's stdin, which is
   what let this drop the API call the guide used.
 
-[Unreleased]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.1.0...HEAD
+[Unreleased]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.3.0...HEAD
+[1.3.0]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.2.0...v1.3.0
+[1.2.0]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.1.2...v1.2.0
+[1.1.2]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.1.1...v1.1.2
+[1.1.1]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.1.0...v1.1.1
 [1.1.0]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.0.1...v1.1.0
 [1.0.1]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.0.0...v1.0.1
 [1.0.0]: https://gitlab.com/jordanallenlewis/ccrig/-/tags/v1.0.0
