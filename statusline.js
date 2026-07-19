@@ -135,6 +135,12 @@ const DEFAULTS = {
   autopilotBuffer: 45,       // seconds to wait past resets_at before an auto-resume relaunch
   autopilotWeekly: false,    // also auto-relaunch for the 7-day window (days-long waits are less reliable; off by default)
   autopilotFailover: false,  // Feature 4: prefer a profile that still has headroom over waiting for the reset
+  // Opt-in: let the UNATTENDED auto-resume relaunch bypass permission prompts. The relaunch is
+  // headless (`claude --resume -p`) and cannot answer a prompt, so without this a permission gate
+  // stalls the pickup. Off by default because it is a real "skip permission checks" escalation;
+  // the relaunch prompt still tells the model to favour reversible actions and stop before anything
+  // destructive/irreversible. Only affects the guardian's own relaunch, never your interactive session.
+  autopilotBypassPermissions: false,
   claudeBin: 'claude',       // how to invoke Claude Code from the watcher (absolute path if not on PATH)
   // Feature 3 (time-to-limit forecast): predictive burn-rate ETA + pace verdict in the bar.
   forecast: true,
@@ -1659,12 +1665,16 @@ function relaunchResume(cp, profileDir) {
   // CCBSL_UNATTENDED disables keep-working inside the relaunched run, so an auto-resume
   // does its reviewable steps and STOPS instead of looping unattended overnight.
   const env = Object.assign({}, process.env, { CCBSL_UNATTENDED: '1' });
+  // opt-in: the relaunch is headless and cannot answer a permission prompt, so let the user allow
+  // it to bypass them ("bypass permissions" mode). Off by default; the prompt still tells the model
+  // to prefer reversible actions and stop before anything destructive.
+  const bypass = CONFIG.autopilotBypassPermissions === true ? ['--permission-mode', 'bypassPermissions'] : [];
   let args;
   if (profileDir) {                        // cross-account: seed a fresh session (can't --resume another profile's id)
     env.CLAUDE_CONFIG_DIR = profileDir;
-    args = ['-p', prompt];
+    args = [...bypass, '-p', prompt];
   } else {
-    args = ['--resume', sid, '-p', prompt];
+    args = [...bypass, '--resume', sid, '-p', prompt];
   }
   let fd = 'ignore';
   try { const d = path.join(guardDir(), 'logs'); fs.mkdirSync(d, { recursive: true }); fd = fs.openSync(path.join(d, sid + '.resume.log'), 'a'); } catch {}
@@ -1921,6 +1931,7 @@ function runOptions() {
   o += '  autopilot buf: ' + (typeof CONFIG.autopilotBuffer === 'number' ? CONFIG.autopilotBuffer : 45) + 's       wait past a reset before relaunching\n';
   o += '  weekly resume: ' + (CONFIG.autopilotWeekly === true ? 'on' : 'off') + '        also auto-relaunch after the 7-day window\n';
   o += '  failover:      ' + (CONFIG.autopilotFailover === true ? 'on' : 'off') + '        continue on a profile with headroom instead of waiting\n';
+  o += '  bypass perms:  ' + (CONFIG.autopilotBypassPermissions === true ? 'on' : 'off') + '        the unattended auto-resume relaunch skips permission prompts\n';
   o += '  forecast:      ' + (CONFIG.forecast === false ? 'off' : 'on') + '        predictive time-to-limit + pace in the bar\n';
   o += '  ledger:        ' + (CONFIG.ledger === false ? 'off' : 'on') + '        share this profile\'s usage for cross-profile hints\n\n';
   o += 'segments  ([x] on  [ ] off  [a] auto;  normal mode honors these, minimal/expanded override):\n';
