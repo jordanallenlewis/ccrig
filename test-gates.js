@@ -95,3 +95,12 @@ test('GATE: README and --help document the same flags', () => {
 test('GATE: claude-profiles.sh keeps its shellcheck shell directive', () => {
   assert.match(R('claude-profiles.sh').split('\n')[0], /^# shellcheck shell=bash/);
 });
+
+// ---- gate: package.json stays consistent with the code (SSOT) + zero-dependency ----
+test('GATE: package.json version matches VERSION, bin points at the script, no dependencies', () => {
+  const pkg = JSON.parse(R('package.json'));
+  assert.strictEqual(pkg.version, SL.VERSION, 'package.json version must equal statusline.js VERSION (npm publish would drift otherwise)');
+  assert.strictEqual(pkg.bin && pkg.bin.ccrig, 'statusline.js', 'the ccrig bin must point at statusline.js');
+  assert.ok(Array.isArray(pkg.files) && pkg.files.includes('statusline.js'), 'files must ship statusline.js');
+  assert.ok(!pkg.dependencies || Object.keys(pkg.dependencies).length === 0, 'must stay zero-dependency (C1)');
+});
