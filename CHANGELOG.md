@@ -20,6 +20,9 @@ In-progress work lives under `[Unreleased]` until it's cut.
   `--update`. Empty by default, so behavior is unchanged; see SECURITY.md for the signing commands.
 - The guardian re-arms on a second limit in one session (a window switch), and the watcher
   re-reads its checkpoint each tick, so a refreshed reset time is honored.
+- `autopilotBypassPermissions` (off by default): let the unattended auto-resume relaunch run in
+  bypass-permissions mode, so a permission prompt cannot stall a headless pickup. Applies only to
+  the guardian's own relaunch, never your interactive session.
 - A performance budget and a sandboxed benchmark recipe in CONTRIBUTING.md.
 - Mechanical quality gates (`test-gates.js`, run by `node --test`): a plain-voice scan of the docs
   and CLI text, example-config-versus-defaults parity, config-key coverage, and README/help flag parity.
