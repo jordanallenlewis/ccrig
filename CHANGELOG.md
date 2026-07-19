@@ -11,6 +11,8 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-19
+
 ### Added
 - Cell-accurate terminal width for CJK, Hangul, kana, and fullwidth characters, so the bar no
   longer overflows a narrow terminal when a folder, branch, or session name is non-ASCII.
@@ -156,6 +158,7 @@ everything that touches your machine is opt-in, backed up, and reversible.
   (by AstroHan) noted the plan-usage numbers are already in the status line's stdin, which is
   what let this drop the API call the guide used.
 
-[Unreleased]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.0.1...HEAD
+[Unreleased]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.1.0...HEAD
+[1.1.0]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.0.1...v1.1.0
 [1.0.1]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.0.0...v1.0.1
 [1.0.0]: https://gitlab.com/jordanallenlewis/ccrig/-/tags/v1.0.0

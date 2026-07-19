@@ -67,7 +67,7 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const VERSION = '1.0.1';
+const VERSION = '1.1.0';
 
 // where updates come from: the public GitLab repo's main branch (raw files).
 // Override the base with CCBSL_UPDATE_BASE (used by tests to point at a local dir).
