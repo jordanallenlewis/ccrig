@@ -11,6 +11,15 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-07-20
+
+### Added
+- **Native PowerShell profile switcher (`claude-profiles.ps1`).** Windows and cross-platform
+  PowerShell users get the same `claude-profile` verbs as the bash/zsh helper (list, use, run,
+  new, current, remove); dot-source it from `$PROFILE`. It resolves home the same way Node does
+  (`USERPROFILE`) so it agrees with Claude Code, surfaces dot-profiles on macOS/Linux, and enforces
+  a strict name allowlist. ccrig is now natively usable on macOS, Windows, and Linux end to end.
+
 ## [1.5.0] - 2026-07-20
 
 ### Changed
@@ -283,7 +292,8 @@ everything that touches your machine is opt-in, backed up, and reversible.
   (by AstroHan) noted the plan-usage numbers are already in the status line's stdin, which is
   what let this drop the API call the guide used.
 
-[Unreleased]: https://github.com/jordanallenlewis/ccrig/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/jordanallenlewis/ccrig/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/jordanallenlewis/ccrig/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/jordanallenlewis/ccrig/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/jordanallenlewis/ccrig/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/jordanallenlewis/ccrig/compare/v1.2.0...v1.3.0

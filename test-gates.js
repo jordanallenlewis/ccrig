@@ -96,6 +96,23 @@ test('GATE: claude-profiles.sh keeps its shellcheck shell directive', () => {
   assert.match(R('claude-profiles.sh').split('\n')[0], /^# shellcheck shell=bash/);
 });
 
+// ---- gate: the PowerShell profile switcher stays at parity with the bash one ----------
+// The project is native on macOS/Windows/Linux, so the .ps1 must define claude-profile with
+// every verb the .sh has, and stay console-safe on Windows (ASCII only: no emoji).
+test('GATE: claude-profiles.ps1 mirrors claude-profiles.sh (all verbs, ASCII-only, shipped)', () => {
+  const ps = R('claude-profiles.ps1');
+  assert.match(ps, /function claude-profile/, 'defines the claude-profile function');
+  for (const verb of ['list', 'use', 'run', 'new', 'current', 'remove', 'help']) {
+    assert.ok(ps.includes(verb), 'ps1 handles the "' + verb + '" verb (parity with the .sh)');
+  }
+  assert.match(ps, /\$env:CLAUDE_CONFIG_DIR/, 'switches by setting CLAUDE_CONFIG_DIR');
+  assert.match(ps, /refusing to remove the default profile/, 'keeps the default-profile safeguard');
+  // eslint-disable-next-line no-control-regex
+  assert.ok(!/[^\x00-\x7F]/.test(ps), 'ASCII-only so it renders on Windows PowerShell 5.1 consoles');
+  const pkg = JSON.parse(R('package.json'));
+  assert.ok(pkg.files.includes('claude-profiles.ps1'), 'npm ships the .ps1');
+});
+
 // ---- gate: package.json stays consistent with the code (SSOT) + zero-dependency ----
 test('GATE: package.json version matches VERSION, bin points at the script, no dependencies', () => {
   const pkg = JSON.parse(R('package.json'));
