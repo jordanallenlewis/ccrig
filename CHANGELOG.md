@@ -11,6 +11,24 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-07-20
+
+### Changed
+- **The guardian is now ON by default.** `ccrig init` / `--install` wires the guardian hooks
+  (SessionStart restore, PreCompact, Stop) and the shipped `autopilot` default is `notify`: out of
+  the box, hitting a usage limit checkpoints your work, saves a resume ticket, and sends a desktop
+  ping. Nothing runs unattended at the default. Install the bar only with `--install --no-guardian`,
+  or set `"autopilot": "off"`. `--install-guardian --auto` still opts into hands-free auto-resume.
+- **Continuous-refresh checkpoints (`continuousCheckpoint`, default true).** While a window is in the
+  danger band, the checkpoint is re-written on the render loop (about every 10s) so an auto-resume
+  reflects your latest completed step instead of a stale snapshot from when the limit was first crossed.
+  Driven by the existing status-line refresh, so there is no per-tool-call overhead, and it stays
+  fully cross-platform (macOS, Windows, Linux).
+- **Critical threshold lowered from 98% to 95%,** so the checkpoint arms with more headroom before the wall.
+
+### Added
+- **`--no-guardian`**: install the status line without the guardian hooks (bar only).
+
 ## [1.4.0] - 2026-07-20
 
 ### Added
@@ -265,7 +283,8 @@ everything that touches your machine is opt-in, backed up, and reversible.
   (by AstroHan) noted the plan-usage numbers are already in the status line's stdin, which is
   what let this drop the API call the guide used.
 
-[Unreleased]: https://github.com/jordanallenlewis/ccrig/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/jordanallenlewis/ccrig/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/jordanallenlewis/ccrig/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/jordanallenlewis/ccrig/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/jordanallenlewis/ccrig/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/jordanallenlewis/ccrig/compare/v1.1.2...v1.2.0

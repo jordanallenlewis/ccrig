@@ -19,7 +19,7 @@ npm install -g ccrig
 ccrig init
 ```
 
-`ccrig init` wires the status line into every Claude profile you have, backing up each `settings.json` first. Restart Claude Code once and the bar is live. Update later with `npm install -g ccrig@latest`, and run `ccrig --doctor` if anything looks off.
+`ccrig init` wires the status line **and the guardian** into every Claude profile you have, backing up each `settings.json` first. Restart Claude Code once and the bar is live. Update later with `npm install -g ccrig@latest`, and run `ccrig --doctor` if anything looks off. Want just the bar? `ccrig init --no-guardian`.
 
 No npm? Grab the single file (Node 18+, which Claude Code ships):
 
@@ -42,13 +42,16 @@ Then run the `ccrig ...` commands below as `node ~/.claude/statusline.js ...`.
 
 Running subagents, an update badge, cost, and session name appear when relevant.
 
-## The Guardian (opt-in)
+## The Guardian (on by default)
 
-The status line tells you a limit is coming; the guardian acts on it. As you approach a limit it checkpoints your work state (todos, last request, git HEAD), and with auto-resume on, a small detached watcher waits out the reset (surviving laptop sleep) and relaunches the exact session with `claude --resume <id> -p`, continuing at the next step instead of redoing finished work. It also brings keep-working (a Stop hook that keeps the session going while todos remain, with loop guards), cross-profile failover, and compaction-proof checkpoints.
+The status line tells you a limit is coming; the guardian acts on it. It is on out of the box (`ccrig init` wires it; `--no-guardian` installs just the bar). As you approach a limit (95% of a window) it checkpoints your work state (todos, last request, git HEAD) and keeps that checkpoint **continuously fresh** through the danger band, so a resume reflects your latest completed step rather than a stale snapshot. It saves a resume ticket, sends a desktop ping, and brings compaction-proof checkpoints and cross-profile failover. The shipped default is `notify`: no background process, nothing unattended.
+
+Turn on hands-free auto-resume and a small detached watcher waits out the reset (surviving laptop sleep) and relaunches the exact session with `claude --resume <id> -p`, continuing at the next step instead of redoing finished work:
 
 ```bash
-ccrig --install-guardian          # checkpoint + desktop notify at limits
-ccrig --install-guardian --auto   # same, plus hands-free auto-resume
+ccrig --install-guardian --auto   # hands-free: auto-relaunch the session at reset (autopilot resume)
+ccrig --autopilot notify          # the default: checkpoint + keep it fresh + desktop ping, no relaunch
+ccrig --autopilot off             # bar only, no guardian side effects
 ```
 
 Restart Claude Code once so the hooks load. What it honestly can and cannot do: auto-resume needs a Claude.ai Pro/Max plan (Claude Code sends rate-limit data only to subscribers) and a machine that is awake at reset time. It cannot reach into your open terminal, so it launches a fresh headless run and reconciles via the git snapshot; nothing is lost, because the transcript is continuous. (If an auto-resume fires while the old terminal is still parked at the limit, close that one rather than typing into it, or the two will fork the same session.) If usage recovers on its own before the reset, because you upgraded your plan or bought extra usage, the guardian notices and stands down. The headless relaunch cannot answer permission prompts; if one blocks it you can set `"autopilotBypassPermissions": true`, off by default because it is a real skip-permission-checks step. It applies only to the guardian's own unattended relaunch, never your interactive session. Nothing runs as a hidden daemon: `ccrig --status` lists armed watchers and `ccrig --disarm` stops them.
@@ -70,8 +73,8 @@ Running several accounts or many parallel sessions? `ccrig --sessions` lists rec
 
 | Command | Does |
 |---|---|
-| `ccrig init` (`--install`) | wire the status line into every profile (`--this-profile` for just the active one) |
-| `--install-guardian` (`--auto`) | add the guardian; `--auto` also turns on hands-free auto-resume |
+| `ccrig init` (`--install`) | wire the bar + guardian into every profile (`--this-profile` for just one; `--no-guardian` for bar only) |
+| `--install-guardian` (`--auto`) | (re)wire the guardian + keep-working; `--auto` turns on hands-free auto-resume |
 | `--uninstall` / `--uninstall-guardian` | remove the status line and guardian, or only the guardian |
 | `--doctor` | diagnose a broken or missing setup |
 | `--mode` / `--config` / `--options` | display density, interactive editor, list every setting |
