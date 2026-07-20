@@ -10,8 +10,9 @@ that every change lands through a pull request that a maintainer approves.
    then make your change on a branch. (Users install from npm; the clone is for hacking on CCRig.)
 2. Keep it **zero-dependency**: `statusline.js` runs on the Node that ships with
    Claude Code, with no npm install. The shell tooling targets bash and zsh.
-3. Test locally before opening the PR (there is no CI pipeline; the maintainer runs
-   these on review, so please run them yourself first):
+3. Test locally before opening the PR (there is no per-push CI; the release workflow runs the
+   full suite on macOS, Windows, and Linux at tag time, but the maintainer reviews locally, so
+   please run these yourself first):
    - `node --test` (runs all three suites: `test-unit.js` + `test.js` + `test-gates.js`)
    - `node statusline.js --selftest` (quick rendering check on edge inputs)
    - `node statusline.js --demo` (eyeball the result)
@@ -90,6 +91,20 @@ so always sandbox a benchmark.
 
 - Reorder / color editing in the `--config` editor.
 - More segments people ask for, behind config flags.
+
+## Releasing
+
+Releases are automated by `.github/workflows/release.yml`. To cut one:
+
+1. Bump the version in `package.json` and the `VERSION` constant in `statusline.js` (they must
+   match, and a gate enforces it), and add a `CHANGELOG.md` section for it.
+2. Commit, then `git tag vX.Y.Z && git push origin main --tags`.
+
+On the tag, the workflow tests on macOS, Windows, and Linux (including a PowerShell parse-check of
+`claude-profiles.ps1` and shellcheck of the bash helpers), then publishes to npm with **provenance**
+via **Trusted Publishing** (OIDC, no stored token) and creates a GitHub Release from the changelog.
+No npm token lives in the repo or on a laptop; publish rights come from the npmjs Trusted Publisher
+configured for this repository and workflow.
 
 ## Maintainers
 

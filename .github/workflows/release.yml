@@ -1,0 +1,84 @@
+name: release
+
+# Publish on a version tag: test on all three OSes, then publish to npm with provenance
+# via Trusted Publishing (OIDC) — no stored npm token — and cut a GitHub Release.
+#
+# Release flow (maintainer):  bump version + CHANGELOG  ->  git tag vX.Y.Z  ->  git push --tags
+#
+# ONE-TIME SETUP on npmjs.com (required before the first tokenless publish):
+#   npmjs.com -> package "ccrig" -> Settings -> Trusted Publishers -> Add GitHub Actions:
+#     Organization/user: jordanallenlewis   Repository: ccrig   Workflow: release.yml
+# After that, no npm token ever lives in this repo or on a laptop.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Tests + quality gates
+        run: node --test
+      - name: Self-test render
+        run: node statusline.js --selftest
+      - name: PowerShell switcher parse-check
+        shell: pwsh
+        run: |
+          $errs = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD/claude-profiles.ps1", [ref]$null, [ref]$errs) | Out-Null
+          if ($errs) { $errs | ForEach-Object { Write-Error $_.Message }; exit 1 }
+          Write-Host 'claude-profiles.ps1 parses clean'
+      - name: Shellcheck the bash helpers
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck claude-profiles.sh install.sh
+
+  publish:
+    name: publish to npm
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the GitHub Release
+      id-token: write   # OIDC for npm Trusted Publishing + provenance attestation
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Use an npm that supports Trusted Publishing (OIDC)
+        run: npm install -g npm@latest
+      - name: Tag must match package.json version
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          echo "tag=$TAG package.json=$PKG"
+          test "$TAG" = "$PKG" || { echo "::error::tag $TAG does not match package.json $PKG"; exit 1; }
+      - name: Publish (provenance, tokenless via OIDC)
+        run: npm publish --provenance --access public
+      - name: Changelog section for this version
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          awk -v v="$VER" '/^## \[/{ if (p) exit } $0 ~ ("^## \\[" v "\\]") { p=1 } p' CHANGELOG.md > RELEASE_NOTES.md
+          test -s RELEASE_NOTES.md || echo "See CHANGELOG.md" > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
+      - name: GitHub Release
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
