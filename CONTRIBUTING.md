@@ -2,15 +2,15 @@
 
 Contributions are welcome: bug fixes, new segments, better platform support,
 docs. Anyone can contribute; you don't need to be a maintainer. The only rule is
-that every change lands through a merge request that a maintainer approves.
+that every change lands through a pull request that a maintainer approves.
 
 ## How to contribute
 
-1. Clone the repo (`git clone https://gitlab.com/jordanallenlewis/ccrig.git`), or fork it,
+1. Clone the repo (`git clone https://github.com/jordanallenlewis/ccrig.git`), or fork it,
    then make your change on a branch. (Users install from npm; the clone is for hacking on CCRig.)
 2. Keep it **zero-dependency**: `statusline.js` runs on the Node that ships with
    Claude Code, with no npm install. The shell tooling targets bash and zsh.
-3. Test locally before opening the MR (there is no CI pipeline; the maintainer runs
+3. Test locally before opening the PR (there is no CI pipeline; the maintainer runs
    these on review, so please run them yourself first):
    - `node --test` (runs all three suites: `test-unit.js` + `test.js` + `test-gates.js`)
    - `node statusline.js --selftest` (quick rendering check on edge inputs)
@@ -37,9 +37,9 @@ that every change lands through a merge request that a maintainer approves.
    **A bug fix must ship with a test:** a unit test in `test-unit.js` if the logic is
    pure, a `REGRESSION:` test in `test.js` if it's behavioral. A new feature ships with
    tests for the happy path and the failure/edge cases.
-4. Open a **merge request** describing the change and why. Reference an issue if
+4. Open a **pull request** describing the change and why. Reference an issue if
    one exists.
-5. A maintainer reviews it. **An MR is merged only after a maintainer approves
+5. A maintainer reviews it. **A PR is merged only after a maintainer approves
    it.** That approval is required, so nothing lands unreviewed.
 
 ## What makes a change likely to be accepted
@@ -95,4 +95,4 @@ so always sandbox a benchmark.
 ## Maintainers
 
 Merge rights and approvals rest with the project maintainers. If you'd like to
-become one after a few solid contributions, say so in an MR.
+become one after a few solid contributions, say so in a PR.

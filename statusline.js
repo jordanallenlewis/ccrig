@@ -67,12 +67,12 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 
-// where updates come from: the public GitLab repo's main branch (raw files).
+// where updates come from: the public GitHub repo's main branch (raw files).
 // Override the base with CCBSL_UPDATE_BASE (used by tests to point at a local dir).
 const UPDATE_BASE = process.env.CCBSL_UPDATE_BASE ||
-  'https://gitlab.com/jordanallenlewis/ccrig/-/raw/main';
+  'https://raw.githubusercontent.com/jordanallenlewis/ccrig/main';
 const UPDATE_SCRIPT_URL = UPDATE_BASE + '/statusline.js';
 const UPDATE_CHANGELOG_URL = UPDATE_BASE + '/CHANGELOG.md';
 // Supply-chain: paste an Ed25519 PUBLIC key (PEM) here (or set "updatePubkey" in config)
@@ -155,7 +155,7 @@ const DEFAULTS = {
   // Re-inject a rules file after Claude Code compacts context (SessionStart source=compact),
   // in case compaction drops your project rules. false | true (=CLAUDE.md) | "path/to/file".
   reinjectOnCompact: false,
-  // Update notifications: a once-a-day background check pings the public GitLab repo for a
+  // Update notifications: a once-a-day background check pings the public GitHub repo for a
   // newer version and shows an ⬆ badge. The RENDER stays zero-network (it only reads a local
   // cache the background check wrote). A single unauthenticated GET; set false to disable.
   updateCheck: true,
@@ -704,7 +704,8 @@ function notifySpec(platform, title, msg) {
   return null;
 }
 function notify(title, msg) {
-  if (!actAllowed()) return;
+  if (!actAllowed() || process.env.CCBSL_NO_NOTIFY) return; // NO_NOTIFY: exercise a real relaunch in tests without a desktop popup
+
   const spec = notifySpec(process.platform, String(title == null ? '' : title), String(msg == null ? '' : msg));
   if (spec) spawnDetached(spec.cmd, spec.args, { env: Object.assign({}, process.env, spec.env) });
 }
@@ -850,8 +851,15 @@ function armAutopilot(input, which, pct, resetEpoch) {
   // once-markers so a fresh watcher/notification fires for the NEW schedule.
   const ex = readCheckpoint(sid);
   const windowChanged = !ex || ex.window !== which || ex.resets_at !== resetEpoch;
-  if (windowChanged) {
+  // Write the critical checkpoint on a new/changed window, OR to UPGRADE a warn-band
+  // "limit near" checkpoint (written pre-critical by maybeNearCheckpoint) into the real
+  // critical snapshot with fresh todos. Each fires at most once per window, so the git
+  // subprocesses inside writeCheckpoint stay off the per-render hot path.
+  const needsCritCheckpoint = windowChanged || !/critical/.test((ex && ex.reason) || '');
+  if (needsCritCheckpoint) {
     writeCheckpoint(input, { reason: which + ' limit critical', window: which, resets_at: resetEpoch });
+  }
+  if (windowChanged) {
     if (willResume) {
       try { const pid = parseInt(fs.readFileSync(watchPidFile(sid), 'utf8'), 10) || 0; if (isOurWatcher(pid, sid)) process.kill(pid); } catch {}
       for (const tag of ['watch', 'notified']) { try { fs.unlinkSync(path.join(guardDir(), sid + '.' + tag)); } catch {} }
@@ -873,12 +881,47 @@ function failoverHint() {
   return c(K.sky, '⤳ ' + profileLabelOf(fo.profile) + ' free ' + Math.round(100 - fo.head) + '%');
 }
 
+// Stand autopilot down when a window that was armed at the limit has RECOVERED before its
+// reset — a plan upgrade or an extra-usage purchase grew the quota mid-window, so the same
+// session just kept going and nothing needs relaunching. Only trusts a PRESENT reading:
+// a null used_percentage (rate_limits can drop out entirely, plausibly while blocked at the
+// wall) is NOT recovery — `null < warnAt` is true in JS, so guarding on it explicitly matters.
+// Clearing the checkpoint is enough: the watcher stands itself down within one poll when the
+// checkpoint vanishes, so we avoid shelling out to `ps` (isOurWatcher) on the render hot path.
+function disarmIfRecovered(input, sPct, wPct, warnAt) {
+  const sid = input.session_id;
+  if (!sid || !SID_RE.test(sid)) return;
+  if (!fs.existsSync(checkpointPath(sid))) return;         // cheap gate: nothing armed
+  const cp = readCheckpoint(sid);
+  if (!cp || !/limit/.test(cp.reason || '') || !windowActive(cp.resets_at)) return;
+  const pct = cp.window === 'weekly' ? wPct : sPct;
+  if (pct == null || pct >= warnAt) return;                // absent or still near -> leave armed
+  clearSessionGuardState(sid);
+}
+// Throttled warn-band checkpoint (guardian only; the caller gates on autopilot != 'off').
+// Writing recovery state from the WARN threshold means a wall that arrives without a
+// >=critical render still leaves a checkpoint to restore. Never downgrades a live critical
+// checkpoint, and skips if a recent-enough one already covers us (bounds writeCheckpoint's
+// git subprocesses to roughly once per 5 min in the 90-98% band).
+function maybeNearCheckpoint(input, which, resetEpoch) {
+  const sid = input.session_id;
+  if (!sid || !SID_RE.test(sid)) return;
+  const ex = readCheckpoint(sid);
+  if (ex) {
+    if (/critical/.test(ex.reason || '') && windowActive(ex.resets_at)) return; // don't clobber a critical cp
+    try { if (Date.now() - fs.statSync(checkpointPath(sid)).mtimeMs < 5 * 60 * 1000) return; } catch {}
+  }
+  writeCheckpoint(input, { reason: which + ' limit near', window: which, resets_at: resetEpoch });
+}
+
 // Shown once session OR weekly usage crosses thresholds.usage.warn. Escalates at
 // critical: the resume ticket + checkpoint are written and autopilot is armed.
 function resumeHintSeg(input, sPct, wPct, sReset, wReset, live) {
   const t = CONFIG.thresholds.usage;
   const warnAt = warnAtOf(t);
   const critAt = t.critical != null ? t.critical : 98;
+  // recovered-mid-window? drop the armed autopilot before doing anything else.
+  if (live) disarmIfRecovered(input, sPct, wPct, warnAt);
   // only an ACTIVE window (reset still in the future) counts; a passed reset refreshed it
   const near = (p, r) => p != null && p >= warnAt && windowActive(r);
   const sOn = near(sPct, sReset), wOn = near(wPct, wReset);
@@ -897,6 +940,18 @@ function resumeHintSeg(input, sPct, wPct, sReset, wReset, live) {
       : c(K.dim, saved ? ': resume ticket saved, pick up with ' : ': resume with ') + c(K.yellow, 'claude --resume');
     const fo = failoverHint();
     return cBold(K.red, '⚠ limit imminent') + tail + (fo ? c(K.dim, ' · ') + fo : '');
+  }
+  // near but not yet critical: keep a fresh-enough checkpoint + ticket so a wall that
+  // arrives WITHOUT a >=critical render (a jump straight from 9x% to the wall, a per-model
+  // cap, or the last pre-wall render landing sub-critical) still has recovery state. The
+  // watcher + notify stay critical-only (arming at warn would relaunch a session that ended
+  // cleanly before the reset), and this is gated to the guardian so a plain install still
+  // checkpoints nothing.
+  if (live && cfgAutopilot() !== 'off') {
+    const which = sOn ? 'session' : 'weekly';
+    const pct = sOn ? sPct : wPct, reset = sOn ? sReset : wReset;
+    if (CONFIG.resumeTickets !== false) writeResumeTicket(input, pct, which, reset);
+    maybeNearCheckpoint(input, which, reset);
   }
   return cBold(K.red, '⚠ near limit') + c(K.dim, ': auto-saved, resume with ') + c(K.yellow, 'claude --continue');
 }
@@ -1645,14 +1700,28 @@ function runHookSessionStart(input) {
   // checkpoint restore (limit resume / compact)
   if (sid && SID_RE.test(sid)) {
     const cp = readCheckpoint(sid);
-    if (cp) {
-      // a HUMAN resume supersedes any armed watcher for this session — stop it so it can't
-      // also relaunch later. (Not when we ARE the watcher's own relaunch: CCBSL_UNATTENDED.)
-      if (!process.env.CCBSL_UNATTENDED) {
+    if (cp && process.env.CCBSL_UNATTENDED) {
+      // We ARE the watcher's own headless relaunch. The checkpoint already rode in on the
+      // -p prompt, and the watcher alone owns consuming it (by exit code, see relaunchResume).
+      // Injecting here would duplicate it; clearing here would delete the recovery state
+      // BEFORE the resumed run's first request, so a resume that dies against a still-capped
+      // account could never be retried. Do neither — leave the checkpoint for the watcher.
+    } else if (cp) {
+      // A human resume supersedes the armed watcher — but only once the reset has passed.
+      // A pre-reset peek (opening the session just to look, or after upgrading a DIFFERENT
+      // profile) must NOT forfeit auto-resume: inject the context, leave the watcher armed,
+      // and let its own resumedManuallySince() stand it down if the human genuinely continues.
+      const willResume = cfgAutopilot() === 'resume' && (cp.window === 'session' || CONFIG.autopilotWeekly === true);
+      const preReset = willResume && cp.resets_at && cp.resets_at > nowSec();
+      if (!preReset) {
         try { const pid = parseInt(fs.readFileSync(watchPidFile(sid), 'utf8'), 10) || 0; if (isOurWatcher(pid, sid)) process.kill(pid); } catch {}
       }
-      parts.push(resumePromptFromCheckpoint(cp, false, !!process.env.CCBSL_UNATTENDED)); // attended unless the watcher relaunched us
-      clearSessionGuardState(sid); // consume once + re-arm cleanly for a later limit
+      parts.push(resumePromptFromCheckpoint(cp, false, false)); // attended human resume
+      if (preReset) {
+        parts.push('(Auto-resume is still armed for this session, firing about ' + fmtReset(cp.resets_at) + '. It stands down on its own once you continue past the reset, so just keep working.)');
+      } else {
+        clearSessionGuardState(sid); // consume once + re-arm cleanly for a later limit
+      }
     }
   }
   if (!parts.length) return emitHook({});
@@ -1735,15 +1804,22 @@ function relaunchResume(cp, profileDir) {
       else { opts.shell = true; }                 // fallback: let the shell resolve the shim
     }
     const child = spawn(cmd, spawnArgs, opts);
-    // consume all guard state only once the relaunch actually started, so a failed
-    // spawn (e.g. claude not on PATH) leaves the checkpoint for a manual resume, and
-    // a second limit in the resumed session can re-checkpoint + re-arm cleanly.
-    child.on('spawn', () => clearSessionGuardState(sid));
     child.on('error', (e) => { watchLog(sid, 'spawn error: ' + e.message + ' (checkpoint kept for manual resume)'); process.exit(1); });
+    // Consume guard state ONLY on a clean exit. A headless resume can launch fine yet die
+    // immediately: the 5h window reset but a still-active weekly cap blocks it, expired auth,
+    // network down. Clearing on spawn (the old behavior) deleted the checkpoint before a token
+    // was exchanged AND the old exit handler reported success regardless of code. Keep the
+    // checkpoint + ticket on any non-zero exit so a manual `claude --resume` still works, and
+    // tell the truth. (A second limit later re-checkpoints/re-arms via armAutopilot anyway.)
     child.on('exit', (code) => {
       watchLog(sid, 'resume process exited code=' + code);
-      notify('Claude Code auto-resumed', (cp.session_name || sid) + ': ' + (profileDir ? 'continued on another profile' : 'resumed after the reset'));
-      process.exit(0);
+      if (code === 0) {
+        clearSessionGuardState(sid);
+        notify('Claude Code auto-resumed', (cp.session_name || sid) + ': ' + (profileDir ? 'continued on another profile' : 'resumed after the reset'));
+        process.exit(0);
+      }
+      notify('Claude Code auto-resume did not take', (cp.session_name || sid) + ': still blocked? Resume by hand:  claude --resume ' + sid + '  (see guardian/logs/' + sid + '.resume.log)');
+      process.exit(1);
     });
   } catch (e) { watchLog(sid, 'relaunch failed: ' + e.message); process.exit(1); }
 }
@@ -1777,6 +1853,13 @@ function runWatch(sid) {
   };
   const fireIfIdle = (profileDir, why) => {
     if (resumedManuallySince(cp)) { watchLog(sid, 'session already continued after the reset; standing down'); clearSessionGuardState(sid); process.exit(0); }
+    // If the recorded work is already finished (a fresh scan shows todos and none pending),
+    // don't spawn an unattended run on it — covers the user who wrapped up and quit before
+    // the reset. No todos recorded at all -> fall through and resume the original request.
+    const cur = latestTodos(cp.transcript_path, true);
+    if (cur && cur.length && !cur.some((x) => x && x.status !== 'completed')) {
+      watchLog(sid, 'all checkpointed todos completed; nothing to resume, standing down'); clearSessionGuardState(sid); process.exit(0);
+    }
     watchLog(sid, why); return relaunchResume(cp, profileDir);
   };
   const tick = () => {

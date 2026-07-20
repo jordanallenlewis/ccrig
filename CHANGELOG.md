@@ -11,6 +11,34 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-20
+
+### Added
+- **Guardian: warn-band checkpoints.** The work-state checkpoint (and resume ticket) is now
+  written from the warn threshold (90%), not only at critical (98%). A usage limit that arrives
+  without a `>=`critical render (a jump straight from 9x% to the wall, a per-model cap, or the
+  last pre-wall render landing sub-critical) still leaves recovery state, and it upgrades to the
+  full critical snapshot at critical. The auto-resume watcher and desktop notification stay
+  critical-only, and a plain (non-guardian) install still checkpoints nothing.
+
+### Changed
+- **Guardian: disarm on recovery.** If an armed limit window recovers before its reset, because you
+  upgraded your plan or bought extra usage and the same session keeps going, the guardian now stands
+  the auto-resume watcher down instead of relaunching later on already-finished work. A missing usage
+  reading is treated as "still blocked", never as recovery.
+- **Guardian: verified relaunch.** The auto-resume relaunch now consumes the checkpoint only on a clean
+  exit. A relaunch that launches but immediately dies (a still-active weekly cap, expired auth, network
+  down) keeps the checkpoint for a manual `claude --resume` and reports the failure honestly, instead of
+  discarding recovery state and reporting success regardless of exit code.
+- **Guardian: a pre-reset manual resume keeps auto-resume armed.** Opening the session before the reset
+  (to look, or after upgrading a different profile) no longer forfeits the armed watcher; it stands
+  itself down only once you genuinely continue past the reset. A resume after the reset consumes as before.
+- **Guardian: stands down when the work is already done.** At fire time, if the checkpointed todos are
+  all complete, the watcher skips the unattended relaunch.
+- **Moved to GitHub.** The canonical repository is now `github.com/jordanallenlewis/ccrig`; the update
+  check, `--update` download, install one-liner, and package metadata all point at GitHub.
+- **Simplified the README** for the repo and npm pages.
+
 ## [1.3.0] - 2026-07-19
 
 ### Added
@@ -237,11 +265,12 @@ everything that touches your machine is opt-in, backed up, and reversible.
   (by AstroHan) noted the plan-usage numbers are already in the status line's stdin, which is
   what let this drop the API call the guide used.
 
-[Unreleased]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.3.0...HEAD
-[1.3.0]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.2.0...v1.3.0
-[1.2.0]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.1.2...v1.2.0
-[1.1.2]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.1.1...v1.1.2
-[1.1.1]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.1.0...v1.1.1
-[1.1.0]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.0.1...v1.1.0
-[1.0.1]: https://gitlab.com/jordanallenlewis/ccrig/-/compare/v1.0.0...v1.0.1
-[1.0.0]: https://gitlab.com/jordanallenlewis/ccrig/-/tags/v1.0.0
+[Unreleased]: https://github.com/jordanallenlewis/ccrig/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/jordanallenlewis/ccrig/compare/v1.3.0...v1.4.0
+[1.3.0]: https://github.com/jordanallenlewis/ccrig/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/jordanallenlewis/ccrig/compare/v1.1.2...v1.2.0
+[1.1.2]: https://github.com/jordanallenlewis/ccrig/compare/v1.1.1...v1.1.2
+[1.1.1]: https://github.com/jordanallenlewis/ccrig/compare/v1.1.0...v1.1.1
+[1.1.0]: https://github.com/jordanallenlewis/ccrig/compare/v1.0.1...v1.1.0
+[1.0.1]: https://github.com/jordanallenlewis/ccrig/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/jordanallenlewis/ccrig/releases/tag/v1.0.0
