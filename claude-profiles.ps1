@@ -61,7 +61,9 @@ function claude-profile {
       $def = Join-Path $hd '.claude'
       if (Test-Path -LiteralPath $def -PathType Container) { $dirs += $def }
       # -Force is required to surface dot-directories on macOS/Linux (a leading '.' = Hidden there)
+      # exclude ccrig's own state dirs (mirrors statusline.js NON_PROFILE_DIRS) so they are not shown as profiles
       $dirs += Get-ChildItem -LiteralPath $hd -Directory -Filter '.claude-*' -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne '.claude-usage-ledger' -and $_.Name -ne '.claude-rig-sessions' } |
         Sort-Object Name | ForEach-Object { $_.FullName }
       foreach ($d in $dirs) {
         $n = _Cc-ProfileName $d

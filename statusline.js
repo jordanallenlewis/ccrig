@@ -378,7 +378,7 @@ const usageSeg = (label, pct, reset) => {
   const val = near ? cBold(K.red, Math.round(pct) + '%') : c(K.dim, Math.round(pct) + '%');
   return `${lbl} ${bar(pct, 8, t, warnAtOf(t))} ${val}` + (reset ? c(K.dim, ' ↺' + fmtReset(reset)) : '');
 };
-// At >= thresholds.usage.critical (default 98%), drop a resume ticket: a tiny file
+// At >= thresholds.usage.critical (default 95%), drop a resume ticket: a tiny file
 // with the exact command to reopen THIS session after the limit resets. Claude Code
 // already saves the transcript continuously, so nothing is at risk; the ticket is
 // findability. Days later, after a weekly reset, `claude --continue` may resume the
@@ -913,7 +913,7 @@ function disarmIfRecovered(input, sPct, wPct, warnAt) {
 // Writing recovery state from the WARN threshold means a wall that arrives without a
 // >=critical render still leaves a checkpoint to restore. Never downgrades a live critical
 // checkpoint, and skips if a recent-enough one already covers us (bounds writeCheckpoint's
-// git subprocesses to roughly once per 5 min in the 90-98% band).
+// git subprocesses to about once per 10s continuous, or 5 min when continuousCheckpoint is off).
 function maybeNearCheckpoint(input, which, resetEpoch) {
   const sid = input.session_id;
   if (!sid || !SID_RE.test(sid)) return;
@@ -2112,7 +2112,7 @@ function runOptions() {
   for (const n of order) o += '  ' + box(S[n]) + ' ' + n + '\n';
   o += '\nthresholds (percent of the window used):\n';
   o += '  context: green<=' + tc.green + '  yellow<=' + tc.yellow + '  (else red)\n';
-  o += '  usage:   green<=' + tu.green + '  yellow<=' + tu.yellow + '  warn>=' + (tu.warn != null ? tu.warn : 90) + '  critical>=' + (tu.critical != null ? tu.critical : 98) + '\n';
+  o += '  usage:   green<=' + tu.green + '  yellow<=' + tu.yellow + '  warn>=' + (tu.warn != null ? tu.warn : 90) + '  critical>=' + (tu.critical != null ? tu.critical : 95) + '\n';
   o += '\nprofile labels: ' + (Object.keys(labels).length ? JSON.stringify(labels) : '(none set; derived from dir names)') + '\n';
   o += '\nchange it:\n';
   o += '  in a Claude Code session:   /statusline-config\n';
