@@ -24,14 +24,15 @@
   },
   "thresholds": {
     "context": { "green": 50, "yellow": 70 },
-    "usage": { "green": 50, "yellow": 80, "warn": 90, "critical": 98 }
+    "usage": { "green": 50, "yellow": 80, "warn": 90, "critical": 95 }
   },
   "_resetStyle": "clock | clock24 (24-hour) | relative",
   "resetStyle": "clock",
   "resumeTickets": true,
-  "_guardian": "The next block powers the guardian. keepWorking + autopilot need the hooks wired: node statusline.js --install-guardian (which sets keepWorking:true and autopilot:notify). Default autopilot is 'off' so a plain install never checkpoints or notifies.",
+  "_guardian": "The next block powers the guardian, which is ON by default (autopilot:notify). It checkpoints your work + sends a desktop ping at limits, but never launches anything unattended. Set autopilot:off for a bar-only, side-effect-free install. --auto (or autopilot:resume) adds hands-free relaunch; keepWorking + resume need the hooks wired by --install-guardian.",
   "keepWorking": false,
-  "autopilot": "off",
+  "autopilot": "notify",
+  "continuousCheckpoint": true,
   "autopilotBuffer": 45,
   "autopilotWeekly": false,
   "autopilotFailover": false,

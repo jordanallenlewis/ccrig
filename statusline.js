@@ -36,19 +36,21 @@
  * `--options` prints the current settings. Config is a separate file, so updating
  * this script never wipes it.
  *
- * THE GUARDIAN (opt-in, wired by --install-guardian): the first status line that
- * acts on your limits instead of only showing them. (1) Auto-pause + auto-resume:
- * at critical usage it checkpoints the exact work state (todos, last request, git
- * HEAD/dirty) and, in autopilot "resume", a detached sleep-safe watcher relaunches
- * `claude --resume <id> -p` at the reset with a prompt that continues the next step
- * and repeats nothing. (2) Keep-working: a Stop hook that refuses to pause while
- * todos remain (loop-guarded, yields to real questions). (3) Time-to-limit forecast
- * in the bar. (4) Cross-profile failover via a shared usage ledger. (5) Compaction-
- * proof checkpoints (PreCompact). All zero-network, opt-in, reversible.
+ * THE GUARDIAN (on by default, wired by --install; --no-guardian for bar only): the
+ * first status line that acts on your limits instead of only showing them. (1) Auto-pause
+ * + auto-resume: from ~warn usage it checkpoints the exact work state (todos, last request,
+ * git HEAD/dirty) and keeps it CONTINUOUSLY FRESH through the danger band, and in autopilot
+ * "resume" (add --auto) a detached sleep-safe watcher relaunches `claude --resume <id> -p`
+ * at the reset with a prompt that continues the next step and repeats nothing. The default
+ * autopilot is "notify" (checkpoint + desktop ping, nothing unattended). (2) Keep-working:
+ * a Stop hook that refuses to pause while todos remain (loop-guarded, yields to real
+ * questions; off by default). (3) Time-to-limit forecast in the bar. (4) Cross-profile
+ * failover via a shared usage ledger. (5) Compaction-proof checkpoints (PreCompact). All
+ * zero-network and reversible; set "autopilot": "off" for no side effects at all.
  * ---------------------------------------------------------------------------
  * CLI (manual only: Claude Code calls this with JSON on stdin and no args):
- *   node statusline.js --install            wire Claude Code to this file (backs up settings)
- *   node statusline.js --install-guardian   also wire keep-working + auto-resume (add --auto for hands-free)
+ *   node statusline.js --install            wire the bar + guardian (backs up settings; --no-guardian = bar only)
+ *   node statusline.js --install-guardian   (re)wire the guardian + keep-working (add --auto for hands-free resume)
  *   node statusline.js --uninstall          remove the status line (and any guardian hooks)
  *   node statusline.js --uninstall-guardian remove only the guardian hooks
  *   node statusline.js --doctor             diagnose a broken or missing status line + guardian
@@ -67,7 +69,7 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 
 // where updates come from: the public GitHub repo's main branch (raw files).
 // Override the base with CCBSL_UPDATE_BASE (used by tests to point at a local dir).
@@ -117,7 +119,7 @@ const DEFAULTS = {
   },
   thresholds: {
     context: { green: 50, yellow: 70 }, // % filled → color
-    usage: { green: 50, yellow: 80, warn: 90, critical: 98 }, // warn: ⚠ + resumeHint; critical: resume ticket + autopilot
+    usage: { green: 50, yellow: 80, warn: 90, critical: 95 }, // warn: ⚠ + resumeHint; critical: resume ticket + autopilot
   },
   resetStyle: 'clock',  // 'clock' (10:40a, dated if not today) | 'relative' (2h14m)
   resumeTickets: true,  // at critical usage, save resume-tickets/<session>.md with the exact pick-up command
@@ -126,12 +128,16 @@ const DEFAULTS = {
   //   false | true | { maxContinues: 25, maxStuck: 3 }.  Needs `--install-guardian` to wire the hook.
   keepWorking: false,
   // Feature 1 (Limit Autopilot): what to do when a window crosses `thresholds.usage.critical`.
-  //   'off'    do nothing beyond the resume ticket
-  //   'notify' desktop notification + a rich checkpoint, once per session
-  //   'resume' also relaunch `claude --resume <id>` automatically when the window resets
-  // Default 'off' so a plain --install never spawns a notification or writes a checkpoint;
-  // --install-guardian sets it to 'notify' (or 'resume' with --auto).
-  autopilot: 'off',
+  //   'off'    do nothing beyond the resume ticket (checkpoint/notify/continuous-refresh all disabled)
+  //   'notify' desktop notification + a rich, continuously-refreshed checkpoint (the shipped default)
+  //   'resume' also relaunch `claude --resume <id>` automatically when the window resets (add --auto)
+  // Default 'notify': the guardian is on out of the box (checkpoint + ticket + desktop ping), but it
+  // never launches a background process unattended. Set 'off' for a bar-only, side-effect-free install.
+  autopilot: 'notify',
+  // Continuous-refresh: while a window is in the danger band (>= warn), re-write the checkpoint on the
+  // render loop (~every 10s) so an auto-resume reflects the LATEST completed step, not a stale snapshot
+  // from when the limit was first crossed. Off -> the checkpoint is written once and coarsely refreshed.
+  continuousCheckpoint: true,
   autopilotBuffer: 45,       // seconds to wait past resets_at before an auto-resume relaunch
   autopilotWeekly: false,    // also auto-relaunch for the 7-day window (days-long waits are less reliable; off by default)
   autopilotFailover: false,  // Feature 4: prefer a profile that still has headroom over waiting for the reset
@@ -855,7 +861,12 @@ function armAutopilot(input, which, pct, resetEpoch) {
   // "limit near" checkpoint (written pre-critical by maybeNearCheckpoint) into the real
   // critical snapshot with fresh todos. Each fires at most once per window, so the git
   // subprocesses inside writeCheckpoint stay off the per-render hot path.
-  const needsCritCheckpoint = windowChanged || !/critical/.test((ex && ex.reason) || '');
+  let needsCritCheckpoint = windowChanged || !/critical/.test((ex && ex.reason) || '');
+  // continuous-refresh: also re-snapshot every ~10s while critical, so the checkpoint tracks the
+  // latest completed step through the danger band (the render loop drives this, ~every 2s).
+  if (!needsCritCheckpoint && CONFIG.continuousCheckpoint !== false) {
+    try { needsCritCheckpoint = Date.now() - fs.statSync(checkpointPath(sid)).mtimeMs >= 10000; } catch { needsCritCheckpoint = true; }
+  }
   if (needsCritCheckpoint) {
     writeCheckpoint(input, { reason: which + ' limit critical', window: which, resets_at: resetEpoch });
   }
@@ -907,9 +918,12 @@ function maybeNearCheckpoint(input, which, resetEpoch) {
   const sid = input.session_id;
   if (!sid || !SID_RE.test(sid)) return;
   const ex = readCheckpoint(sid);
+  // continuous-refresh (default) re-snapshots every ~10s so a wall that lands here has a current
+  // checkpoint; with it off, fall back to coarse 5-min coverage (just so an unrendered wall recovers).
+  const throttleMs = CONFIG.continuousCheckpoint === false ? 5 * 60 * 1000 : 10 * 1000;
   if (ex) {
     if (/critical/.test(ex.reason || '') && windowActive(ex.resets_at)) return; // don't clobber a critical cp
-    try { if (Date.now() - fs.statSync(checkpointPath(sid)).mtimeMs < 5 * 60 * 1000) return; } catch {}
+    try { if (Date.now() - fs.statSync(checkpointPath(sid)).mtimeMs < throttleMs) return; } catch {}
   }
   writeCheckpoint(input, { reason: which + ' limit near', window: which, resets_at: resetEpoch });
 }
@@ -1585,8 +1599,9 @@ function helpText() {
     'CCRig v' + VERSION,
     'Claude Code runs this for you automatically. You can also run these by hand',
     '(as `ccrig <command>`, for example `ccrig init`, or by the flag names below):',
-    '  --install            wire Claude Code to this file, for ALL your profiles (backs up settings.json first)',
-    '  --install-guardian   also wire the guardian: keep-working + auto-resume at limits (all profiles)',
+    '  --install            wire the bar + guardian to this file, for ALL your profiles (backs up settings.json first)',
+    '  --no-guardian        with --install: install the status line only, no guardian hooks',
+    '  --install-guardian   (re)wire the guardian + turn on keep-working; add --auto for hands-free resume',
     '  --auto               with --install-guardian: hands-free relaunch (autopilot resume)',
     '  --uninstall          remove the status line + any guardian hooks (all profiles)',
     '  --uninstall-guardian remove only the guardian hooks; keep the status line (all profiles)',
@@ -2229,7 +2244,7 @@ function writeSlashCommands(dir = CFG) {
 }
 // wire ONE profile. Returns a result the caller reports; never exits, never throws for a
 // bad settings.json (so one broken profile can't block the others).
-function installStatusLineInto(dir) {
+function installStatusLineInto(dir, withGuardian) {
   try {
     fs.mkdirSync(dir, { recursive: true });
     const sp = settingsPathOf(dir);
@@ -2243,18 +2258,22 @@ function installStatusLineInto(dir) {
     const bak = backupSettings(dir);
     // process.execPath = the node running this installer: absolute, exists, cross-platform
     settings.statusLine = { type: 'command', command: `"${process.execPath}" "${__filename}"`, refreshInterval: 2 };
+    // The guardian is on by default (SessionStart restore + PreCompact + Stop hooks); --no-guardian
+    // installs the bar only. The autopilot MODE (notify vs resume) is config, defaulting to notify.
+    if (withGuardian) addGuardianHooks(settings);
     if (!writeJsonAtomic(sp, settings)) throw new Error('could not save ' + sp + '; it was left unchanged');
     JSON.parse(fs.readFileSync(sp, 'utf8')); // round-trip validate
     const cmd = writeSlashCommands(dir);
-    return { dir, sp, bak, cmd, replacedForeign };
+    return { dir, sp, bak, cmd, replacedForeign, guardian: !!withGuardian };
   } catch (e) { return { dir, sp: settingsPathOf(dir), err: e.message }; }
 }
 function runInstall() {
   // By default wire EVERY profile on this machine, so a work + personal setup never ends
   // up with the bar on only one. --this-profile scopes it to the active CLAUDE_CONFIG_DIR.
   const thisOnly = argv.includes('--this-profile');
+  const withGuardian = !argv.includes('--no-guardian'); // guardian is on by default; --no-guardian = bar only
   const profiles = thisOnly ? [CFG] : detectProfiles();
-  const results = profiles.map(installStatusLineInto);
+  const results = profiles.map((d) => installStatusLineInto(d, withGuardian));
   const okd = results.filter((r) => !r.err);
   const failed = results.filter((r) => r.err);
   for (const r of okd) {
@@ -2277,7 +2296,13 @@ function runInstall() {
   // claude-profiles.sh is a bash/zsh helper; do not tell a PowerShell (Windows) user to `source` it.
   if (fs.existsSync(helper) && process.platform !== 'win32') process.stdout.write('To switch accounts from your shell:  source "' + helper + '"\n');
   process.stdout.write('\nPreview it now:  node "' + __filename + '" --demo\n');
-  process.stdout.write('Never lose work to a usage limit? Set up the guardian:  node "' + __filename + '" --install-guardian\n');
+  if (withGuardian) {
+    process.stdout.write('The guardian is on (autopilot: notify): at a usage limit it checkpoints your work, keeps that checkpoint fresh, saves a resume ticket, and sends a desktop ping. It never launches anything unattended.\n');
+    process.stdout.write('Go hands-free (auto-relaunch at reset):  node "' + __filename + '" --install-guardian --auto\n');
+    process.stdout.write('Prefer just the bar? Reinstall with --no-guardian, or set "autopilot": "off".\n');
+  } else {
+    process.stdout.write('Installed the status line only (guardian off). Turn it on any time:  node "' + __filename + '" --install-guardian\n');
+  }
   // honest one-line privacy note; the render is zero-network, a once-a-day check is the only exception
   process.stdout.write('Privacy: drawing the bar never uses the network. The only exception is a once-a-day update check, which you can turn off with "updateCheck": false (or NO_UPDATE_NOTIFIER=1).\n');
   process.stdout.write('\nRestart Claude Code once, and you are set. After that, changes to your settings apply live.\n');
@@ -2287,6 +2312,17 @@ function runInstall() {
 // ---- guardian: wire the Stop / SessionStart / PreCompact hooks (Features 1, 2, 5) ----
 const GUARD_EVENTS = [['Stop', 'stop'], ['SessionStart', 'session-start'], ['PreCompact', 'pre-compact']];
 function guardianHookCommand(slug) { return `"${process.execPath}" "${__filename}" --hook ${slug}`; }
+// Add our Stop/SessionStart/PreCompact hooks to a settings object. Idempotent: strips any prior
+// copy of ours first, keeps the user's own hooks. Shared by the default install (guardian is on
+// out of the box) and --install-guardian. Pure JSON mutation, so it is identical on every OS.
+function addGuardianHooks(settings) {
+  settings.hooks = stripGuardianHooks(isPlainObject(settings.hooks) ? settings.hooks : {}).hooks || {};
+  for (const [Event, slug] of GUARD_EVENTS) {
+    const kept = Array.isArray(settings.hooks[Event]) ? settings.hooks[Event] : [];
+    kept.push({ hooks: [{ type: 'command', command: guardianHookCommand(slug) }] });
+    settings.hooks[Event] = kept;
+  }
+}
 // paths a settings command references (quoted tokens first, then whitespace-split bare tokens)
 function cmdPaths(cmd) {
   const quoted = [...String(cmd).matchAll(/"([^"]+)"/g)].map((m) => m[1]);
@@ -2355,12 +2391,7 @@ function installGuardianInto(dir) {
       settings.statusLine = { type: 'command', command: `"${process.execPath}" "${__filename}"`, refreshInterval: 2 };
     }
     // strip any prior guardian hooks surgically (keeps the user's own), then add fresh
-    settings.hooks = stripGuardianHooks(isPlainObject(settings.hooks) ? settings.hooks : {}).hooks || {};
-    for (const [Event, slug] of GUARD_EVENTS) {
-      const kept = Array.isArray(settings.hooks[Event]) ? settings.hooks[Event] : [];
-      kept.push({ hooks: [{ type: 'command', command: guardianHookCommand(slug) }] });
-      settings.hooks[Event] = kept;
-    }
+    addGuardianHooks(settings);
     if (!writeJsonAtomic(sp, settings)) throw new Error('could not save ' + sp + '; it was left unchanged');
     JSON.parse(fs.readFileSync(sp, 'utf8')); // round-trip validate
     writeSlashCommands(dir);
@@ -2775,7 +2806,7 @@ async function runConfigEditor() {
 // strict unknown-flag rejection: a typo like `--instal` should error, not silently render a bar.
 // Claude Code always invokes with argv.length===0, so this never runs on the render hot path (C3).
 if (argv.some((a) => a.startsWith('--'))) {
-  const KNOWN = new Set(['--install', '--install-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--options', '--config', '--demo', '--selftest', '--version', '--help', '--cols', '--this-profile', '--auto', '--force', '--hook', '--watch']);
+  const KNOWN = new Set(['--install', '--install-guardian', '--no-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--options', '--config', '--demo', '--selftest', '--version', '--help', '--cols', '--this-profile', '--auto', '--force', '--hook', '--watch']);
   const unknown = argv.find((a) => a.startsWith('--') && !KNOWN.has(a));
   if (unknown) { process.stdout.write('unknown flag: ' + unknown + '\nRun  node "' + __filename + '" --help  for the flag list.\n'); process.exit(1); }
 }
