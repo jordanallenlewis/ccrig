@@ -65,7 +65,7 @@ ccrig --mode minimal    # display density: minimal | normal | expanded
 
 Or copy `statusline.config.example.json` to `statusline.config.json` next to the script and edit by hand; `ccrig --options` lists every setting. Config is a separate file, so updates never touch it. Inside a Claude Code session, `/ccrig:config` opens the same menu, and `--autopilot` (off | notify | resume) and `--keep-working` (on | off) set the guardian's behavior.
 
-Running several accounts or many parallel sessions? `ccrig --sessions` lists recent sessions across every profile with the command to resume each, `ccrig --board` shows all live sessions at a glance (opt-in), and the bundled `claude-profiles.sh` adds a `claude-profile` switcher for your shell.
+Running several accounts or many parallel sessions? `ccrig --sessions` lists recent sessions across every profile with the command to resume each, `ccrig --board` shows all live sessions at a glance (opt-in), and the bundled `claude-profile` switcher works in every shell: `claude-profiles.sh` for bash/zsh (`source` it), `claude-profiles.ps1` for Windows PowerShell (dot-source it).
 
 ## Commands
 

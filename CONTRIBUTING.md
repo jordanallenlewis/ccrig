@@ -88,7 +88,6 @@ so always sandbox a benchmark.
 
 ## Ideas that would help
 
-- A PowerShell version of `claude-profiles.sh` for Windows.
 - Reorder / color editing in the `--config` editor.
 - More segments people ask for, behind config flags.
 

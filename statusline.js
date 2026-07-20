@@ -69,7 +69,7 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 
 // where updates come from: the public GitHub repo's main branch (raw files).
 // Override the base with CCBSL_UPDATE_BASE (used by tests to point at a local dir).
@@ -2292,9 +2292,14 @@ function runInstall() {
       + (failed.length ? '. ' + failed.length + ' could not be set up; fix ' + (failed.length === 1 ? 'it' : 'them') + ' and run again.' : '. All your Claude profiles now show the bar.')
       + ' (Add --this-profile to set up just one.)\n');
   }
-  const helper = path.join(__dirname, 'claude-profiles.sh');
-  // claude-profiles.sh is a bash/zsh helper; do not tell a PowerShell (Windows) user to `source` it.
-  if (fs.existsSync(helper) && process.platform !== 'win32') process.stdout.write('To switch accounts from your shell:  source "' + helper + '"\n');
+  // native profile switcher per platform: bash/zsh get claude-profiles.sh, PowerShell gets the .ps1
+  const helperSh = path.join(__dirname, 'claude-profiles.sh');
+  const helperPs = path.join(__dirname, 'claude-profiles.ps1');
+  if (process.platform === 'win32') {
+    if (fs.existsSync(helperPs)) process.stdout.write('To switch accounts in PowerShell:  . "' + helperPs + '"\n');
+  } else if (fs.existsSync(helperSh)) {
+    process.stdout.write('To switch accounts from your shell:  source "' + helperSh + '"\n');
+  }
   process.stdout.write('\nPreview it now:  node "' + __filename + '" --demo\n');
   if (withGuardian) {
     process.stdout.write('The guardian is on (autopilot: notify): at a usage limit it checkpoints your work, keeps that checkpoint fresh, saves a resume ticket, and sends a desktop ping. It never launches anything unattended.\n');
