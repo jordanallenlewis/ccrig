@@ -5,3 +5,6 @@ node_modules/
 # user config (the .example is committed; the real one is per-user)
 statusline.config.json
 *.bak
+
+# internal planning docs (kept local, not shipped)
+plans/
