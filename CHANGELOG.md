@@ -11,6 +11,16 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+### Fixed
+- **An `npm update` no longer re-enables the guardian.** `postinstall.js` now wires the status line
+  only (`--install --no-guardian`) since it re-runs on every update; the guardian is set up by an
+  explicit `ccrig init` (still on by default there), so an update can't silently turn it back on for
+  someone who removed it. (`--uninstall-guardian` already persists `autopilot: off`.)
+- **The profile switchers stop listing ccrig's own state directories** (`.claude-usage-ledger`,
+  `.claude-rig-sessions`) as phantom profiles, in both `claude-profiles.sh` and `claude-profiles.ps1`.
+- Updated `SECURITY.md` (guardian is on by default, not opt-in) and stale `98%` references to the
+  current `95%` critical threshold.
+
 ## [1.6.0] - 2026-07-20
 
 ### Added

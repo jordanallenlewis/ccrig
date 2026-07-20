@@ -38,7 +38,7 @@ claude-profile() {
       local cur="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" d
       {
         [ -d "$HOME/.claude" ] && printf '%s\n' "$HOME/.claude"
-        find "$HOME" -maxdepth 1 -type d -name '.claude-*' 2>/dev/null | sort
+        find "$HOME" -maxdepth 1 -type d -name '.claude-*' 2>/dev/null | grep -vE '/\.claude-(usage-ledger|rig-sessions)$' | sort
       } | while IFS= read -r d; do
         if [ "$d" = "$cur" ]; then printf '  \033[32m* %s\033[0m\n' "$(_cc_profile_name "$d")"
         else printf '    %s\n' "$(_cc_profile_name "$d")"; fi

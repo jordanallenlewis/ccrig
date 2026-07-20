@@ -26,7 +26,7 @@ CCRig is distributed primarily through npm, as the `ccrig` package. On an npm in
 
 ## The guardian (auto-resume + keep-working)
 
-- **Opt-in** behind `--install-guardian`; it prints what it changes and backs up `settings.json`; fully reversible with `--uninstall-guardian`.
+- **On by default** with `ccrig init` / `--install` (autopilot `notify`: checkpoint + resume ticket + desktop ping, nothing unattended); install the bar only with `--no-guardian` or `"autopilot": "off"`. The genuinely opt-in part is the **unattended auto-resume relaunch** (autopilot `resume` / `--auto`). Setup prints what it changes and backs up `settings.json`; fully reversible with `--uninstall-guardian`.
 - **Auto-resume** relaunches the official `claude` CLI (`--resume … -p`). It does not touch your auth, does not proxy the API, and does not bypass any limit. It waits for your real reset and continues. It runs **unattended and capped**: the relaunched run has keep-working disabled (`CCBSL_UNATTENDED`), so it does its reviewable steps and stops rather than looping overnight. Weekly auto-resume is off by default.
 - **Inspect and stop it any time:** `--status` lists armed watchers (they are not hidden daemons, and each writes a PID file), `--disarm` stops them.
 

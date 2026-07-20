@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 'use strict';
 /*
- * npm postinstall: wire CCRig into Claude Code automatically, so a single
- * `npm install -g ccrig` is the only command a user runs.
+ * npm postinstall: wire CCRig's STATUS LINE into Claude Code automatically, so a
+ * single `npm install -g ccrig` gets the bar without any extra step.
  *
- * Best-effort by design: it never fails the npm install (always exits 0), and it
- * does NOT run from the project's own source checkout, only from a real package
- * install (under node_modules, or a global install). Opt out with CCRIG_NO_POSTINSTALL=1.
+ * Deliberately BAR-ONLY (--no-guardian): postinstall re-runs on every `npm update`,
+ * so wiring the guardian here would silently re-enable it for someone who turned it
+ * off. The guardian is opt-in-on-setup instead: `ccrig init` wires it (on by default).
+ * Best-effort by design: it never fails the npm install (always exits 0), and it does
+ * NOT run from the project's own source checkout, only from a real package install
+ * (under node_modules, or a global install). Opt out entirely with CCRIG_NO_POSTINSTALL=1.
  */
 const path = require('path');
 const { spawnSync } = require('child_process');
@@ -17,7 +20,7 @@ function main() {
   const packaged = /[\\/]node_modules[\\/]/.test(__dirname) || process.env.npm_config_global === 'true';
   if (!packaged) return;
 
-  const result = spawnSync(process.execPath, [path.join(__dirname, 'statusline.js'), '--install'], {
+  const result = spawnSync(process.execPath, [path.join(__dirname, 'statusline.js'), '--install', '--no-guardian'], {
     stdio: 'inherit',
   });
 
