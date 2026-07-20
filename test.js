@@ -286,7 +286,7 @@ test('a passed reset time shows "now" and clears the stale warning', () => {
   assert.ok(!fs.existsSync(path.join(sb.cfg, 'resume-tickets', 'sx.md')));
   // a still-active window at the same % keeps the warning
   const active = strip(render(baseInput({
-    rate_limits: { five_hour: { used_percentage: 96, resets_at: future } },
+    rate_limits: { five_hour: { used_percentage: 92, resets_at: future } },
   }), { env }).out);
   assert.match(active, /near limit/);
 });
@@ -355,7 +355,7 @@ test('minimal mode still surfaces the near-limit warning', () => {
   const sb = sandbox();
   const script = scriptCopy(sb.dir, { mode: 'minimal' });
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
-  const out = strip(render(baseInput({ rate_limits: { five_hour: { used_percentage: 95 } } }), { env, script, cols: '200' }).out);
+  const out = strip(render(baseInput({ rate_limits: { five_hour: { used_percentage: 92 } } }), { env, script, cols: '200' }).out);
   assert.match(out, /near limit/);
 });
 
@@ -479,14 +479,23 @@ test('--install: one broken profile is skipped, the rest still get wired', () =>
   assert.match(r.out, /Could not set up the personal profile/);
 });
 
-test('--install preserves unrelated settings keys', () => {
+test('--install preserves unrelated settings keys + a user hook, and wires the guardian by default', () => {
   const sb = sandbox();
-  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), JSON.stringify({ model: 'opus', hooks: { a: 1 } }));
+  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), JSON.stringify({ model: 'opus', hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'my-own-thing' }] }] } }));
   run(['--install'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
   const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
   assert.strictEqual(j.model, 'opus');
-  assert.deepStrictEqual(j.hooks, { a: 1 });
+  assert.ok(JSON.stringify(j.hooks.PreToolUse).includes('my-own-thing'), 'unrelated user hook preserved');
+  assert.ok(Array.isArray(j.hooks.Stop) && JSON.stringify(j.hooks.Stop).includes('--hook'), 'guardian wired by default install');
   assert.ok(j.statusLine);
+});
+
+test('--install --no-guardian installs the bar only (no guardian hooks)', () => {
+  const sb = sandbox();
+  run(['--install', '--no-guardian'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
+  const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  assert.ok(j.statusLine, 'status line wired');
+  assert.ok(!j.hooks || !j.hooks.Stop, 'no guardian hooks with --no-guardian');
 });
 
 test('--install refuses corrupt settings.json without clobbering it', () => {
@@ -935,15 +944,25 @@ test('critical usage writes a rich checkpoint (todos + request + git-aware)', ()
   assert.match(cp.last_request, /fix the billing bug/);
 });
 
-test('REGRESSION: plain install (autopilot off) writes NO checkpoint/notify at critical — only the ticket', () => {
+test('REGRESSION: autopilot:off (bar-only) writes NO checkpoint/notify at critical — only the ticket', () => {
   const sb = sandbox();
+  const script = scriptCopy(sb.dir, { autopilot: 'off' }); // explicit opt-out of the (now default-on) guardian
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
   const input = baseInput({ session_id: 'plain1', rate_limits: { five_hour: { used_percentage: 99, resets_at: Math.floor(Date.now() / 1000) + 600 } } });
-  const out = strip(render(input, { env }).out); // default config -> autopilot 'off'
+  const out = strip(render(input, { env, script }).out);
   assert.match(out, /limit imminent/);
   assert.ok(fs.existsSync(path.join(sb.cfg, 'resume-tickets', 'plain1.md')), 'resume ticket still written (documented base feature)');
-  assert.ok(!fs.existsSync(path.join(sb.cfg, 'guardian', 'plain1.checkpoint.json')), 'no guardian checkpoint without opting in');
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'guardian', 'plain1.checkpoint.json')), 'no guardian checkpoint when opted out');
   assert.ok(!fs.existsSync(path.join(sb.cfg, 'guardian', 'plain1.notified')), 'no desktop-notification side effect');
+});
+
+test('default install (autopilot notify) checkpoints + notifies at critical — guardian is on out of the box', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const input = baseInput({ session_id: 'def1', rate_limits: { five_hour: { used_percentage: 99, resets_at: Math.floor(Date.now() / 1000) + 600 } } });
+  render(input, { env }); // DEFAULT config -> autopilot 'notify'
+  assert.ok(fs.existsSync(path.join(sb.cfg, 'guardian', 'def1.checkpoint.json')), 'guardian on by default -> checkpoint written');
+  assert.ok(fs.existsSync(path.join(sb.cfg, 'guardian', 'def1.notified')), 'notify marker written (real spawn gated off in tests)');
 });
 
 test('REGRESSION: setters persist only the diff from defaults (future default changes survive updates)', () => {
@@ -1109,7 +1128,8 @@ test('--install-guardian wires the three hooks and turns on keep-working', () =>
   assert.ok(j.statusLine, 'status line wired too');
   const cfg = JSON.parse(fs.readFileSync(path.join(sb.dir, 'statusline.config.json'), 'utf8'));
   assert.strictEqual(cfg.keepWorking, true);
-  assert.strictEqual(cfg.autopilot, 'notify', 'safe default until --auto');
+  // notify is now the shipped default, so the diff-only saver does not persist it (equals default) -> absent or 'notify', never 'resume' without --auto
+  assert.ok(cfg.autopilot === undefined || cfg.autopilot === 'notify', 'autopilot stays at the notify default until --auto');
 });
 
 test('--install-guardian --auto enables full auto-resume', () => {
@@ -2076,13 +2096,25 @@ test('G2: guardian checkpoints from the warn band and upgrades it at critical', 
   assert.match(cp.reason, /critical/, 'upgraded to a critical checkpoint at critical usage');
 });
 
-// G2 invariant: a plain install (autopilot off) still checkpoints NOTHING, even at warn.
-test('G2: plain install writes no checkpoint at the warn band', () => {
+// G2 invariant: opting OUT (autopilot off) still checkpoints NOTHING, even at warn.
+test('G2: autopilot:off writes no checkpoint at the warn band', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { autopilot: 'off' });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const now = Math.floor(Date.now() / 1000);
+  render(baseInput({ session_id: 'warn2', rate_limits: { five_hour: { used_percentage: 93, resets_at: now + 600 } } }), { env, script });
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'guardian', 'warn2.checkpoint.json')), 'no guardian side effect when opted out');
+});
+
+// continuous-refresh (default-on): the guardian checkpoints from the warn band with no opt-in.
+test('continuous-refresh: the default guardian checkpoints from the warn band', () => {
   const sb = sandbox();
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
   const now = Math.floor(Date.now() / 1000);
-  render(baseInput({ session_id: 'warn2', rate_limits: { five_hour: { used_percentage: 93, resets_at: now + 600 } } }), { env });
-  assert.ok(!fs.existsSync(path.join(sb.cfg, 'guardian', 'warn2.checkpoint.json')), 'no guardian side effect without opting in');
+  const tp = transcript(sb.dir, [userEntry('do it'), todoEntry([{ content: 'step', status: 'pending' }])]);
+  render(baseInput({ session_id: 'cr1', transcript_path: tp, rate_limits: { five_hour: { used_percentage: 92, resets_at: now + 600 } } }), { env });
+  const cp = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'guardian', 'cr1.checkpoint.json'), 'utf8'));
+  assert.match(cp.reason, /near/, 'warn-band checkpoint written by default (no opt-in)');
 });
 
 // G7: a PRE-reset manual peek must not forfeit auto-resume — inject context, stay armed.
