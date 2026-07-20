@@ -1947,7 +1947,7 @@ test('END-TO-END: guardian checkpoints at the limit, WAITS for the reset, then a
     // 1) the live render at 99%: writes the checkpoint and arms a REAL detached watcher.
     //    CCBSL_NO_ACT='' re-enables the real spawn; CCBSL_WATCH_INTERVAL_MS makes the poll fast.
     const r = run([], { stdin: JSON.stringify(input), env: {
-      CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_NO_ACT: '', CCBSL_WATCH_INTERVAL_MS: '250', NO_UPDATE_NOTIFIER: '1',
+      CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_NO_ACT: '', CCBSL_NO_NOTIFY: '1', CCBSL_WATCH_INTERVAL_MS: '250', NO_UPDATE_NOTIFIER: '1',
     }, script });
     assert.strictEqual(r.code, 0, 'the render itself never fails');
     assert.match(strip(r.out), /limit imminent|autopilot armed/, 'the bar shows the armed state');
@@ -2010,7 +2010,7 @@ test('END-TO-END: if the user manually resumes during the wait, the watcher stan
   try {
     // touch the transcript "after" the reset (mtime > resets_at + 2) so resumedManuallySince() is true
     const future = (now + 10) * 1000; fs.utimesSync(tp, future / 1000, future / 1000);
-    const r = run(['--watch', sid], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_NO_ACT: '', CCBSL_WATCH_INTERVAL_MS: '200' }, script });
+    const r = run(['--watch', sid], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_NO_ACT: '', CCBSL_NO_NOTIFY: '1', CCBSL_WATCH_INTERVAL_MS: '200' }, script });
     assert.strictEqual(r.code, 0);
     await sleep(400);
     assert.ok(!fs.existsSync(marker), 'a manual resume means the watcher must NOT also relaunch');
@@ -2019,6 +2019,118 @@ test('END-TO-END: if the user manually resumes during the wait, the watcher stan
   } finally {
     for (const pid of watcherPids) { try { if (pid) process.kill(pid); } catch {} }
   }
+});
+
+// ===========================================================================
+// LIMIT-RECOVERY HARDENING (G1/G2/G6/G7): the guardian's job is to survive a usage
+// limit, but the limit shows as a plain error the user recovers from in-session (a
+// plan upgrade or /usage-credits grows the quota) or that arrives without a >=critical
+// render. These encode the four verified gaps from the limit-behavior audit.
+// ===========================================================================
+
+// G1: a window that was armed at the limit but RECOVERED before its reset (quota grew
+// mid-window) must disarm — otherwise the watcher relaunches on stale, finished work.
+test('G1: autopilot disarms when the armed window recovers mid-cycle', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { autopilot: 'resume' });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const now = Math.floor(Date.now() / 1000);
+  const cpFile = path.join(sb.cfg, 'guardian', 'rec1.checkpoint.json');
+  render(baseInput({ session_id: 'rec1', rate_limits: { five_hour: { used_percentage: 99, resets_at: now + 3600 } } }), { env, script });
+  assert.ok(fs.existsSync(cpFile), 'armed at the limit');
+  // same active window, but usage is now well below warn -> quota grew (upgrade / extra usage)
+  render(baseInput({ session_id: 'rec1', rate_limits: { five_hour: { used_percentage: 30, resets_at: now + 3600 } } }), { env, script });
+  assert.ok(!fs.existsSync(cpFile), 'recovered -> checkpoint dropped so the watcher stands down');
+});
+
+// G1 guard: a MISSING usage reading (rate_limits can drop out while blocked) is not recovery.
+test('G1: a null usage reading does NOT falsely disarm', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { autopilot: 'resume' });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const now = Math.floor(Date.now() / 1000);
+  const cpFile = path.join(sb.cfg, 'guardian', 'rec2.checkpoint.json');
+  render(baseInput({ session_id: 'rec2', rate_limits: { five_hour: { used_percentage: 99, resets_at: now + 3600 } } }), { env, script });
+  assert.ok(fs.existsSync(cpFile));
+  render(baseInput({ session_id: 'rec2', rate_limits: {} }), { env, script }); // no five_hour at all
+  assert.ok(fs.existsSync(cpFile), 'absent usage keeps the checkpoint armed');
+});
+
+// G2: a checkpoint is written from the WARN band, so a wall that arrives with no >=critical
+// render still leaves recovery state — and it upgrades to a critical snapshot at critical.
+test('G2: guardian checkpoints from the warn band and upgrades it at critical', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { autopilot: 'notify' });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const now = Math.floor(Date.now() / 1000);
+  const cpFile = path.join(sb.cfg, 'guardian', 'warn1.checkpoint.json');
+  const tp = transcript(sb.dir, [userEntry('do the work'), todoEntry([{ content: 'step', status: 'pending' }])]);
+  const out = strip(render(baseInput({ session_id: 'warn1', transcript_path: tp, rate_limits: { five_hour: { used_percentage: 93, resets_at: now + 600 } } }), { env, script }).out);
+  assert.match(out, /near limit/);
+  let cp = JSON.parse(fs.readFileSync(cpFile, 'utf8'));
+  assert.match(cp.reason, /near/, 'warn-band checkpoint marked "near"');
+  assert.strictEqual(cp.window, 'session');
+  // the same session then crosses critical -> the checkpoint is upgraded
+  render(baseInput({ session_id: 'warn1', transcript_path: tp, rate_limits: { five_hour: { used_percentage: 99, resets_at: now + 600 } } }), { env, script });
+  cp = JSON.parse(fs.readFileSync(cpFile, 'utf8'));
+  assert.match(cp.reason, /critical/, 'upgraded to a critical checkpoint at critical usage');
+});
+
+// G2 invariant: a plain install (autopilot off) still checkpoints NOTHING, even at warn.
+test('G2: plain install writes no checkpoint at the warn band', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const now = Math.floor(Date.now() / 1000);
+  render(baseInput({ session_id: 'warn2', rate_limits: { five_hour: { used_percentage: 93, resets_at: now + 600 } } }), { env });
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'guardian', 'warn2.checkpoint.json')), 'no guardian side effect without opting in');
+});
+
+// G7: a PRE-reset manual peek must not forfeit auto-resume — inject context, stay armed.
+test('G7: a pre-reset resume keeps the checkpoint and watcher armed', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { autopilot: 'resume' });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const gdir = path.join(sb.cfg, 'guardian'); fs.mkdirSync(gdir, { recursive: true });
+  const future = Math.floor(Date.now() / 1000) + 3600;
+  fs.writeFileSync(path.join(gdir, 'peek1.checkpoint.json'), JSON.stringify({ session_id: 'peek1', cwd: '/tmp/proj', window: 'session', reason: 'session limit critical', resets_at: future, todos: [{ content: 'finish it', status: 'pending' }], last_request: 'do it' }));
+  const r = hookRun('session-start', { session_id: 'peek1', source: 'resume' }, { env, script });
+  const ctx = JSON.parse(r.out).hookSpecificOutput.additionalContext;
+  assert.match(ctx, /finish it/, 'still injects the checkpoint context');
+  assert.match(ctx, /still armed/, 'tells the user auto-resume survives the peek');
+  assert.ok(fs.existsSync(path.join(gdir, 'peek1.checkpoint.json')), 'checkpoint NOT consumed before the reset');
+});
+
+// G7: once the reset has passed, a human resume consumes the checkpoint as before.
+test('G7: a post-reset resume consumes the checkpoint (unchanged)', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { autopilot: 'resume' });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const gdir = path.join(sb.cfg, 'guardian'); fs.mkdirSync(gdir, { recursive: true });
+  const past = Math.floor(Date.now() / 1000) - 10;
+  fs.writeFileSync(path.join(gdir, 'peek2.checkpoint.json'), JSON.stringify({ session_id: 'peek2', cwd: '/tmp/proj', window: 'session', reason: 'session limit critical', resets_at: past, todos: [{ content: 'finish it', status: 'pending' }], last_request: 'do it' }));
+  const r = hookRun('session-start', { session_id: 'peek2', source: 'resume' }, { env, script });
+  assert.match(JSON.parse(r.out).hookSpecificOutput.additionalContext, /finish it/);
+  assert.ok(!fs.existsSync(path.join(gdir, 'peek2.checkpoint.json')), 'checkpoint consumed once the reset has passed');
+});
+
+// G6: a relaunch that launches but exits non-zero (still blocked / auth / network) must KEEP
+// the checkpoint for a manual resume instead of consuming it and reporting a false success.
+test('END-TO-END: a failed relaunch keeps the checkpoint (no false success)', async () => {
+  const sb = sandbox();
+  const sid = 'e2e-fail-1';
+  const stub = nodeStub(sb.dir, 'claude-fail', 'process.exit(7);'); // emulate a resume that dies immediately
+  const script = scriptCopy(sb.dir, { autopilot: 'resume', autopilotBuffer: 0, updateCheck: false, claudeBin: stub });
+  const gd = path.join(sb.cfg, 'guardian'); fs.mkdirSync(gd, { recursive: true });
+  const now = Math.floor(Date.now() / 1000);
+  const tp = transcript(sb.dir, [userEntry('do it'), todoEntry([{ content: 'step', status: 'pending' }])]);
+  const cpFile = path.join(gd, sid + '.checkpoint.json');
+  fs.writeFileSync(cpFile, JSON.stringify({ session_id: sid, cwd: sb.dir, window: 'session', resets_at: now - 1, transcript_path: tp, todos: [{ content: 'step', status: 'pending' }] }));
+  // real spawn (CCBSL_NO_ACT='') so the watcher actually launches the stub and sees its exit code
+  const r = run(['--watch', sid], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_NO_ACT: '', CCBSL_NO_NOTIFY: '1', CCBSL_WATCH_INTERVAL_MS: '200' }, script });
+  assert.strictEqual(r.code, 1, 'the watcher itself exits non-zero when the relaunch fails');
+  const log = fs.readFileSync(path.join(gd, 'logs', sid + '.log'), 'utf8');
+  assert.match(log, /exited code=7/, 'recorded the non-zero exit');
+  assert.ok(fs.existsSync(cpFile), 'checkpoint KEPT after a failed relaunch so a manual resume still works');
 });
 
 // ===========================================================================
