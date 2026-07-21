@@ -69,7 +69,7 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const VERSION = '1.6.0';
+const VERSION = '1.6.1';
 
 // where updates come from: the public GitHub repo's main branch (raw files).
 // Override the base with CCBSL_UPDATE_BASE (used by tests to point at a local dir).
@@ -383,13 +383,19 @@ const usageSeg = (label, pct, reset) => {
 // already saves the transcript continuously, so nothing is at risk; the ticket is
 // findability. Days later, after a weekly reset, `claude --continue` may resume the
 // wrong (a newer) session. The ticket names the precise one.
-function writeResumeTicket(input, pct, windowName, resetEpoch) {
+function writeResumeTicket(input, pct, windowName, resetEpoch, escalate) {
   const sid = input.session_id;
   if (!sid || !/^[A-Za-z0-9-]+$/.test(sid)) return false;
   try {
     const dir = path.join(CFG, 'resume-tickets');
     const file = path.join(dir, sid + '.md');
-    if (fs.existsSync(file)) return true; // one ticket per session; written once
+    // Written once per session (at the warn band). `escalate` (the critical render) rewrites it
+    // ONLY when the recorded usage is lower than now, so the ticket climbs warn% -> critical% for
+    // accuracy but a steady critical render does not rewrite every tick (stays "written once per level").
+    if (fs.existsSync(file)) {
+      if (!escalate) return true;
+      try { const m = fs.readFileSync(file, 'utf8').match(/usage (\d+)%/); if (m && Math.round(pct) <= parseInt(m[1], 10)) return true; } catch {}
+    }
     fs.mkdirSync(dir, { recursive: true });
     const cwd = (input.workspace && input.workspace.current_dir) || input.cwd || process.cwd();
     const name = input.session_name || '(unnamed session)';
@@ -946,7 +952,7 @@ function resumeHintSeg(input, sPct, wPct, sReset, wReset, live) {
     const pct = sCrit ? sPct : wPct, reset = sCrit ? sReset : wReset;
     // side effects (ticket/checkpoint/watcher/notify) only on the LIVE render, so a
     // hand-edited `critical` threshold can't make --demo/--config/--selftest write files.
-    const saved = live && CONFIG.resumeTickets !== false && writeResumeTicket(input, pct, which, reset);
+    const saved = live && CONFIG.resumeTickets !== false && writeResumeTicket(input, pct, which, reset, true);
     if (live) armAutopilot(input, which, pct, reset);
     const willResume = cfgAutopilot() === 'resume' && (which === 'session' || CONFIG.autopilotWeekly === true);
     const tail = willResume
