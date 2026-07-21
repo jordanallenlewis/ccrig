@@ -248,8 +248,19 @@ test('critical usage writes a resume ticket once, with the exact command', () =>
   assert.match(body, /\/tmp\/proj/);
   assert.match(body, /Fix the billing bug/);
   const mtime = fs.statSync(ticket).mtimeMs;
-  render(input, { env }); // second render must not rewrite
+  render(input, { env }); // second render at the same % must not rewrite
   assert.strictEqual(fs.statSync(ticket).mtimeMs, mtime);
+});
+
+test('resume ticket climbs from the warn % to the critical % (escalate refresh)', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const now = Math.floor(Date.now() / 1000);
+  const ticket = path.join(sb.cfg, 'resume-tickets', 'esc-1.md');
+  render(baseInput({ session_id: 'esc-1', rate_limits: { five_hour: { used_percentage: 92, resets_at: now + 600 } } }), { env }); // warn band
+  assert.match(fs.readFileSync(ticket, 'utf8'), /usage 92%/, 'ticket first written at the warn %');
+  render(baseInput({ session_id: 'esc-1', rate_limits: { five_hour: { used_percentage: 99, resets_at: now + 600 } } }), { env }); // now critical
+  assert.match(fs.readFileSync(ticket, 'utf8'), /usage 99%/, 'critical render refreshed the ticket to the true %');
 });
 
 test('no session_id means no ticket; resumeTickets:false disables it', () => {

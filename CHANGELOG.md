@@ -11,6 +11,8 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-07-21
+
 ### Fixed
 - **An `npm update` no longer re-enables the guardian.** `postinstall.js` now wires the status line
   only (`--install --no-guardian`) since it re-runs on every update; the guardian is set up by an
@@ -18,6 +20,9 @@ In-progress work lives under `[Unreleased]` until it's cut.
   someone who removed it. (`--uninstall-guardian` already persists `autopilot: off`.)
 - **The profile switchers stop listing ccrig's own state directories** (`.claude-usage-ledger`,
   `.claude-rig-sessions`) as phantom profiles, in both `claude-profiles.sh` and `claude-profiles.ps1`.
+- **The resume ticket now records the true limit level.** It is still written once at the warn band,
+  but the critical render refreshes it when usage has climbed (e.g. 92% -> 99%), so the ticket's
+  usage/reset line is accurate instead of frozen at the first warn-band value.
 - Updated `SECURITY.md` (guardian is on by default, not opt-in) and stale `98%` references to the
   current `95%` critical threshold.
 
@@ -302,7 +307,8 @@ everything that touches your machine is opt-in, backed up, and reversible.
   (by AstroHan) noted the plan-usage numbers are already in the status line's stdin, which is
   what let this drop the API call the guide used.
 
-[Unreleased]: https://github.com/jordanallenlewis/ccrig/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/jordanallenlewis/ccrig/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/jordanallenlewis/ccrig/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/jordanallenlewis/ccrig/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/jordanallenlewis/ccrig/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/jordanallenlewis/ccrig/compare/v1.3.0...v1.4.0
