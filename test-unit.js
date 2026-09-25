@@ -220,7 +220,7 @@ test('notifySpec: win32 keeps the payload out of code position (injection-safe)'
   assert.ok(mac.args[1].includes('display notification'), 'macOS args shape unchanged');
   const lin = SL.notifySpec('linux', 't', 'm');
   assert.strictEqual(lin.cmd, 'notify-send');
-  assert.deepStrictEqual(lin.args, ['t', 'm']);
+  assert.deepStrictEqual(lin.args, ['--', 't', 'm'], 'a label starting with "-" is never parsed as an option');
 });
 
 // ---------------------------------------------------------------------------
@@ -258,8 +258,188 @@ test('NO_PROXY *.example.com bypasses the proxy', async () => {
   const restore = { HTTP_PROXY: process.env.HTTP_PROXY, NO_PROXY: process.env.NO_PROXY };
   process.env.HTTP_PROXY = 'http://127.0.0.1:' + pport;
   process.env.NO_PROXY = '*.example.com';
-  await new Promise((resolve) => SL.httpGetText('http://sub.example.com/x', 0, () => resolve())); // resolves via error or data; we only care about the proxy
+  // stub DNS so the direct path fails locally instead of touching the network (the suite is hermetic)
+  const dns = require('dns'); const realLookup = dns.lookup;
+  dns.lookup = (h, o, cb) => { (typeof o === 'function' ? o : cb)(Object.assign(new Error('stubbed'), { code: 'ENOTFOUND' })); };
+  try { await new Promise((resolve) => SL.httpGetText('http://sub.example.com/x', 0, () => resolve())); } // resolves via error or data; we only care about the proxy
+  finally { dns.lookup = realLookup; }
   proxy.close();
   for (const k of ['HTTP_PROXY', 'NO_PROXY']) { if (restore[k] === undefined) delete process.env[k]; else process.env[k] = restore[k]; }
   assert.strictEqual(proxyHits, 0, 'a *.example.com host must bypass the proxy (direct, not via proxy)');
+});
+
+// ---------------------------------------------------------------------------
+// Session-board lamps (v1.7.0). All pure: state classification, sanitization, ping dedupe.
+const DECAY = 30 * 60000;
+
+test('cleanLabel: strips control bytes, collapses whitespace, caps length', () => {
+  assert.strictEqual(SL.cleanLabel('\x1b[31mRED\x1b[0m'), '[31mRED [0m', 'ESC becomes a space, so what is left is inert text');
+  assert.ok(!SL.cleanLabel('\x1b[31mRED').includes('\x1b'), 'no ESC survives');
+  assert.ok(!SL.cleanLabel('a\x9b31mb').includes('\x9b'), 'the 8-bit CSI is removed too');
+  assert.strictEqual(SL.cleanLabel('a\x7fb'), 'a b', 'DEL becomes a space');
+  assert.strictEqual(SL.cleanLabel('  a\n\tb  '), 'a b', 'newlines and tabs collapse to one space');
+  assert.strictEqual(SL.cleanLabel('abcdef', 3), 'abc');
+  assert.strictEqual(SL.cleanLabel(undefined), '', 'a non-string is empty, never a crash');
+  assert.strictEqual(SL.cleanLabel(12345), '');
+  // REGRESSION: capping by UTF-16 unit split a surrogate pair, and the lone half made the macOS
+  // notifier's AppleScript literal a syntax error, so the "waiting on you" ping never arrived.
+  const rockets = SL.cleanLabel('a' + '\u{1F680}'.repeat(40), 32);
+  assert.ok(!/[\uD800-\uDBFF]$/.test(rockets), 'never ends on a lone high surrogate');
+  assert.strictEqual([...rockets].length, 32, 'the cap counts code points');
+});
+
+test('padCell: pads to exact display width for ASCII, CJK, and emoji', () => {
+  for (const s of ['', 'abc', '日本語', '🚀x', 'a日b']) {
+    assert.strictEqual(SL.dispWidth(SL.padCell(s, 10)), 10, JSON.stringify(s) + ' pads to 10 cells');
+  }
+  assert.strictEqual(SL.padCell('abc', 3), 'abc', 'an exact fit is untouched');
+  assert.ok(SL.padCell('abcdefgh', 4).startsWith('abc'), 'overflow truncates');
+  assert.ok(SL.padCell('abcdefgh', 4).includes('…'), 'overflow is marked');
+  assert.strictEqual(SL.dispWidth(SL.padCell('日本語プロ', 5)), 5, 'a wide overflow still lands on the column');
+});
+
+test('sessionLabel: env > project file > session_name > folder', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ccbsl-unit-label-'));
+  const proj = path.join(root, 'myproj');
+  fs.mkdirSync(path.join(proj, '.claude'), { recursive: true });
+  const prev = process.env.CCRIG_SESSION_NAME;
+  try {
+    delete process.env.CCRIG_SESSION_NAME; // the developer's own shell may export it: this test owns the var
+    assert.strictEqual(SL.sessionLabel({}, proj), 'myproj', 'folder name is the floor');
+    assert.strictEqual(SL.sessionLabel({ session_name: 'cc name' }, proj), 'cc name');
+    fs.writeFileSync(path.join(proj, '.claude', 'ccrig-name'), 'file label\nignored second line\n');
+    assert.strictEqual(SL.sessionLabel({ session_name: 'cc name' }, proj), 'file label', 'the project file wins over session_name');
+    process.env.CCRIG_SESSION_NAME = 'env label';
+    assert.strictEqual(SL.sessionLabel({ session_name: 'cc name' }, proj), 'env label', 'the env var wins over the file');
+    delete process.env.CCRIG_SESSION_NAME;
+    fs.writeFileSync(path.join(proj, '.claude', 'ccrig-name'), '\x1b[31mred\x1b[0m\n');
+    assert.ok(!SL.sessionLabel({}, proj).includes('\x1b'), 'a label from disk is sanitized');
+  } finally {
+    if (prev === undefined) delete process.env.CCRIG_SESSION_NAME; else process.env.CCRIG_SESSION_NAME = prev;
+    try { fs.rmSync(root, { recursive: true, force: true }); } catch {}
+  }
+});
+
+test('lampSupersedes: clock wins when ordered, priority wins inside 1.5s', () => {
+  const now = 1700000000000;
+  assert.ok(SL.lampSupersedes(null, { state: 'done', at: now }), 'no previous stamp -> write');
+  assert.ok(SL.lampSupersedes({ state: 'nonsense', at: now }, { state: 'done', at: now }), 'a corrupt stamp -> write');
+  assert.ok(!SL.lampSupersedes({ state: 'blocked', at: now }, { state: 'done', at: now + 200 }),
+    'a Stop 200ms after a block must not paint over the red lamp');
+  assert.ok(SL.lampSupersedes({ state: 'blocked', at: now }, { state: 'done', at: now + 2000 }),
+    'a Stop two seconds later is a real transition');
+  assert.ok(SL.lampSupersedes({ state: 'working', at: now }, { state: 'blocked', at: now + 10 }),
+    'blocked outranks working in a tie');
+  assert.ok(SL.lampSupersedes({ state: 'done', at: now }, { state: 'done', at: now + 10 }), 'equal priority refreshes');
+});
+
+test('lampFor: event state, decay, self-heal, and liveness', () => {
+  const now = 1700000000000;
+  const fresh = { ts: now - 2000 };
+  assert.strictEqual(SL.lampFor(fresh, null, now, DECAY), 'ready', 'a live session with no lamp yet (fresh, /clear, resume) is ready, not working');
+  assert.strictEqual(SL.lampFor({ ts: now - 20 * 60000 }, null, now, DECAY), 'idle', 'a stale heartbeat is idle');
+  assert.strictEqual(SL.lampFor(fresh, { state: 'working', at: now - 1000 }, now, DECAY), 'working');
+  assert.strictEqual(SL.lampFor(fresh, { state: 'blocked', at: now - 1000, tsize: 0 }, now, DECAY), 'blocked',
+    'an unknown transcript size never self-heals');
+  assert.strictEqual(SL.lampFor({ ts: now - 2000, tsize: 500 }, { state: 'blocked', at: now - 1000, tsize: 100 }, now, DECAY), 'working',
+    'the transcript grew past the prompt: the session moved on');
+  assert.strictEqual(SL.lampFor({ ts: now - 2000, tsize: 100 }, { state: 'blocked', at: now - 1000, tsize: 100 }, now, DECAY), 'blocked',
+    'the transcript did not grow: still waiting on you');
+  assert.strictEqual(SL.lampFor({ ts: now - 90 * 60000 }, { state: 'blocked', at: now - 90 * 60000, tsize: 5 }, now, DECAY), 'idle',
+    'a closed terminal cannot pin a red row forever');
+  assert.strictEqual(SL.lampFor(fresh, { state: 'done', since: now - (DECAY - 1000) }, now, DECAY), 'done', 'just inside the decay window');
+  assert.strictEqual(SL.lampFor(fresh, { state: 'done', since: now - DECAY }, now, DECAY), 'idle', 'the boundary is inclusive');
+  assert.strictEqual(SL.lampFor(fresh, { state: 'garbage', at: now }, now, DECAY), 'ready', 'an unknown state degrades, never throws');
+  assert.strictEqual(SL.lampFor(null, null, now, DECAY), 'idle', 'a missing record is idle');
+  // REGRESSION: the bar stops redrawing the moment a session finishes, so gating `done` on the
+  // 10-minute liveness window capped green at 10 minutes and made boardDecayMinutes inert.
+  assert.strictEqual(SL.lampFor({ ts: now - 11 * 60000 }, { state: 'done', since: now - 60000 }, now, DECAY), 'done',
+    'a session that finished a minute ago is green even though its heartbeat stopped 11 minutes ago');
+  assert.strictEqual(SL.lampFor({ ts: now - 11 * 60000 }, { state: 'done', since: now - 60000 }, now, 30000), 'idle',
+    'a short decay window still greys it out');
+  // a shared board dir can hold a record from a machine whose clock is ahead
+  assert.strictEqual(SL.lampFor({ ts: now + 86400000 }, null, now, DECAY), 'ready', 'a future heartbeat reads as fresh, never as negative age');
+  assert.strictEqual(SL.lampFor(fresh, { state: 'done', since: now + 86400000 }, now, DECAY), 'done', 'a future `since` does not instantly decay');
+});
+
+test('lampPings: one ping per blocked stamp, never one per poll', () => {
+  const seen = new Map();
+  const row = (sid, lampKey, at, since) => ({ sid, lampKey, lamp: { state: 'blocked', at, since: since == null ? at : since }, e: {} });
+  const blocked = [row('s1', 'blocked', 1000)];
+  assert.strictEqual(SL.lampPings(blocked, seen, true).length, 0, 'the first frame seeds silently');
+  assert.strictEqual(SL.lampPings(blocked, seen, false).length, 0, 'the same stamp does not ping again');
+  assert.strictEqual(SL.lampPings([row('s1', 'blocked', 2000)], seen, false).length, 1, 'a new stamp pings');
+  assert.strictEqual(SL.lampPings([row('s1', 'working', 2000)], seen, false).length, 0, 'leaving blocked never pings');
+  assert.strictEqual(SL.lampPings([row('s1', 'blocked', 3000)], seen, false).length, 1, 'and blocking again pings once more');
+  // REGRESSION: a second permission prompt carries `since` forward from the first, and the healed
+  // frame between them is easy for a 2s poll to miss. Keying the dedupe on `since` swallowed this ping.
+  assert.strictEqual(SL.lampPings([row('s1', 'blocked', 4000, 3000)], seen, false).length, 1,
+    'a back-to-back second prompt still pings, even with since carried forward');
+});
+
+test('winLaunch resolves both npm cmd-shim spellings (%dp0% and %~dp0) to node + cli.js', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccrig-shim-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'node_modules', 'fake'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'node_modules', 'fake', 'cli.js'), '');
+    for (const spell of ['%dp0%', '%~dp0']) {
+      const shim = path.join(dir, 'claude' + (spell === '%dp0%' ? 'A' : 'B') + '.cmd');
+      fs.writeFileSync(shim, '@ECHO off\r\nSET PATHEXT=%PATHEXT:;.JS;=;%\r\n"%_prog%"  "' + spell + '/node_modules/fake/cli.js" %*\r\n');
+      const wl = SL.winLaunch(shim);
+      assert.ok(wl, spell + ' resolved');
+      assert.strictEqual(wl.cmd, process.execPath);
+      assert.strictEqual(path.resolve(wl.pre[0]), path.join(dir, 'node_modules', 'fake', 'cli.js'));
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('parseJsonText tolerates a UTF-8 BOM', () => {
+  assert.deepStrictEqual(SL.parseJsonText('﻿{"a":1}'), { a: 1 });
+  assert.throws(() => SL.parseJsonText('{bad'));
+});
+
+test('glyphWidth: BMP emoji with emoji presentation are two cells', () => {
+  for (const ch of ['✅', '❌', '⭐', '☕', '⌛', '✨']) assert.strictEqual(SL.dispWidth(ch), 2, ch);
+  assert.strictEqual(SL.dispWidth('⬆'), 1, 'text-presentation arrows stay one cell');
+});
+
+test('httpGetText refuses a truncated body and an unframed one', async () => {
+  const net = require('net');
+  const replies = [
+    'HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n' + 'x'.repeat(40),   // cut short
+    'HTTP/1.0 200 OK\r\n\r\n' + 'y'.repeat(40),                                                // no framing
+    'HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello',                  // whole
+  ];
+  let i = 0;
+  const srv = net.createServer((c) => { c.once('data', () => { c.end(replies[i++]); }); });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const url = 'http://127.0.0.1:' + srv.address().port + '/x';
+  const get = () => new Promise((r) => SL.httpGetText(url, 0, (e, d) => r({ e, d })));
+  try {
+    for (const k of ['HTTP_PROXY', 'http_proxy']) delete process.env[k];
+    assert.match(String((await get()).e), /truncated|aborted/);
+    assert.match(String((await get()).e), /no length framing/);
+    assert.strictEqual((await get()).d, 'hello');
+  } finally { srv.close(); }
+});
+
+test('profileLabelOf: one naming rule, the same as claude-profile', () => {
+  assert.strictEqual(SL.profileLabelOf('.claude'), 'default');
+  assert.strictEqual(SL.profileLabelOf('.claude-work'), 'work');
+  assert.strictEqual(SL.profileLabelOf('claude-alt'), 'claude-alt', 'a custom dir keeps its own name, as the helpers show it');
+});
+
+test('latestTodos: reads TaskCreate / TaskUpdate when there is no TodoWrite', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccrig-tasks-'));
+  const tp = path.join(dir, 't.jsonl');
+  const use = (id, name, input) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input }] } });
+  const res = (id, text) => ({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: text }] } });
+  fs.writeFileSync(tp, [use('a', 'TaskCreate', { subject: 'write parser' }), res('a', 'Task #1 created successfully'),
+    use('b', 'TaskCreate', { subject: 'add tests' }), res('b', 'Task #2 created successfully'),
+    use('c', 'TaskCreate', { subject: 'scratch' }), res('c', 'Task #3 created successfully'),
+    use('d', 'TaskUpdate', { taskId: '1', status: 'completed' }), use('e', 'TaskUpdate', { taskId: '3', status: 'deleted' }),
+    use('f', 'TaskUpdate', { taskId: '2', status: 'in_progress' })].map((x) => JSON.stringify(x)).join('\n') + '\n');
+  try {
+    assert.deepStrictEqual(SL.latestTodos(tp, true).map((t) => [t.content, t.status]), [['write parser', 'completed'], ['add tests', 'in_progress']]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

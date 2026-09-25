@@ -30,10 +30,16 @@ that every change lands through a pull request that a maintainer approves.
      example-config-versus-defaults parity, config-key coverage, README/help flag parity).
      These keep the docs and config honest; keep them green.
 
-   The suite is hermetic (it never touches your real `~/.claude` or temp dir), and it
-   passes on Node 18, 20, and 22 (the supported floor is Node 18), on macOS, Linux, and
-   Windows. A few tests that need a POSIX shell or symlink privilege skip cleanly on
-   Windows rather than failing.
+   The suite is hermetic (it never touches your real `~/.claude` or temp dir, pops no desktop
+   notification, and makes no network call), and `.github/workflows/ci.yml` runs it on every push
+   to main and every pull request on Node 18, 20, 22 and 24 (the supported floor is Node 18), on
+   macOS, Linux, and Windows. A few tests that need a POSIX shell, git, or symlink privilege skip
+   cleanly where those are missing rather than failing.
+
+   `node .github/smoke.js` is the packaged smoke test CI also runs: it installs the tool the way users
+   do (npm pack, global install, upgrade, uninstall; the curl copy), runs the installed commands
+   through every shell Claude Code may use, and checks auto-resume and autoUpdate end to end. It uses
+   the network (npm and the live registry), so it is not part of `node --test`.
 
    **A bug fix must ship with a test:** a unit test in `test-unit.js` if the logic is
    pure, a `REGRESSION:` test in `test.js` if it's behavioral. A new feature ships with
@@ -100,9 +106,10 @@ Releases are automated by `.github/workflows/release.yml`. To cut one:
    match, and a gate enforces it), and add a `CHANGELOG.md` section for it.
 2. Commit, then `git tag vX.Y.Z && git push origin main --tags`.
 
-On the tag, the workflow tests on macOS, Windows, and Linux (including a PowerShell parse-check of
-`claude-profiles.ps1` and shellcheck of the bash helpers), then publishes to npm with **provenance**
-via **Trusted Publishing** (OIDC, no stored token) and creates a GitHub Release from the changelog.
+On the tag, the workflow checks the tag is on main, tests on macOS, Windows, and Linux (Node 18 and
+22, plus the packaged smoke test), then publishes to npm with **provenance**
+via **Trusted Publishing** (OIDC, no stored token) and creates a GitHub Release from the changelog, with `statusline.js` attached (the README's standalone
+install downloads it from `releases/latest`).
 No npm token lives in the repo or on a laptop; publish rights come from the npmjs Trusted Publisher
 configured for this repository and workflow.
 
