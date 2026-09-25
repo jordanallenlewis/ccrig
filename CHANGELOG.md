@@ -11,6 +11,107 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-09-25
+
+### Added
+- **Traffic-light session board.** `--board` now shows a lamp per session instead of a single
+  "active" string: red for a session waiting on you, yellow for working, green for just finished,
+  grey for gone quiet, with red sorted to the top. The states come from three new hooks
+  (`UserPromptSubmit`, `Notification`, `SessionEnd`) that write one small file per session, so
+  nothing new runs on the per-tool-call path. Green fades to grey after 30 minutes
+  (`"boardDecayMinutes"`).
+- **`--board --watch`**: an in-place redraw that keeps the board current, plus a desktop ping the
+  moment a session starts waiting on a human (`"boardNotify": false` to silence it). It runs in the
+  foreground and writes no pid file, so it is never a hidden daemon and `--status` / `--disarm`
+  never mistake it for an auto-resume watcher.
+- **Session labels on the board.** `/ccrig:name` writes `.claude/ccrig-name` for a project, and
+  `CCRIG_SESSION_NAME` labels a single shell's session. Claude Code's own session name and the
+  folder name are the fallbacks.
+
+### Changed
+- The lamp hooks are installed with the status line, so `--no-guardian` installs and `npm update`
+  keep them, and `--uninstall-guardian` leaves them alone. `--uninstall` removes them.
+- `--doctor` reports whether the board is on, how many records it holds, and whether the lamp hooks
+  are wired. `--options` and `--config` expose the board, its decay window, and its ping.
+- The update check reads the npm registry's latest release instead of the GitHub `main` branch, so npm
+  users are never told about a version npm cannot install yet, and a standalone `--update` downloads
+  that release's tagged file instead of whatever is on `main`.
+- **`"autoUpdate": true`** (opt-in) installs a newer release from the background daily check: npm installs
+  through `npm install -g ccrig@<version>` into their own prefix (never with sudo), standalone copies
+  through the usual validated swap.
+
+### Fixed
+- **Windows without Git Bash:** Claude Code runs commands through PowerShell there, which read the
+  installed `"node.exe" "statusline.js"` as a string, so the bar and every hook did nothing. The first
+  token is now never quoted on Windows (forward slashes; plain `node` when the path has a space).
+- **`npm update` wiped your settings:** an npm install now keeps `statusline.config.json` in
+  `~/.ccrig/`, outside the package directory npm replaces. Settings saved by an earlier npm install were
+  already lost on each update, so set them once more.
+- `npx ccrig --demo` no longer installs anything, and postinstall no longer wires a project dependency or
+  runs as root under `sudo npm install -g` (which left a root-owned `~/.claude`).
+- A command node path survives `brew upgrade node`: the node on PATH is used when it is the same binary.
+- On Windows the git segment no longer runs a `git.exe` / `git.bat` shipped inside a cloned repo (git is
+  found on PATH directly, never through a shell or the project directory).
+- A `settings.json` or `statusline.config.json` saved with a UTF-8 BOM is read instead of rejected, and a
+  config that does not parse is never overwritten by `--mode` / `--autopilot` / `--config`.
+- Auto-resume on Windows with `claudeBin` pointing at npm's `claude.cmd`: the current shim form is resolved,
+  and there is no `cmd.exe` fallback that split paths at spaces and cut the prompt at its first newline.
+- An armed auto-resume watcher now stands down after `--autopilot off` / `notify`, and `--uninstall` /
+  `--uninstall-guardian` stop it instead of leaving it to relaunch Claude at the reset.
+- Board: the green "done" lamp now lights on `--no-guardian` installs (the board has its own Stop hook),
+  an interrupted turn settles through `idle_prompt`, a prompt sent right after a Stop still shows yellow,
+  and the session-end sweep no longer deletes the lamp of a session that has waited over an hour.
+- PowerShell `claude-profile new` created nothing (`New-Item` has no `-LiteralPath`), and `claude-profile
+  run <name> <one arg>` split that argument into characters.
+- `claude-profile use default` / `run default` now unset `CLAUDE_CONFIG_DIR` instead of setting it to
+  `~/.claude`, which Claude Code treats as a separate login.
+- The README now says to run `ccrig --uninstall` before `npm uninstall -g ccrig`.
+- **Board:** a live session not prompted yet shows grey `ready` instead of yellow; an MCP URL dialog
+  lights red; the board ping on Linux survives a label starting with `-`; `--board --watch` redraws
+  cleanly in a short terminal and gives the cursor back on Ctrl+Z; `/ccrig:name` finds its label from a
+  subdirectory, reads a UTF-16 label file, and saves through the new `--name <label>` (no protected-folder
+  prompt); `--config` gains the board-ping toggle; BMP emoji such as ✅ count as two cells.
+- **Updates:** an `https://` proxy is spoken to over TLS (its password never crosses in clear); a tunneled
+  request sends the right Host port; a response with no length framing is refused; a download must pass
+  its own `--selftest` before the swap; the swap keeps the exec bit, re-wires new hooks and slash commands
+  in every profile, and `--whatsnew` then shows the new notes; a typed `--update` / `--check-update` trusts
+  the OS certificate store like the background check. SECURITY.md no longer suggests pinning a signing
+  key the official releases do not use yet.
+- **Guardian:** a watcher killed by a reboot is re-armed while the reset is still ahead; stopping a watcher
+  also stops the claude it launched; `--status` / `--disarm` cover every profile; Linux without `ps` reads
+  `/proc`; the resume prompt's "original request" skips task notifications and slash-command output; a
+  compaction near a limit is no longer told it hit one (and keeps the limit checkpoint); "auto-saved"
+  shows only when something is saved; `opusplan` never reads as a downgrade; a `HOME` ending in `/` no
+  longer disables failover; todos from the newer `TaskCreate` / `TaskUpdate` tools are read too.
+- **Install and CLI:** an npm update re-points an existing guardian at the new copy (never adds or drops
+  one); a typed `--no-guardian` really leaves just the bar; `init` reports the real autopilot mode;
+  `--uninstall-guardian --this-profile` leaves the shared config alone while another profile has the
+  guardian; a settings.json that cannot be read or parsed is reported (exit 1) instead of "nothing to
+  remove"; config commands exit 1 when the save fails; custom keep-working limits survive
+  `--keep-working on`; pnpm installs point at the stable global path and every "how to update" line names
+  the right package manager; flag typos stop the command before it runs, and `status`, `mode`, `purge`
+  and friends work as bare commands; our own path is recognised case-insensitively on Windows and macOS,
+  and a foreign `node ~/.claude/statusline.js` bar is never removed as ours; one profile spelled two ways
+  is set up once; `--doctor` flags `disableAllHooks`, checks the auto-resume target the way the relaunch
+  does (an absolute `claudeBin` passes), and suggests a repair that does not switch keep-working on;
+  `--options` lists every setting; slash-command hints render as text; one profile-naming rule everywhere.
+- **Render and privacy:** dir, model, effort and session names are stripped of terminal escapes; long branch
+  names are cut to fit; a slow repo keeps its last known git state instead of the segment vanishing; the
+  `[1m]` tag and the context fallback use the session's own window size, and effort no longer falls back
+  to settings on a model without it; a `critical` threshold below `warn` still fires; the tmp caches move to
+  a private per-user folder, guardian state is written owner-only, and rewriting settings.json keeps its
+  mode and a dotfiles symlink; a status JSON that arrives late no longer renders as an empty bar.
+- **Shell helpers:** the bash/zsh switcher enforces its advertised name charset, both helpers refuse a
+  trailing dot and ccrig's own dirs, bash/zsh list symlinked profiles, handle a trailing slash and
+  `set -u`, PowerShell `remove` no longer follows a junction out of the profile, `new` says to run
+  `ccrig init` after the first login, and `install.sh` works through a symlink and under plain `sh`.
+- **Docs and CI:** a Windows PowerShell standalone install and exact switcher lines in the README; the
+  standalone download comes from the latest release and never overwrites your own statusline.js; the
+  guardian's thresholds, background process and opt-in failover described as they are; a push/PR CI
+  matrix (macOS, Linux, Windows x Node 18-24) plus a packaged smoke test; release hardening (pinned
+  actions and npm, tag must be on main); `.gitattributes` keeps Windows checkouts LF; the suite no longer
+  pops notifications, touches the network, or depends on git being installed.
+
 ## [1.6.1] - 2026-07-21
 
 ### Fixed

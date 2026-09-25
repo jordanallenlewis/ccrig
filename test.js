@@ -59,11 +59,13 @@ function run(args, { stdin = '', env = {}, script = SCRIPT } = {}) {
   const base = { ...process.env };
   for (const k of ['NO_UPDATE_NOTIFIER', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
     'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
-    'CCBSL_UPDATE_BASE', 'CCBSL_UNATTENDED', 'CLAUDE_CONFIG_DIR']) delete base[k];
+    'CCBSL_UPDATE_BASE', 'CCBSL_UNATTENDED', 'CLAUDE_CONFIG_DIR', 'CCRIG_SESSION_NAME']) delete base[k];
   base.TMPDIR = base.TEMP = base.TMP = TESTTMP;
   // CCBSL_NO_ACT keeps the guardian from spawning real notifications / watcher / relaunch
   // processes during tests; file side effects (checkpoints, tickets) still run.
-  const merged = { ...base, COLUMNS: '120', CCBSL_NO_ACT: '1', ...env };
+  // NO_NOTIFY: no real desktop popup even from a test that re-enables act paths; GIT_TIMEOUT: a slow
+  // Windows runner must not fail a git assertion on the product's 700ms render budget
+  const merged = { ...base, COLUMNS: '120', CCBSL_NO_ACT: '1', CCBSL_NO_NOTIFY: '1', CCBSL_GIT_TIMEOUT_MS: '5000', ...env };
   // on Windows os.homedir() reads USERPROFILE, not HOME; mirror it so HOME sandboxing works there too
   if (merged.HOME) merged.USERPROFILE = merged.HOME;
   const r = spawnSync(NODE, [script, ...args], {
@@ -79,6 +81,11 @@ function render(input, { env = {}, script = SCRIPT, cols = '120' } = {}) {
 }
 function shellQuoteJs(s){return "'"+String(s).replace(/'/g,"'\\''")+"'";}
 const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
+// installed commands spell a Windows path with forward slashes (PowerShell- and Git Bash-safe)
+const cmdHasPath = (cmd, p) => cmd.includes(p) || cmd.includes(p.replace(/\\/g, '/'));
+// does an event hold one of OUR hooks with this --hook slug? (Stop carries a guardian AND a board hook)
+const hasSlug = (j, ev, slug) => (Array.isArray(j.hooks && j.hooks[ev]) ? j.hooks[ev] : [])
+  .some((g) => ((g && g.hooks) || []).some((h) => new RegExp('--hook ' + slug + '$').test(h.command || '')));
 const baseInput = (extra = {}) => ({
   model: { id: 'claude-opus-4-8[1m]', display_name: 'Opus 4.8 (1M context)' },
   effort: { level: 'high' },
@@ -410,7 +417,7 @@ test('--install wires a fresh profile and is idempotent with a backup', () => {
   const sp = path.join(sb.cfg, 'settings.json');
   const j = JSON.parse(fs.readFileSync(sp, 'utf8'));
   assert.strictEqual(j.statusLine.type, 'command');
-  assert.ok(j.statusLine.command.includes(SCRIPT));
+  assert.ok(cmdHasPath(j.statusLine.command, SCRIPT));
   assert.strictEqual(j.statusLine.refreshInterval, 2);
   const again = run(['--install'], { env });
   assert.strictEqual(again.code, 0);
@@ -423,7 +430,7 @@ test('the `init` subcommand is an alias for --install', () => {
   const r = run(['init'], { env });
   assert.strictEqual(r.code, 0);
   const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
-  assert.ok(j.statusLine && j.statusLine.command.includes(SCRIPT), 'ccrig init wired the status line');
+  assert.ok(j.statusLine && cmdHasPath(j.statusLine.command, SCRIPT), 'ccrig init wired the status line');
 });
 
 test('install writes the native /ccrig slash commands; uninstall removes them', () => {
@@ -433,7 +440,7 @@ test('install writes the native /ccrig slash commands; uninstall removes them', 
   const cdir = path.join(sb.cfg, 'commands');
   assert.ok(fs.existsSync(path.join(cdir, 'ccrig.md')), '/ccrig hub written');
   assert.ok(fs.existsSync(path.join(cdir, 'statusline-config.md')), 'legacy /statusline-config kept');
-  for (const f of ['config', 'status', 'sessions', 'doctor', 'update']) {
+  for (const f of ['config', 'status', 'sessions', 'doctor', 'update', 'name']) {
     assert.ok(fs.existsSync(path.join(cdir, 'ccrig', f + '.md')), '/ccrig:' + f + ' written');
   }
   assert.match(fs.readFileSync(path.join(cdir, 'ccrig', 'status.md'), 'utf8'), /--status/, 'the status command runs --status');
@@ -452,7 +459,7 @@ test('REGRESSION: --install wires EVERY profile, not just the active one (work +
   assert.strictEqual(r.code, 0);
   for (const dir of [sb.cfg, personal]) {
     const j = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
-    assert.ok(j.statusLine && j.statusLine.command.includes(SCRIPT), 'statusLine wired in ' + dir);
+    assert.ok(j.statusLine && cmdHasPath(j.statusLine.command, SCRIPT), 'statusLine wired in ' + dir);
     assert.ok(fs.existsSync(path.join(dir, 'commands', 'statusline-config.md')), 'slash command in ' + dir);
   }
   assert.match(r.out, /personal/, 'reports the personal profile by name');
@@ -503,10 +510,11 @@ test('--install preserves unrelated settings keys + a user hook, and wires the g
 
 test('--install --no-guardian installs the bar only (no guardian hooks)', () => {
   const sb = sandbox();
-  run(['--install', '--no-guardian'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
+  run(['--install', '--no-guardian'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, script: scriptCopy(sb.dir) });
   const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
   assert.ok(j.statusLine, 'status line wired');
-  assert.ok(!j.hooks || !j.hooks.Stop, 'no guardian hooks with --no-guardian');
+  assert.ok(!hasSlug(j, 'Stop', 'stop'), 'no guardian hooks with --no-guardian');
+  assert.ok(hasSlug(j, 'Stop', 'board-stop'), 'the board still gets its own Stop hook');
 });
 
 test('--install refuses corrupt settings.json without clobbering it', () => {
@@ -712,7 +720,8 @@ test('--config toggles a segment and saves valid JSON', () => {
 // ===========================================================================
 // git segment
 // ===========================================================================
-test('git: branch, dirty count, and ahead-of-upstream render', () => {
+const HAS_GIT = spawnSync('git', ['--version']).status === 0;
+test('git: branch, dirty count, and ahead-of-upstream render', { skip: !HAS_GIT && 'git is not installed' }, () => {
   const sb = sandbox();
   const bare = path.join(sb.dir, 'bare.git');
   const work = path.join(sb.dir, 'work');
@@ -774,7 +783,9 @@ const userEntry = (text) => ({ type: 'user', message: { role: 'user', content: t
 const asstEntry = (text) => ({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] } });
 // djb2 mirror of statusline.js strHash, so tests can seed the forecast sample file
 function strHash(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return h.toString(36); }
-function seedSamples(sid, samples) { fs.writeFileSync(path.join(TESTTMP, 'ccbsl-usage-' + strHash(sid) + '.jsonl'), samples.map((s) => JSON.stringify(s)).join('\n') + '\n'); }
+// the product keeps its tmp caches in a per-user 0700 dir under the temp dir
+const CACHE = path.join(TESTTMP, 'ccrig-' + (typeof process.getuid === 'function' ? process.getuid() : 'user'));
+function seedSamples(sid, samples) { fs.mkdirSync(CACHE, { recursive: true, mode: 0o700 }); fs.writeFileSync(path.join(CACHE, 'ccbsl-usage-' + strHash(sid) + '.jsonl'), samples.map((s) => JSON.stringify(s)).join('\n') + '\n'); }
 const hookRun = (event, payload, opts) => run(['--hook', event], { stdin: JSON.stringify(payload), ...opts });
 
 // ---- Feature 2: keep-working / anti-stop Stop hook ----
@@ -853,7 +864,7 @@ test('--status lists armed watchers; --disarm clears them; --purge wipes state',
 test('hooks tolerate garbage stdin and never block', () => {
   const sb = sandbox();
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
-  for (const ev of ['stop', 'session-start', 'pre-compact']) {
+  for (const ev of ['stop', 'session-start', 'pre-compact', 'user-prompt', 'notification', 'session-end']) {
     const r = run(['--hook', ev], { stdin: 'not json', env });
     assert.strictEqual(r.code, 0, ev + ' exits 0');
     assert.strictEqual(r.out.trim(), '', ev + ' emits nothing on garbage');
@@ -1170,7 +1181,8 @@ test('--uninstall-guardian removes only guardian hooks, keeps the status line', 
   assert.strictEqual(u.code, 0);
   const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
   assert.ok(j.statusLine, 'status line stays');
-  assert.ok(!j.hooks || !j.hooks.Stop, 'guardian Stop hook gone');
+  assert.ok(!hasSlug(j, 'Stop', 'stop'), 'guardian Stop hook gone');
+  assert.ok(hasSlug(j, 'Stop', 'board-stop'), 'the board Stop hook stays');
 });
 
 test('--uninstall removes both the status line and guardian hooks', () => {
@@ -1833,6 +1845,7 @@ test('REGRESSION: claude-profile rejects slashed/dot-dot profile names (bash + z
     const victim = path.join(path.dirname(sb.home), 'outside-victim');
     const r = spawnSync(shell, ['-c', 'source "' + sh + '"; claude-profile new "x/../../outside-victim"'], { env: { ...process.env, HOME: sb.home }, encoding: 'utf8' });
     assert.notStrictEqual(r.status, 0, shell + ': a slashed name must be rejected');
+    assert.match(r.stdout + r.stderr, /invalid profile name/, shell + ': rejected by the helper itself, not by a broken (CRLF) checkout');
     assert.ok(!fs.existsSync(victim), shell + ': nothing created outside the .claude-* namespace');
   }
 });
@@ -1962,7 +1975,7 @@ test('END-TO-END: guardian checkpoints at the limit, WAITS for the reset, then a
   const script = scriptCopy(sb.dir, { autopilot: 'resume', autopilotBuffer: 0, updateCheck: false, claudeBin: stub });
   const gd = path.join(sb.cfg, 'guardian');
   const now = Math.floor(Date.now() / 1000);
-  const resetIn = 4; // seconds until the window "resets"
+  const resetIn = 8; // seconds until the window "resets" (room for a slow Windows runner to spawn the watcher)
   const input = {
     session_id: sid, session_name: 'billing refactor', transcript_path: tp,
     workspace: { current_dir: repo, project_dir: repo },
@@ -1992,13 +2005,13 @@ test('END-TO-END: guardian checkpoints at the limit, WAITS for the reset, then a
     if (gitReady) { assert.ok(cp.git && cp.git.head, 'HEAD captured'); assert.strictEqual(cp.git.dirty, true, 'dirty tree captured'); }
 
     // the watcher is armed (an inspectable PID file) and has NOT fired yet (still before the reset)
-    for (let i = 0; i < 20 && !fs.existsSync(pidFile); i++) await sleep(100);
+    for (let i = 0; i < 60 && !fs.existsSync(pidFile); i++) await sleep(100);
     assert.ok(fs.existsSync(pidFile), 'watcher armed a PID file');
     watcherPids.push(parseInt(fs.readFileSync(pidFile, 'utf8').split('\n')[0], 10) || 0);
     assert.ok(!fs.existsSync(marker), 'the watcher must NOT relaunch before the reset (it waits in its tracks)');
 
     // 2) wait past the reset -> the watcher relaunches `claude --resume`
-    for (let i = 0; i < 75 && !fs.existsSync(marker); i++) await sleep(200);
+    for (let i = 0; i < 125 && !fs.existsSync(marker); i++) await sleep(200);
     assert.ok(fs.existsSync(marker), 'the watcher relaunched after the reset');
     const relaunch = fs.readFileSync(marker, 'utf8');
 
@@ -2222,4 +2235,762 @@ test('a resume ticket pins the owning profile so it resumes on the right account
   assert.match(ticket, /Profile: personal/, 'names the owning profile');
   assert.ok(ticket.includes('CLAUDE_CONFIG_DIR=') && ticket.includes(cfg) && ticket.includes('claude --resume tick-1'),
     'the ticket command pins CLAUDE_CONFIG_DIR to the owning profile:\n' + ticket);
+});
+
+// ===========================================================================
+// Session-board lamps (v1.7.0): hook -> state, read-time decay/self-heal, sort,
+// labels, --watch, and install/uninstall scoping.
+// ===========================================================================
+const boardOf = (sb) => path.join(sb.home, '.claude-rig-sessions');
+function seedBoard(sb, sid, rec) {
+  const d = boardOf(sb); fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(d, sid + '.json'), JSON.stringify({ sid, project: sid + 'proj', ts: Date.now(), ...rec }));
+}
+function seedLamp(sb, sid, rec) {
+  const d = boardOf(sb); fs.mkdirSync(d, { recursive: true });
+  const now = Date.now();
+  fs.writeFileSync(path.join(d, sid + '.lamp'), JSON.stringify({ v: 1, sid, at: now, since: now, ...rec }));
+}
+const readLampF = (sb, sid) => JSON.parse(fs.readFileSync(path.join(boardOf(sb), sid + '.lamp'), 'utf8'));
+// a sandbox whose script copy has the board turned on
+function boardBox(extraConfig) {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { sessionBoard: true, ...extraConfig });
+  return { sb, script, env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } };
+}
+
+test('board lamps: the hooks write nothing while the board is off', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  hookRun('user-prompt', { session_id: 'b1' }, { env });
+  hookRun('notification', { session_id: 'b1', notification_type: 'permission_prompt' }, { env });
+  assert.ok(!fs.existsSync(boardOf(sb)), 'the board is opt-in: nothing is written outside the config dir');
+});
+
+test('board lamps: each hook event maps to its state', () => {
+  const { sb, script, env } = boardBox();
+  const o = { env, script };
+
+  // stdout silence with the board ON is the load-bearing invariant: anything printed here becomes
+  // context Claude sees on UserPromptSubmit, and a non-zero exit would erase the user's prompt
+  const up = hookRun('user-prompt', { session_id: 'p1' }, o);
+  assert.strictEqual(up.out, '', 'the prompt hook prints nothing even when it writes a lamp');
+  assert.strictEqual(up.code, 0);
+  assert.strictEqual(readLampF(sb, 'p1').state, 'working', 'a prompt means working');
+  assert.strictEqual(readLampF(sb, 'p1').why, 'prompt');
+
+  hookRun('notification', { session_id: 'n1', notification_type: 'permission_prompt' }, o);
+  assert.strictEqual(readLampF(sb, 'n1').state, 'blocked', 'a permission prompt means blocked');
+  assert.strictEqual(readLampF(sb, 'n1').why, 'perms');
+  hookRun('notification', { session_id: 'n2', notification_type: 'elicitation_dialog' }, o);
+  assert.strictEqual(readLampF(sb, 'n2').why, 'form');
+  hookRun('notification', { session_id: 'n3', notification_type: 'agent_needs_input' }, o);
+  assert.strictEqual(readLampF(sb, 'n3').why, 'input');
+
+  const r = hookRun('notification', { session_id: 'n4', notification_type: 'auth_success' }, o);
+  assert.strictEqual(r.code, 0);
+  assert.strictEqual(r.out, '', 'the notification hook prints nothing');
+  assert.ok(!fs.existsSync(path.join(boardOf(sb), 'n4.lamp')), 'a notification that is not a human wait writes nothing');
+  // the payload field carrying the type is not documented, so an untyped notification must trust
+  // the installed matcher rather than silently dropping every permission prompt
+  hookRun('notification', { session_id: 'n5' }, o);
+  assert.strictEqual(readLampF(sb, 'n5').state, 'blocked', 'no type field: the matcher already filtered, so trust it');
+  assert.strictEqual(readLampF(sb, 'n5').why, 'input');
+  hookRun('notification', { session_id: 'n6', notificationType: 'permission_prompt' }, o);
+  assert.strictEqual(readLampF(sb, 'n6').why, 'perms', 'the camelCase spelling is accepted too');
+
+  hookRun('stop', { session_id: 's1', transcript_path: transcript(sb.dir, [asstEntry('all set')]) }, o);
+  assert.strictEqual(readLampF(sb, 's1').state, 'done', 'a plain stop means done');
+  hookRun('stop', { session_id: 's2', transcript_path: transcript(sb.dir, [asstEntry('working on it')]), background_tasks: [{ id: 't1' }] }, o);
+  assert.strictEqual(readLampF(sb, 's2').state, 'working', 'a stop parked on background work is still working');
+
+  seedBoard(sb, 'e1', {});
+  seedLamp(sb, 'e1', { state: 'done' });
+  assert.strictEqual(hookRun('session-end', { session_id: 'e1', reason: 'clear' }, o).out, '', 'the session-end hook prints nothing');
+  assert.ok(!fs.existsSync(path.join(boardOf(sb), 'e1.lamp')), 'session end drops the lamp');
+  assert.ok(!fs.existsSync(path.join(boardOf(sb), 'e1.json')), 'session end drops the record, so no ghost row');
+});
+
+test('board lamps: keep-working forces the lamp back to working', () => {
+  const { sb, script, env } = boardBox({ keepWorking: true });
+  const tp = transcript(sb.dir, [todoEntry([{ content: 'B', status: 'pending' }])]);
+  const r = hookRun('stop', { session_id: 'k1', transcript_path: tp }, { env, script });
+  assert.match(r.out, /"decision":"block"/, 'keep-working still refuses the stop');
+  assert.strictEqual(readLampF(sb, 'k1').state, 'working', 'the forced continue corrects our own done stamp');
+  assert.strictEqual(readLampF(sb, 'k1').why, 'todos');
+});
+
+test('REGRESSION: a late Stop cannot paint over a live blocked lamp', () => {
+  const { sb, script, env } = boardBox();
+  const tp = transcript(sb.dir, [asstEntry('done')]);
+  // stamped slightly in the future, so a slow spawn cannot push the Stop past the 1.5s race window
+  const soon = Date.now() + 1000;
+  seedLamp(sb, 'r1', { state: 'blocked', tsize: 10, why: 'perms', at: soon, since: soon });
+  hookRun('stop', { session_id: 'r1', transcript_path: tp }, { env, script });
+  assert.strictEqual(readLampF(sb, 'r1').state, 'blocked', 'a Stop that lost the race must not clear the red lamp');
+  const old = Date.now() - 4000;
+  seedLamp(sb, 'r1', { state: 'blocked', tsize: 10, why: 'perms', at: old, since: old });
+  hookRun('stop', { session_id: 'r1', transcript_path: tp }, { env, script });
+  assert.strictEqual(readLampF(sb, 'r1').state, 'done', 'a Stop seconds later is a real transition');
+});
+
+test('board lamps: the next prompt clears blocked', () => {
+  const { sb, script, env } = boardBox();
+  const old = Date.now() - 4000;
+  seedLamp(sb, 'u1', { state: 'blocked', tsize: 10, at: old, since: old });
+  hookRun('user-prompt', { session_id: 'u1' }, { env, script });
+  assert.strictEqual(readLampF(sb, 'u1').state, 'working');
+});
+
+test('--board sorts blocked first, then done, then working, then idle', () => {
+  const { sb, script, env } = boardBox();
+  seedBoard(sb, 'aaa', {}); seedLamp(sb, 'aaa', { state: 'working' });
+  seedBoard(sb, 'bbb', {}); seedLamp(sb, 'bbb', { state: 'blocked', tsize: 5 });
+  seedBoard(sb, 'ccc', {}); seedLamp(sb, 'ccc', { state: 'done' });
+  seedBoard(sb, 'ddd', { ts: Date.now() - 20 * 60000 });
+  const out = strip(run(['--board'], { env, script }).out);
+  for (const w of ['blocked', 'done', 'working', 'idle']) assert.match(out, new RegExp(w), w + ' row rendered');
+  assert.ok(out.indexOf('bbbproj') < out.indexOf('cccproj'), 'blocked sorts above done');
+  assert.ok(out.indexOf('cccproj') < out.indexOf('aaaproj'), 'done sorts above working');
+  assert.ok(out.indexOf('aaaproj') < out.indexOf('dddproj'), 'working sorts above idle');
+  assert.match(out, /3 live sessions, 1 idle, 1 waiting on you\./);
+});
+
+test('--board decays a finished session to grey', () => {
+  const { sb, script, env } = boardBox();
+  seedBoard(sb, 'g1', {});
+  seedLamp(sb, 'g1', { state: 'done', since: Date.now() - 29 * 60000 });
+  assert.match(strip(run(['--board'], { env, script }).out), /done/, 'inside the window it is still green');
+  seedLamp(sb, 'g1', { state: 'done', since: Date.now() - 31 * 60000 });
+  assert.match(strip(run(['--board'], { env, script }).out), /idle/, 'past the window it goes grey');
+
+  const fast = boardBox({ boardDecayMinutes: 1 });
+  seedBoard(fast.sb, 'g2', {});
+  seedLamp(fast.sb, 'g2', { state: 'done', since: Date.now() - 90000 });
+  assert.match(strip(run(['--board'], { env: fast.env, script: fast.script }).out), /idle/, 'boardDecayMinutes is honored');
+});
+
+test('--board self-heals a blocked lamp once the transcript grows', () => {
+  const { sb, script, env } = boardBox();
+  seedBoard(sb, 'h1', { tsize: 500 });
+  seedLamp(sb, 'h1', { state: 'blocked', tsize: 100 });
+  assert.match(strip(run(['--board'], { env, script }).out), /working/, 'a prompt you answered stops showing red');
+  seedBoard(sb, 'h1', { tsize: 100 });
+  assert.match(strip(run(['--board'], { env, script }).out), /blocked/, 'a prompt still waiting stays red');
+});
+
+test('--board reports a session that stopped refreshing as idle', () => {
+  const { sb, script, env } = boardBox();
+  seedBoard(sb, 'i1', { ts: Date.now() - 20 * 60000 });
+  seedLamp(sb, 'i1', { state: 'working' });
+  const out = strip(run(['--board'], { env, script }).out);
+  assert.match(out, /idle/);
+  assert.match(out, /0 live sessions, 1 idle\./);
+});
+
+test('session label precedence reaches the board', () => {
+  const { sb, script, env } = boardBox();
+  const proj = path.join(sb.dir, 'labelproj');
+  fs.mkdirSync(path.join(proj, '.claude'), { recursive: true });
+  const input = baseInput({ session_id: 'L1', session_name: 'cc name', transcript_path: transcript(sb.dir, [asstEntry('x')]),
+    workspace: { current_dir: proj, project_dir: proj } });
+  const board = () => strip(run(['--board'], { env, script }).out);
+
+  render(input, { env, script });
+  assert.match(board(), /cc name/, "Claude Code's own session name is used when nothing overrides it");
+
+  fs.writeFileSync(path.join(proj, '.claude', 'ccrig-name'), 'file label\n');
+  render(input, { env, script });
+  assert.match(board(), /file label/, 'the project file overrides the session name');
+
+  render(input, { env: { ...env, CCRIG_SESSION_NAME: 'env label' }, script });
+  assert.match(board(), /env label/, 'the env var overrides the file');
+
+  fs.unlinkSync(path.join(proj, '.claude', 'ccrig-name'));
+  delete input.session_name;
+  render(input, { env, script });
+  assert.match(board(), /labelproj/, 'the folder name is the floor');
+});
+
+test('REGRESSION: a label cannot inject terminal escapes into --board', () => {
+  const { sb, script, env } = boardBox();
+  const proj = path.join(sb.dir, 'evilproj');
+  fs.mkdirSync(path.join(proj, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(proj, '.claude', 'ccrig-name'), '\x1b[31mRED\x1b[0m\n');
+  render(baseInput({ session_id: 'X1', transcript_path: transcript(sb.dir, [asstEntry('x')]),
+    workspace: { current_dir: proj, project_dir: proj } }), { env, script });
+  seedBoard(sb, 'X2', { project: '\x1b]0;pwned\x07x', name: '\x9b31mB' });
+  const out = run(['--board'], { env, script }).out;
+  assert.ok(!out.includes('\x1b[31m'), 'no color sequence from a label');
+  assert.ok(!out.includes('\x1b]0;'), 'no window-title sequence from a record');
+  assert.ok(!out.includes('\x9b'), 'no 8-bit CSI from a record');
+  assert.match(strip(out), /RED/, 'the text itself still shows, just inert');
+});
+
+test('--board survives a malformed lamp and prunes a malformed record', () => {
+  const { sb, script, env } = boardBox();
+  seedBoard(sb, 'm1', {});
+  fs.writeFileSync(path.join(boardOf(sb), 'm1.lamp'), 'not json');
+  const r = run(['--board'], { env, script });
+  assert.strictEqual(r.code, 0);
+  assert.match(strip(r.out), /ready/, 'an unreadable lamp degrades to the pre-lamp reading');
+  fs.writeFileSync(path.join(boardOf(sb), 'm2.json'), 'not json');
+  assert.strictEqual(run(['--board'], { env, script }).code, 0);
+  assert.ok(!fs.existsSync(path.join(boardOf(sb), 'm2.json')), 'an unreadable record is pruned');
+});
+
+test('--board prunes an orphaned lamp', () => {
+  const { sb, script, env } = boardBox();
+  seedLamp(sb, 'o1', { state: 'done' });
+  seedLamp(sb, 'o2', { state: 'done' });
+  const old = new Date(Date.now() - 2 * 3600000);
+  fs.utimesSync(path.join(boardOf(sb), 'o1.lamp'), old, old);
+  run(['--board'], { env, script });
+  assert.ok(!fs.existsSync(path.join(boardOf(sb), 'o1.lamp')), 'a lamp with no session and no recent write is dropped');
+  assert.ok(fs.existsSync(path.join(boardOf(sb), 'o2.lamp')), 'a fresh orphan is kept (its record may land next render)');
+});
+
+test('--board --watch redraws, stays plain on a pipe, and exits clean', () => {
+  const { sb, script, env } = boardBox();
+  seedBoard(sb, 'w1', {}); seedLamp(sb, 'w1', { state: 'blocked', tsize: 5 });
+  const r = run(['--board', '--watch'], { env: { ...env, CCBSL_BOARD_TICKS: '2', CCBSL_BOARD_INTERVAL_MS: '50' }, script });
+  assert.strictEqual(r.code, 0, 'the watch loop exits 0');
+  assert.strictEqual(r.out.split('session board').length - 1, 2, 'two frames were drawn');
+  assert.ok(!r.out.includes('\x1b['), 'a pipe gets no cursor or color sequences');
+});
+
+test('--board --watch is not an auto-resume watcher', () => {
+  const { sb, script, env } = boardBox();
+  seedBoard(sb, 'w2', {});
+  run(['--board', '--watch'], { env: { ...env, CCBSL_BOARD_TICKS: '1', CCBSL_BOARD_INTERVAL_MS: '50' }, script });
+  let files = []; try { files = fs.readdirSync(path.join(sb.cfg, 'guardian')); } catch {}
+  assert.ok(!files.some((f) => f.endsWith('.watch.pid')), 'the board watcher writes no pid file');
+  assert.match(run(['--status'], { env, script }).out, /No auto-resume watchers/, '--status still reports nothing armed');
+});
+
+test('--install wires the board lamp hooks even with --no-guardian', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  run(['--install', '--no-guardian'], { env, script: scriptCopy(sb.dir) });
+  const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  // pin the event -> slug mapping, not just "some --hook is here": transposing two slugs in the
+  // table would otherwise ship UserPromptSubmit running the session-end handler, which deletes the row
+  for (const [ev, slug] of [['UserPromptSubmit', 'user-prompt'], ['Notification', 'notification'], ['SessionEnd', 'session-end']]) {
+    assert.ok(Array.isArray(j.hooks[ev]), ev + ' wired');
+    assert.match(j.hooks[ev][0].hooks[0].command, new RegExp('--hook ' + slug + '$'), ev + ' runs --hook ' + slug);
+  }
+  assert.ok(!hasSlug(j, 'Stop', 'stop'), 'the guardian is still off with --no-guardian');
+  assert.ok(hasSlug(j, 'Stop', 'board-stop'), 'the green done lamp needs its own Stop hook');
+  assert.strictEqual(j.hooks.Notification[0].matcher, 'permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|idle_prompt',
+    'the Notification hook only fires for a human wait');
+  assert.strictEqual(j.hooks.UserPromptSubmit[0].hooks[0].timeout, 5, 'the prompt-path hook is time-bounded');
+  assert.ok(!('timeout' in j.hooks.SessionEnd[0].hooks[0]), 'no timeout on SessionEnd: it would raise the exit budget');
+});
+
+// how many of OUR hook entries an event holds, counted per hook rather than per group
+const ourHookCount = (j, ev) => (Array.isArray(j.hooks && j.hooks[ev]) ? j.hooks[ev] : [])
+  .reduce((a, g) => a + ((g && g.hooks) || []).filter((h) => (h.command || '').includes('--hook')).length, 0);
+const BOARD_HOOK_EVENTS = ['UserPromptSubmit', 'Notification', 'SessionEnd'];
+const GUARD_HOOK_EVENTS = ['Stop', 'SessionStart', 'PreCompact'];
+
+test('hooks stay at one entry per event through installs in any order', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  // the orders a real user hits: a plain install, an update's --no-guardian re-run, a guardian opt-in
+  const script = scriptCopy(sb.dir);
+  for (const args of [['--install'], ['--install'], ['--install-guardian'], ['--install', '--no-guardian'], ['--install-guardian'], ['--install']]) {
+    run(args, { env: args.includes('--no-guardian') ? { ...env, CCBSL_REFRESH: '1' } : env, script }); // an update re-runs in refresh mode
+  }
+  const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  for (const ev of [...BOARD_HOOK_EVENTS, ...GUARD_HOOK_EVENTS]) {
+    assert.strictEqual(ourHookCount(j, ev), ev === 'Stop' ? 2 : 1, ev + ' is wired exactly once per group, not once per install');
+  }
+});
+
+test('--uninstall-guardian keeps the board lamps; --uninstall removes them', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  run(['--install'], { env });
+  run(['--uninstall-guardian'], { env });
+  let j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  assert.ok(!hasSlug(j, 'Stop', 'stop'), 'the guardian hook is gone');
+  assert.ok(Array.isArray(j.hooks.UserPromptSubmit), 'removing the guardian does not take the board with it');
+  const r = run(['--uninstall'], { env });
+  assert.match(r.out, /session-board hook/, 'the uninstall says what it removed');
+  j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  for (const ev of ['UserPromptSubmit', 'Notification', 'SessionEnd', 'Stop', 'SessionStart', 'PreCompact']) {
+    assert.ok(!j.hooks || !j.hooks[ev], 'a full uninstall leaves no ' + ev + ' hook behind');
+  }
+});
+
+test('a user hook in every event we touch survives install and uninstall byte for byte', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const seed = {};
+  for (const ev of [...BOARD_HOOK_EVENTS, ...GUARD_HOOK_EVENTS]) seed[ev] = [{ hooks: [{ type: 'command', command: 'echo mine-' + ev }] }];
+  const before = JSON.stringify(seed);
+  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), JSON.stringify({ hooks: seed }));
+  run(['--install'], { env });
+  const mid = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  for (const ev of [...BOARD_HOOK_EVENTS, ...GUARD_HOOK_EVENTS]) {
+    assert.match(JSON.stringify(mid.hooks[ev]), new RegExp('echo mine-' + ev), 'install keeps the user hook in ' + ev);
+    assert.strictEqual(ourHookCount(mid, ev), ev === 'Stop' ? 2 : 1, 'and adds exactly one of ours per group to ' + ev);
+  }
+  run(['--uninstall'], { env });
+  const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  assert.strictEqual(JSON.stringify(j.hooks), before, 'uninstall leaves the user hooks exactly as they were');
+});
+
+test('--install and --uninstall survive a settings.json whose hooks value is not an object', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), JSON.stringify({ hooks: ['nonsense'] }));
+  assert.strictEqual(run(['--install'], { env }).code, 0, 'install does not crash');
+  assert.strictEqual(run(['--uninstall'], { env }).code, 0, 'uninstall does not crash');
+});
+
+test('--options and --doctor report the session board', () => {
+  const { script, env } = boardBox();
+  const o = run(['--options'], { env, script }).out;
+  assert.match(o, /session board:\s+on/);
+  assert.match(o, /done decay:\s+30m/);
+  assert.match(o, /blocked ping:\s+on/);
+  run(['--install'], { env, script });
+  const d = run(['--doctor'], { env, script }).out;
+  assert.match(d, /session board lamps wired/);
+});
+
+test('--purge clears the board records and lamps', () => {
+  const { sb, script, env } = boardBox();
+  seedBoard(sb, 'z1', {}); seedLamp(sb, 'z1', { state: 'done' });
+  run(['--purge'], { env, script });
+  assert.ok(!fs.existsSync(boardOf(sb)), 'purge takes the whole board dir');
+});
+
+test('--board keeps a finished session green past its last heartbeat', () => {
+  const { sb, script, env } = boardBox();
+  // REGRESSION: the bar stops redrawing when the session finishes, so gating the green lamp on the
+  // 10-minute liveness window made boardDecayMinutes inert for every value above 10.
+  seedBoard(sb, 'd1', { ts: Date.now() - 11 * 60000 });
+  seedLamp(sb, 'd1', { state: 'done', since: Date.now() - 60000 });
+  assert.match(strip(run(['--board'], { env, script }).out), /done/, 'a session that finished a minute ago is still green');
+});
+
+test('--board is not widened by a record from a machine whose clock is ahead', () => {
+  const { sb, script, env } = boardBox();
+  seedBoard(sb, 'f1', { ts: Date.now() + 365 * 86400000 });
+  const out = strip(run(['--board'], { env, script }).out);
+  assert.ok(!/-\d+s ago/.test(out), 'no negative age');
+  for (const line of out.split('\n')) assert.ok(line.length <= 89, 'no row exceeds the frame width: ' + JSON.stringify(line));
+  // clamping the age must not make a skewed record immortal: file mtime is the backstop
+  const old = new Date(Date.now() - 2 * 3600000);
+  fs.utimesSync(path.join(boardOf(sb), 'f1.json'), old, old);
+  run(['--board'], { env, script });
+  assert.ok(!fs.existsSync(path.join(boardOf(sb), 'f1.json')), 'a record no session has rewritten in an hour is pruned');
+});
+
+test('--doctor flags a session board path that is not a directory', () => {
+  const { sb, script, env } = boardBox();
+  fs.writeFileSync(boardOf(sb), 'not a directory');
+  const r = run(['--doctor'], { env, script });
+  assert.match(r.out, /not a directory/, 'a plain file there makes every board write fail, so say so');
+  assert.doesNotMatch(r.out, /session board: on, 0 record/, 'never report a healthy empty board for a broken path');
+});
+
+test('--doctor names the wired board events as wired, not as missing', () => {
+  const { sb, script, env } = boardBox();
+  run(['--install'], { env, script });
+  const sp = path.join(sb.cfg, 'settings.json');
+  const j = JSON.parse(fs.readFileSync(sp, 'utf8'));
+  delete j.hooks.UserPromptSubmit;
+  fs.writeFileSync(sp, JSON.stringify(j));
+  const out = run(['--doctor'], { env, script }).out;
+  assert.match(out, /partly wired \(Notification, SessionEnd, Stop\)/, 'the list names what IS wired');
+  assert.doesNotMatch(out, /not wired \(Notification/, 'the list must never read as naming the missing ones');
+});
+
+// ===========================================================================
+// 1.7.0 cross-OS audit regressions
+// ===========================================================================
+test('REGRESSION: --install accepts a settings.json saved with a UTF-8 BOM and CRLF, keeping its keys', () => {
+  const sb = sandbox();
+  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), '﻿{\r\n  "model": "opus",\r\n  "env": { "FOO": "bar" }\r\n}\r\n');
+  const r = run(['--install'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
+  assert.strictEqual(r.code, 0, r.out);
+  const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  assert.strictEqual(j.model, 'opus');
+  assert.strictEqual(j.env.FOO, 'bar');
+  assert.ok(j.statusLine && j.statusLine.command, 'status line wired');
+});
+
+test('REGRESSION: a BOM-prefixed statusline.config.json is honored, not silently ignored', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir);
+  fs.writeFileSync(path.join(sb.dir, 'statusline.config.json'), '﻿{ "mode": "minimal" }');
+  const r = run(['--options'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, script });
+  assert.match(r.out, /mode\s*[:=]?\s*minimal/);
+});
+
+test('REGRESSION: a config that does not parse is never overwritten by a save', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir);
+  const cp = path.join(sb.dir, 'statusline.config.json');
+  fs.writeFileSync(cp, '{ "autopilot": "off", }');
+  const r = run(['--mode', 'minimal'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, script });
+  assert.match(r.out, /not valid JSON/);
+  assert.strictEqual(fs.readFileSync(cp, 'utf8'), '{ "autopilot": "off", }', 'the hand-edited file is untouched');
+});
+
+test('REGRESSION: an npm install keeps its config in ~/.ccrig, where npm update cannot delete it', () => {
+  const sb = sandbox();
+  const pkg = path.join(sb.dir, 'prefix', 'lib', 'node_modules', 'ccrig');
+  fs.mkdirSync(pkg, { recursive: true });
+  const script = path.join(pkg, 'statusline.js');
+  fs.copyFileSync(SCRIPT, script);
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const r = run(['--mode', 'minimal'], { env, script });
+  assert.strictEqual(r.code, 0, r.out);
+  const home = path.join(sb.home, '.ccrig', 'statusline.config.json');
+  assert.strictEqual(JSON.parse(fs.readFileSync(home, 'utf8')).mode, 'minimal');
+  assert.ok(!fs.existsSync(path.join(pkg, 'statusline.config.json')), 'nothing saved inside the package dir');
+  // a config still sitting beside the script (from an older version) is adopted when ~/.ccrig has none
+  fs.unlinkSync(home);
+  fs.writeFileSync(path.join(pkg, 'statusline.config.json'), JSON.stringify({ mode: 'expanded' }));
+  assert.match(run(['--options'], { env, script }).out, /mode\s*[:=]?\s*expanded/);
+  assert.strictEqual(JSON.parse(fs.readFileSync(home, 'utf8')).mode, 'expanded', 'and moved out of the package dir');
+});
+
+test('REGRESSION: the git segment never runs a git planted in the project (relative PATH entry)', { skip: process.platform === 'win32' && 'POSIX stub' }, () => {
+  const sb = sandbox();
+  const repo = path.join(sb.dir, 'repo');
+  fs.mkdirSync(repo);
+  const marker = path.join(sb.dir, 'PWNED');
+  fs.writeFileSync(path.join(repo, 'git'), '#!/bin/sh\ntouch "' + marker + '"\n'); fs.chmodSync(path.join(repo, 'git'), 0o755);
+  render(baseInput({ workspace: { current_dir: repo, project_dir: repo } }), { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, PATH: '.' + path.delimiter + process.env.PATH } });
+  assert.ok(!fs.existsSync(marker), 'a ./git in the project must not run');
+});
+
+test('REGRESSION: an armed watcher stands down once autopilot is turned off', () => {
+  const sb = sandbox();
+  const sid = 'standdown-off-1';
+  const script = scriptCopy(sb.dir, { autopilot: 'off' });
+  const gd = path.join(sb.cfg, 'guardian'); fs.mkdirSync(gd, { recursive: true });
+  fs.writeFileSync(path.join(gd, sid + '.checkpoint.json'), JSON.stringify({ session_id: sid, cwd: sb.dir, window: 'session', resets_at: Math.floor(Date.now() / 1000) + 3600 }));
+  const r = run(['--watch', sid], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCBSL_WATCH_INTERVAL_MS: '50' }, script });
+  assert.strictEqual(r.code, 0);
+  assert.match(fs.readFileSync(path.join(gd, 'logs', sid + '.log'), 'utf8'), /autopilot is now "off"; standing down/);
+  assert.ok(fs.existsSync(path.join(gd, sid + '.checkpoint.json')), 'the checkpoint stays for a manual resume');
+});
+
+test('REGRESSION: board lamps with --no-guardian: Stop turns green, idle settles working, a quick prompt wins', () => {
+  const { sb, script, env } = boardBox();
+  run(['--install', '--no-guardian'], { env, script });
+  hookRun('user-prompt', { session_id: 'b1' }, { env, script });
+  hookRun('board-stop', { session_id: 'b1' }, { env, script });
+  assert.strictEqual(readLampF(sb, 'b1').state, 'done', 'the board Stop hook lights green without the guardian');
+  hookRun('user-prompt', { session_id: 'b1' }, { env, script }); // within 1.5s of the Stop
+  assert.strictEqual(readLampF(sb, 'b1').state, 'working', 'a prompt right after a Stop still means working');
+  hookRun('notification', { session_id: 'b1', notification_type: 'idle_prompt' }, { env, script });
+  assert.strictEqual(readLampF(sb, 'b1').state, 'done', 'idle_prompt settles an interrupted turn');
+  seedLamp(sb, 'b2', { state: 'blocked', why: 'perms' });
+  hookRun('notification', { session_id: 'b2', notification_type: 'idle_prompt' }, { env, script });
+  assert.strictEqual(readLampF(sb, 'b2').state, 'blocked', 'idle never clears a real wait on you');
+});
+
+test('REGRESSION: the session-end sweep keeps an hour-old lamp whose session still heartbeats', () => {
+  const { sb, script, env } = boardBox();
+  const d = boardOf(sb);
+  seedLamp(sb, 'live1', { state: 'blocked', why: 'perms' });
+  fs.writeFileSync(path.join(d, 'live1.json'), '{}');
+  seedLamp(sb, 'dead1', { state: 'done' });
+  const old = (Date.now() - 2 * 3600 * 1000) / 1000;
+  fs.utimesSync(path.join(d, 'live1.lamp'), old, old);
+  fs.utimesSync(path.join(d, 'dead1.lamp'), old, old);
+  hookRun('session-end', { session_id: 'other' }, { env, script });
+  assert.ok(fs.existsSync(path.join(d, 'live1.lamp')), 'a live session keeps its red lamp');
+  assert.ok(!fs.existsSync(path.join(d, 'dead1.lamp')), 'an orphaned stale lamp is swept');
+});
+
+test('REGRESSION: postinstall wires only a real global install, never npx or a project dependency', () => {
+  for (const [rel, globalFlag, expectWired] of [
+    [['_npx', 'abc123', 'node_modules', 'ccrig'], '', false],
+    [['proj', 'node_modules', 'ccrig'], '', false],
+    [['prefix', 'lib', 'node_modules', 'ccrig'], 'true', true],
+  ]) {
+    const sb = sandbox();
+    const pkg = path.join(sb.dir, ...rel);
+    fs.mkdirSync(pkg, { recursive: true });
+    fs.copyFileSync(SCRIPT, path.join(pkg, 'statusline.js'));
+    fs.copyFileSync(path.join(__dirname, 'postinstall.js'), path.join(pkg, 'postinstall.js'));
+    const r = run([], { script: path.join(pkg, 'postinstall.js'), env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, npm_config_global: globalFlag, npm_command: 'install' } });
+    assert.strictEqual(r.code, 0);
+    assert.strictEqual(fs.existsSync(path.join(sb.cfg, 'settings.json')), expectWired && !(process.getuid && process.getuid() === 0), rel.join('/'));
+  }
+});
+
+test('REGRESSION: installed commands put an unquoted program first on Windows (PowerShell reads a quoted one as a string)', () => {
+  const sb = sandbox();
+  const pre = path.join(sb.dir, 'win32.js');
+  fs.writeFileSync(pre, "Object.defineProperty(process, 'platform', { value: 'win32' });\n");
+  const r = spawnSync(NODE, ['-r', pre, SCRIPT, '--install'], { encoding: 'utf8', env: { ...process.env, CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, USERPROFILE: sb.home, CCBSL_NO_ACT: '1', TMPDIR: TESTTMP } });
+  assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+  const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  const cmds = [j.statusLine.command];
+  for (const groups of Object.values(j.hooks)) for (const g of groups) for (const h of g.hooks) cmds.push(h.command);
+  for (const c of cmds) {
+    assert.doesNotMatch(c, /^"/, 'first token unquoted: ' + c);
+    assert.doesNotMatch(c, /\\/, 'forward slashes only: ' + c);
+    assert.match(c, /^\S+ "[^"]+statusline\.js"( --hook [a-z-]+)?$/, c);
+  }
+});
+
+test('REGRESSION: claude-profile use default unsets CLAUDE_CONFIG_DIR instead of exporting ~/.claude (bash + zsh)', { skip: _posixShells.length === 0 && 'no POSIX shell (bash/zsh) on this host' }, () => {
+  const sb = sandbox();
+  const shp = path.join(__dirname, 'claude-profiles.sh');
+  for (const sh of _posixShells) {
+    const r = spawnSync(sh, ['-c', '. "$1" && claude-profile use default >/dev/null && echo "[${CLAUDE_CONFIG_DIR-unset}]"', 'x', shp], { encoding: 'utf8', env: { ...process.env, HOME: sb.home, CLAUDE_CONFIG_DIR: '/elsewhere' } });
+    assert.match(r.stdout, /\[unset\]/, sh + ': ' + r.stdout + r.stderr);
+  }
+});
+
+// a release laid out the way production serves it: the registry's `latest` JSON + the tagged raw files
+function releaseMirror(dir, version) {
+  const reg = path.join(dir, 'registry-latest.json');
+  fs.writeFileSync(reg, JSON.stringify({ name: 'ccrig', version }));
+  const tag = path.join(dir, 'raw', 'v' + version); fs.mkdirSync(tag, { recursive: true });
+  fs.writeFileSync(path.join(tag, 'statusline.js'), fs.readFileSync(SCRIPT, 'utf8').replace(/const VERSION = '[^']+'/, "const VERSION = '" + version + "'"));
+  fs.writeFileSync(path.join(tag, 'CHANGELOG.md'), '## [' + version + '] - 2026-09-25\n\n### Fixed\n- a thing\n');
+  return { CCBSL_REGISTRY_URL: reg, CCBSL_RELEASE_BASE: path.join(dir, 'raw') };
+}
+
+test('update source: the registry release decides, and --update downloads that tag (not main)', () => {
+  const sb = sandbox();
+  const inst = path.join(sb.dir, 'inst'); fs.mkdirSync(inst);
+  const script = path.join(inst, 'statusline.js'); fs.copyFileSync(SCRIPT, script);
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, ...releaseMirror(sb.dir, '9.9.9') };
+  assert.match(run(['--check-update'], { env, script }).out, /newer version is ready: v9\.9\.9/);
+  const r = run(['--update'], { env, script });
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(fs.readFileSync(script, 'utf8'), /const VERSION = '9\.9\.9'/);
+});
+
+test('update source: a tagged file whose VERSION disagrees with the release is refused', () => {
+  const sb = sandbox();
+  const inst = path.join(sb.dir, 'inst'); fs.mkdirSync(inst);
+  const script = path.join(inst, 'statusline.js'); fs.copyFileSync(SCRIPT, script);
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, ...releaseMirror(sb.dir, '9.9.9') };
+  fs.writeFileSync(path.join(sb.dir, 'registry-latest.json'), JSON.stringify({ version: '9.9.8' }));
+  fs.renameSync(path.join(sb.dir, 'raw', 'v9.9.9'), path.join(sb.dir, 'raw', 'v9.9.8'));
+  const before = fs.readFileSync(script, 'utf8');
+  const r = run(['--update'], { env, script });
+  assert.strictEqual(r.code, 1);
+  assert.match(r.out, /says v9\.9\.9 but the release is v9\.9\.8/);
+  assert.strictEqual(fs.readFileSync(script, 'utf8'), before);
+});
+
+test('autoUpdate: only the background check applies a release, and only when opted in', () => {
+  const sb = sandbox();
+  const inst = path.join(sb.dir, 'inst'); fs.mkdirSync(inst);
+  const script = path.join(inst, 'statusline.js'); fs.copyFileSync(SCRIPT, script);
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, ...releaseMirror(sb.dir, '9.9.9') };
+  run(['--check-update'], { env: { ...env, CCBSL_BG_CHECK: '1' }, script });
+  assert.doesNotMatch(fs.readFileSync(script, 'utf8'), /9\.9\.9/, 'off by default: nothing applied');
+  fs.writeFileSync(path.join(inst, 'statusline.config.json'), JSON.stringify({ autoUpdate: true }));
+  run(['--check-update'], { env, script });
+  assert.doesNotMatch(fs.readFileSync(script, 'utf8'), /9\.9\.9/, 'a --check-update you typed never applies');
+  const r = run(['--check-update'], { env: { ...env, CCBSL_BG_CHECK: '1' }, script });
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(fs.readFileSync(script, 'utf8'), /const VERSION = '9\.9\.9'/, 'the background check applied it');
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(sb.cfg, '.ccbsl-update.json'), 'utf8')).current, '9.9.9');
+});
+
+test('REGRESSION: board label file is found at the project root and decoded from UTF-16; URL dialogs light red', () => {
+  const { sb, script, env } = boardBox();
+  const root = path.join(sb.dir, 'proj'); const sub = path.join(root, 'pkg', 'api');
+  fs.mkdirSync(path.join(root, '.claude'), { recursive: true }); fs.mkdirSync(sub, { recursive: true });
+  fs.writeFileSync(path.join(root, '.claude', 'ccrig-name'), Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from('billing\r\n', 'utf16le')]));
+  render(baseInput({ session_id: 'lbl1', workspace: { current_dir: sub, project_dir: root } }), { env, script });
+  assert.match(strip(run(['--board'], { env, script }).out), /billing /, 'label from the root, UTF-16LE decoded');
+  hookRun('notification', { session_id: 'lbl1', notification_type: 'elicitation_url_dialog' }, { env, script });
+  assert.strictEqual(readLampF(sb, 'lbl1').why, 'url');
+  const off = run(['--board'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } }).out;
+  for (const l of strip(off).split('\n')) assert.ok(l.length <= 89, 'the board-off notice fits the in-place width: ' + l);
+});
+
+test('REGRESSION: a standalone --update keeps the exec bit, re-wires new hooks, and --whatsnew shows the new notes', () => {
+  const sb = sandbox();
+  const inst = path.join(sb.cfg); // the curl install lives in ~/.claude
+  const script = path.join(inst, 'statusline.js'); fs.copyFileSync(SCRIPT, script);
+  if (process.platform !== 'win32') fs.chmodSync(script, 0o755);
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, ...releaseMirror(sb.dir, '9.9.9') };
+  run(['--install'], { env, script });
+  const sp = path.join(sb.cfg, 'settings.json');
+  const j = JSON.parse(fs.readFileSync(sp, 'utf8')); delete j.hooks.SessionEnd; fs.writeFileSync(sp, JSON.stringify(j)); // as if an older version never wired it
+  const r = run(['--update'], { env, script });
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /Refreshed the hooks and slash commands in 1 profile/);
+  assert.ok(hasSlug(JSON.parse(fs.readFileSync(sp, 'utf8')), 'SessionEnd', 'session-end'), 'the missing hook is back');
+  if (process.platform !== 'win32') assert.ok(fs.statSync(script).mode & 0o100, 'still executable');
+  assert.match(run(['--whatsnew'], { env, script }).out, /a thing/, 'notes for the version now installed');
+});
+
+test('REGRESSION: the checkpoint request is the human prompt, not a task notification or slash-command output', () => {
+  const sb = sandbox();
+  const tp = transcript(sb.dir, [userEntry('refactor the billing module'),
+    { type: 'user', message: { role: 'user', content: '<task-notification>\n<task-id>x</task-id> done</task-notification>' } },
+    { type: 'user', message: { role: 'user', content: '<local-command-stdout>Usage: 97%</local-command-stdout>' } },
+    { type: 'user', isMeta: true, message: { role: 'user', content: 'Caveat: meta' } }]);
+  const script = scriptCopy(sb.dir, {});
+  const r = hookRun('pre-compact', { session_id: 'hum1', transcript_path: tp, cwd: sb.dir }, { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, script });
+  assert.strictEqual(r.code, 0);
+  const cp = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'guardian', 'hum1.checkpoint.json'), 'utf8'));
+  assert.strictEqual(cp.last_request, 'refactor the billing module');
+});
+
+test('REGRESSION: a compaction in the warn band is not told it hit a usage limit, and keeps the limit checkpoint', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, {});
+  const gd = path.join(sb.cfg, 'guardian'); fs.mkdirSync(gd, { recursive: true });
+  fs.writeFileSync(path.join(gd, 'cmp1.checkpoint.json'), JSON.stringify({ session_id: 'cmp1', reason: 'session limit near', window: 'session', resets_at: Math.floor(Date.now() / 1000) + 3600, last_request: 'do x' }));
+  const r = hookRun('session-start', { session_id: 'cmp1', source: 'compact' }, { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, script });
+  const ctx = JSON.parse(r.out).hookSpecificOutput.additionalContext;
+  assert.match(ctx, /context was just compacted/);
+  assert.doesNotMatch(ctx, /usage limit|transcript above is intact/);
+  assert.ok(fs.existsSync(path.join(gd, 'cmp1.checkpoint.json')), 'the limit checkpoint survives the compaction');
+});
+
+test('REGRESSION: near-limit text claims "auto-saved" only when something is saved; opusplan is no downgrade', () => {
+  const sb = sandbox();
+  const now = Math.floor(Date.now() / 1000);
+  const inp = baseInput({ session_id: 'ns1', rate_limits: { five_hour: { used_percentage: 92, resets_at: now + 3600 }, seven_day: { used_percentage: 10, resets_at: now + 86400 } } });
+  const off = strip(render(inp, { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, script: scriptCopy(sb.dir, { autopilot: 'off' }) }).out);
+  assert.match(off, /near limit: resume with/);
+  assert.doesNotMatch(off, /auto-saved/);
+  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), JSON.stringify({ model: 'opusplan' }));
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const script = scriptCopy(sb.dir, {});
+  render(baseInput({ session_id: 'op1', model: { id: 'claude-opus-4-8', display_name: 'Opus 4.8' }, rate_limits: inp.rate_limits }), { env, script });
+  const after = strip(render(baseInput({ session_id: 'op1', model: { id: 'claude-sonnet-5', display_name: 'Sonnet 5' }, rate_limits: inp.rate_limits }), { env, script }).out);
+  assert.doesNotMatch(after, /⬇/);
+});
+
+test('REGRESSION: --status lists watchers in every profile, labelled', () => {
+  const sb = sandbox();
+  const work = path.join(sb.home, '.claude-work', 'guardian'); fs.mkdirSync(work, { recursive: true });
+  fs.writeFileSync(path.join(sb.home, '.claude-work', 'settings.json'), '{}');
+  fs.writeFileSync(path.join(work, 'wsid1.watch.pid'), '999999\n0');
+  const r = run(['--status'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
+  assert.match(r.out, /\[work\]\s+session wsid1/);
+});
+
+test('REGRESSION: CLI: a modifier typo stops the command; unknown words fail; new aliases and --name work', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const script = scriptCopy(sb.dir);
+  let r = run(['--install', '--this-profle'], { env, script });
+  assert.strictEqual(r.code, 1); assert.match(r.out, /unknown flag: --this-profle/);
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'settings.json')), 'nothing was wired');
+  assert.strictEqual(run(['frobnicate'], { env, script }).code, 1);
+  assert.match(run(['status'], { env, script }).out, /guardian status/);
+  assert.strictEqual(run(['init', '--auto'], { env, script }).code, 1, '--auto only goes with --install-guardian');
+  const proj = path.join(sb.dir, 'proj'); fs.mkdirSync(proj);
+  r = spawnSync(NODE, [script, '--name', 'billing', 'refactor'], { cwd: proj, encoding: 'utf8', env: { ...process.env, ...env, CCBSL_NO_ACT: '1' } });
+  assert.strictEqual(r.status, 0, r.stdout);
+  assert.strictEqual(fs.readFileSync(path.join(proj, '.claude', 'ccrig-name'), 'utf8'), 'billing refactor\n');
+});
+
+test('REGRESSION: install modes: refresh re-points an existing guardian, a typed --no-guardian removes it', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const a = path.join(sb.dir, 'a'), b = path.join(sb.dir, 'b'); fs.mkdirSync(a); fs.mkdirSync(b);
+  const sa = scriptCopy(a), sbx = scriptCopy(b);
+  run(['--install'], { env, script: sa });
+  run(['--install', '--no-guardian'], { env: { ...env, CCBSL_REFRESH: '1' }, script: sbx }); // an npm update from a new copy
+  let j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  const stop = j.hooks.Stop.flatMap((g) => g.hooks).find((h) => / --hook stop$/.test(h.command));
+  assert.ok(stop && cmdHasPath(stop.command, sbx), 'the guardian now runs the new copy');
+  const r = run(['--install', '--no-guardian'], { env, script: sbx });
+  assert.match(r.out, /Took the guardian hooks out/);
+  j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  assert.ok(!hasSlug(j, 'Stop', 'stop'), 'guardian gone');
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(b, 'statusline.config.json'), 'utf8')).autopilot, 'off', 'and just the bar means no limit side effects');
+});
+
+test('REGRESSION: uninstall reports a settings.json it cannot parse; a relative or ~ foreign bar is not ours', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const script = scriptCopy(sb.dir);
+  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), '{ "statusLine": { "command": "node x/statusline.js" }, }');
+  const r = run(['--uninstall'], { env, script });
+  assert.strictEqual(r.code, 1); assert.match(r.out, /does not parse/);
+  fs.writeFileSync(path.join(sb.cfg, 'statusline.js'), '// someone else\'s bar');
+  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: 'node ~/.claude/statusline.js' } }));
+  run(['--uninstall'], { env, script });
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8')).statusLine.command, 'node ~/.claude/statusline.js', 'a live foreign bar is left alone');
+});
+
+test('REGRESSION: doctor flags disableAllHooks, accepts an absolute claudeBin, and --options lists claudeBin', { skip: process.platform === 'win32' && 'POSIX stub' }, () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const stub = path.join(sb.dir, 'my claude'); fs.writeFileSync(stub, '#!/bin/sh\n'); fs.chmodSync(stub, 0o755);
+  const script = scriptCopy(sb.dir, { autopilot: 'resume', claudeBin: stub });
+  run(['--install'], { env, script });
+  const sp = path.join(sb.cfg, 'settings.json');
+  const j = JSON.parse(fs.readFileSync(sp, 'utf8')); j.disableAllHooks = true; fs.writeFileSync(sp, JSON.stringify(j));
+  const d = run(['--doctor'], { env, script }).out;
+  assert.match(d, /disableAllHooks/);
+  assert.match(d, /found \(auto-resume can relaunch\)/);
+  assert.match(run(['--options'], { env, script }).out, /claudeBin:\s+.*my claude/);
+});
+
+test('REGRESSION: render strips terminal escapes from dir, model and session names', () => {
+  const sb = sandbox();
+  const evil = path.join(sb.dir, 'x\x1b]0;pwned\x07y'); // never created: NTFS refuses control characters, and the bar only reads the name
+  const r = render(baseInput({ workspace: { current_dir: evil, project_dir: evil }, session_name: 'a\x1b[2Jb', model: { id: 'm', display_name: 'Op\x9bus' } }), { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, script: scriptCopy(sb.dir, { show: { sessionName: true } }) });
+  assert.doesNotMatch(r.out, /\x1b\]|\x07|\x1b\[2J|\x9b/);
+  assert.match(strip(r.out), /x \]0;pwned y/);
+});
+
+test('REGRESSION: [1m] and effort come from the session, not settings defaults; critical below warn still fires', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), JSON.stringify({ model: 'opus[1m]', effortLevel: 'max' }));
+  const script = scriptCopy(sb.dir, { thresholds: { usage: { warn: 90, critical: 85 } }, autopilot: 'off' });
+  const now = Math.floor(Date.now() / 1000);
+  let out = strip(render({ version: '2.1.0', model: { id: 'claude-haiku-4-5', display_name: 'Haiku 4.5' }, context_window: { used_percentage: 10, context_window_size: 200000 } }, { env, script }).out);
+  assert.doesNotMatch(out, /\[1m\]/); assert.doesNotMatch(out, /⚡/);
+  out = strip(render({ version: '2.1.0', model: { id: 'claude-opus-5', display_name: 'Opus 5' }, context_window: { used_percentage: 10, context_window_size: 1000000 } }, { env, script }).out);
+  assert.match(out, /\[1m\]/);
+  out = strip(render(baseInput({ session_id: 'cw1', rate_limits: { five_hour: { used_percentage: 87, resets_at: now + 3600 } } }), { env, script }).out);
+  assert.match(out, /limit imminent/);
+});
+
+test('REGRESSION: installs keep a 0600 settings.json 0600 and a dotfiles symlink a symlink; caches are private', { skip: process.platform === 'win32' && 'POSIX modes' }, () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const dots = path.join(sb.dir, 'dotfiles'); fs.mkdirSync(dots);
+  fs.writeFileSync(path.join(dots, 'settings.json'), '{"env":{"TOKEN":"x"}}'); fs.chmodSync(path.join(dots, 'settings.json'), 0o600);
+  fs.symlinkSync(path.join(dots, 'settings.json'), path.join(sb.cfg, 'settings.json'));
+  run(['--install'], { env, script: scriptCopy(sb.dir) });
+  assert.ok(fs.lstatSync(path.join(sb.cfg, 'settings.json')).isSymbolicLink(), 'still a symlink');
+  assert.ok(JSON.parse(fs.readFileSync(path.join(dots, 'settings.json'), 'utf8')).statusLine, 'the real file got the update');
+  assert.strictEqual(fs.statSync(path.join(dots, 'settings.json')).mode & 0o777, 0o600);
+  render(baseInput({ workspace: { current_dir: __dirname, project_dir: __dirname } }), { env });
+  assert.strictEqual(fs.statSync(CACHE).mode & 0o777, 0o700, 'the tmp cache dir is private');
+});
+
+test('REGRESSION: claude-profile (bash + zsh) enforces its charset, reserves ccrig dirs, and survives set -u and a trailing slash', { skip: _posixShells.length === 0 && 'no POSIX shell (bash/zsh) on this host' }, () => {
+  const sb = sandbox();
+  fs.mkdirSync(path.join(sb.home, '.claude-work'));
+  const shp = path.join(__dirname, 'claude-profiles.sh');
+  for (const sh of _posixShells) {
+    const r = spawnSync(sh, ['-c', 'set -u; . "$1"; claude-profile use; claude-profile new "a b"; claude-profile new work.; claude-profile remove rig-sessions; claude-profile current; true', 'x', shp],
+      { encoding: 'utf8', env: { ...process.env, HOME: sb.home, CLAUDE_CONFIG_DIR: path.join(sb.home, '.claude-work') + '/' } });
+    const out = r.stdout + r.stderr;
+    assert.doesNotMatch(out, /unbound variable|parameter not set/, sh);
+    assert.match(out, /usage: claude-profile use/);
+    assert.strictEqual((out.match(/invalid profile name/g) || []).length, 3, sh + ': ' + out);
+    assert.match(out, /^work\s/m, sh + ' names the profile despite the trailing slash');
+    assert.ok(!fs.existsSync(path.join(sb.home, '.claude-a b')));
+  }
 });
