@@ -1766,8 +1766,9 @@ test('resetStyle clock24 renders 24-hour times', () => {
   const now = Math.floor(Date.now() / 1000);
   const script = scriptCopy(sb.dir, { resetStyle: 'clock24' });
   const out = strip(render(baseInput({ session_id: 'c24', rate_limits: { five_hour: { used_percentage: 20, resets_at: now + 3 * 3600 + 25 * 60 } } }), { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, script }).out);
-  assert.match(out, /↺\d{2}:\d{2}\b/, 'a 24-hour HH:MM reset time');
-  assert.ok(!/↺\d{1,2}:\d{2}[ap]\b/.test(out), 'no 12-hour a/p suffix');
+  // a reset past midnight carries its date (↺9/26 01:52): run in the evening, that is this one
+  assert.match(out, /↺(\d{1,2}\/\d{1,2} )?\d{2}:\d{2}\b/, 'a 24-hour HH:MM reset time');
+  assert.ok(!/↺(\d{1,2}\/\d{1,2} )?\d{1,2}:\d{2}[ap]\b/.test(out), 'no 12-hour a/p suffix');
 });
 
 // ===========================================================================
