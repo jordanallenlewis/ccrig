@@ -14,8 +14,9 @@
 # Claude Code + statusline.js. Windows PowerShell 5.1's $HOME is HOMEDRIVE+HOMEPATH, which on
 # domain-joined machines can point at a mapped network drive and disagree with where `claude` lives.
 function _Cc-Home {
-  $h = [Environment]::GetFolderPath('UserProfile')
-  if (-not $h) { $h = $env:USERPROFILE }
+  # USERPROFILE first, as os.homedir() does (GetFolderPath ignores an overridden USERPROFILE)
+  $h = $env:USERPROFILE
+  if (-not $h) { $h = [Environment]::GetFolderPath('UserProfile') }
   if (-not $h) { $h = $HOME }
   return $h
 }
@@ -25,7 +26,9 @@ function _Cc-Home {
 function _Cc-ValidName([string]$Name) {
   if ([string]::IsNullOrEmpty($Name)) { return $false }
   if ($Name -match '\.\.') { return $false }
-  if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { return $false }
+  # the last character too: Windows drops a trailing '.', so 'work.' would alias the 'work' profile
+  if ($Name -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?$') { return $false }
+  if ($Name -eq 'usage-ledger' -or $Name -eq 'rig-sessions') { return $false }   # ccrig's own dirs
   return $true
 }
 function _Cc-ProfileDir([string]$Name) {   # name -> dir
@@ -49,7 +52,9 @@ function claude-profile {
   $tokens = @($args)
   $cmd = if ($tokens.Count -ge 1 -and $tokens[0]) { [string]$tokens[0] } else { 'list' }
   $name = if ($tokens.Count -ge 2) { [string]$tokens[1] } else { '' }
-  $passthru = if ($tokens.Count -ge 3) { $tokens[2..($tokens.Count - 1)] } else { @() }
+  # never `$x = if (...) { $arr }`: a one-element result unrolls to a bare string, and splatting a
+  # string passes its characters (`-c` became `-` `c`)
+  $passthru = @(); if ($tokens.Count -ge 3) { $passthru = @($tokens[2..($tokens.Count - 1)]) }
 
   $hd = _Cc-Home
   if (-not $hd) { Write-Host 'cannot determine your home directory (USERPROFILE / HOME are unset)'; return }
@@ -77,7 +82,9 @@ function claude-profile {
       if (-not (_Cc-ValidName $name)) { Write-Host "invalid profile name '$name' (letters, digits, . _ - only)"; break }
       $dir = _Cc-ProfileDir $name
       if (-not (Test-Path -LiteralPath $dir -PathType Container)) { Write-Host "profile '$name' not found. create it:  claude-profile new $name"; break }
-      $env:CLAUDE_CONFIG_DIR = $dir
+      # default = the variable UNSET: Claude Code keys its login off an explicit CLAUDE_CONFIG_DIR, so
+      # setting it to ~/.claude would look like a different, logged-out account
+      if ($name -eq 'default') { Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue } else { $env:CLAUDE_CONFIG_DIR = $dir }
       Write-Host "Claude profile -> $name   ($dir)" -ForegroundColor Green
       Write-Host "   run 'claude' to start it in this shell."
       break
@@ -90,7 +97,7 @@ function claude-profile {
       if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { Write-Host "'claude' was not found on PATH"; break }
       # set CLAUDE_CONFIG_DIR for this ONE launch only, then restore (mirrors `VAR=x cmd` in bash)
       $old = $env:CLAUDE_CONFIG_DIR
-      $env:CLAUDE_CONFIG_DIR = $dir
+      if ($name -eq 'default') { Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue } else { $env:CLAUDE_CONFIG_DIR = $dir }
       try { & claude @passthru }
       finally {
         if ($null -eq $old) { Remove-Item Env:CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue }
@@ -103,8 +110,11 @@ function claude-profile {
       if (-not (_Cc-ValidName $name)) { Write-Host "invalid profile name '$name' (letters, digits, . _ - only)"; break }
       $dir = _Cc-ProfileDir $name
       if (Test-Path -LiteralPath $dir -PathType Container) { Write-Host "profile '$name' already exists ($dir)"; break }
-      New-Item -ItemType Directory -LiteralPath $dir -Force | Out-Null
+      # New-Item has no -LiteralPath (5.1 and 7 both reject it); the .NET call takes the path literally
+      try { [IO.Directory]::CreateDirectory($dir) | Out-Null } catch {}
+      if (-not (Test-Path -LiteralPath $dir -PathType Container)) { Write-Host "could not create profile '$name' ($dir)"; break }
       Write-Host "created profile '$name'.  Start it:  claude-profile use $name; claude   (then /login)"
+      Write-Host "   After that first login, run 'ccrig init' once so the status line and guardian reach it."
       break
     }
     '^(current|who)$' {
@@ -120,7 +130,9 @@ function claude-profile {
       if (-not (Test-Path -LiteralPath $dir -PathType Container)) { Write-Host "profile '$name' not found"; break }
       $ans = Read-Host "remove profile '$name' and ALL its data ($dir)? [y/N]"
       if ($ans -match '^[yY]') {
-        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        # not Remove-Item -Recurse: Windows PowerShell 5.1 follows a junction or symlink inside the profile and
+        # deletes what it points at (a skills/ dir shared from ~/.claude, say). .NET removes the link itself.
+        try { [IO.Directory]::Delete($dir, $true) } catch {}
         Remove-Item -LiteralPath (Join-Path $hd (Join-Path '.claude-usage-ledger' ".claude-$name.json")) -Force -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $dir) { Write-Host "could not fully remove '$name' (is claude still running?)" }
         else { Write-Host "removed '$name'" }

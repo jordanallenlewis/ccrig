@@ -1,0 +1,3 @@
+# Ship and test LF files on every OS: a CRLF checkout (core.autocrlf on Windows runners) breaks
+# sourcing claude-profiles.sh and means the Windows CI leg tests files npm never ships.
+* text=auto eol=lf

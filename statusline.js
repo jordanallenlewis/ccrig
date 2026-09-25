@@ -32,7 +32,8 @@
  * CUSTOMIZE: in a Claude Code session run `/statusline-config` (installed by
  * --install) to see every option and change settings conversationally. Or run
  * `node statusline.js --config` for an interactive terminal editor, or hand-edit
- * `statusline.config.json` next to this file (see statusline.config.example.json).
+ * `statusline.config.json` next to this file, or ~/.ccrig/statusline.config.json for an npm
+ * install (see statusline.config.example.json).
  * `--options` prints the current settings. Config is a separate file, so updating
  * this script never wipes it.
  *
@@ -69,14 +70,16 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const VERSION = '1.6.1';
+const VERSION = '1.7.0';
 
-// where updates come from: the public GitHub repo's main branch (raw files).
-// Override the base with CCBSL_UPDATE_BASE (used by tests to point at a local dir).
-const UPDATE_BASE = process.env.CCBSL_UPDATE_BASE ||
-  'https://raw.githubusercontent.com/jordanallenlewis/ccrig/main';
-const UPDATE_SCRIPT_URL = UPDATE_BASE + '/statusline.js';
-const UPDATE_CHANGELOG_URL = UPDATE_BASE + '/CHANGELOG.md';
+// where updates come from. The npm registry's `latest` decides whether a newer RELEASE exists (a tag push
+// publishes it only after CI passes on all three OSes), and a standalone copy downloads that release's
+// statusline.js from its git tag, never the moving main branch, so an npm user is never told about a
+// version npm cannot install yet. CCBSL_UPDATE_BASE points every fetch at one local dir or mirror instead
+// (tests, air-gapped setups) and skips the registry.
+const UPDATE_BASE = process.env.CCBSL_UPDATE_BASE || '';
+const RELEASE_REGISTRY_URL = process.env.CCBSL_REGISTRY_URL || 'https://registry.npmjs.org/ccrig/latest';
+const RELEASE_RAW_BASE = process.env.CCBSL_RELEASE_BASE || 'https://raw.githubusercontent.com/jordanallenlewis/ccrig';
 // Supply-chain: paste an Ed25519 PUBLIC key (PEM) here (or set "updatePubkey" in config)
 // to REQUIRE that every downloaded update carries a matching statusline.js.sig signature.
 // Empty = updates rest on HTTPS/TLS + validation + manual apply (see SECURITY.md). To enable:
@@ -119,7 +122,7 @@ const DEFAULTS = {
   },
   thresholds: {
     context: { green: 50, yellow: 70 }, // % filled → color
-    usage: { green: 50, yellow: 80, warn: 90, critical: 95 }, // warn: ⚠ + resumeHint; critical: resume ticket + autopilot
+    usage: { green: 50, yellow: 80, warn: 90, critical: 95 }, // warn: ⚠ + checkpoint + resume ticket; critical: ping + autopilot
   },
   resetStyle: 'clock',  // 'clock' (10:40a, dated if not today) | 'relative' (2h14m)
   resumeTickets: true,  // at critical usage, save resume-tickets/<session>.md with the exact pick-up command
@@ -158,6 +161,10 @@ const DEFAULTS = {
   // state to a shared dir so `--board` can show every session across your worktrees/profiles.
   // OFF by default (it writes cwd/model/usage outside the config dir, like the ledger).
   sessionBoard: false,
+  // How long a finished (green) session stays green on the board before it goes grey.
+  boardDecayMinutes: 30,
+  // Desktop ping when a session watched by `--board --watch` starts waiting on a human.
+  boardNotify: true,
   // Re-inject a rules file after Claude Code compacts context (SessionStart source=compact),
   // in case compaction drops your project rules. false | true (=CLAUDE.md) | "path/to/file".
   reinjectOnCompact: false,
@@ -165,6 +172,10 @@ const DEFAULTS = {
   // newer version and shows an ⬆ badge. The RENDER stays zero-network (it only reads a local
   // cache the background check wrote). A single unauthenticated GET; set false to disable.
   updateCheck: true,
+  // Opt-in: when the daily check finds a newer release, install it in the background. An npm install
+  // runs `npm install -g ccrig@<version>` into its own prefix (only if you can write there: never sudo);
+  // a standalone copy takes the validated, backed-up --update swap; a git clone is left to you.
+  autoUpdate: false,
   // Supply-chain: paste an Ed25519 PUBLIC key (PEM) here to REQUIRE that every downloaded --update
   // carries a matching statusline.js.sig signature (see the header for the openssl commands). Empty =
   // TLS-only (the default): the download is still validated + backed up, just not signature-checked.
@@ -183,7 +194,23 @@ const DEFAULTS = {
 };
 
 // ---- config loading: deep-merge statusline.config.json over DEFAULTS ----
-const CONFIG_PATH = path.join(__dirname, 'statusline.config.json');
+// npm replaces the whole package directory on every update, so a config saved next to an npm-installed
+// script was wiped by `npm install -g ccrig@latest`. An npm install keeps its config in ~/.ccrig instead;
+// a standalone or git copy keeps it next to the script, where --update never touches it.
+const LEGACY_CONFIG_PATH = path.join(__dirname, 'statusline.config.json');
+const CONFIG_PATH = /[\\/]node_modules[\\/]/.test(__dirname) ? path.join(homeDirSafe(), '.ccrig', 'statusline.config.json') : LEGACY_CONFIG_PATH;
+function homeDirSafe() { try { return os.homedir(); } catch { return process.env.HOME || process.env.USERPROFILE || os.tmpdir(); } }
+// a JSON file saved by a Windows editor (or PowerShell 5.1 Set-Content -Encoding UTF8) can start with a
+// UTF-8 BOM, which JSON.parse rejects
+function parseJsonText(s) { return JSON.parse(String(s).replace(/^\uFEFF/, '')); }
+function readConfigFile() {
+  try { return parseJsonText(fs.readFileSync(CONFIG_PATH, 'utf8')); }
+  catch (e) { if (e.code !== 'ENOENT' || CONFIG_PATH === LEGACY_CONFIG_PATH) throw e; }
+  // first run of an npm install that still has a config beside the script: adopt it and move it out
+  const legacy = parseJsonText(fs.readFileSync(LEGACY_CONFIG_PATH, 'utf8'));
+  try { fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true }); fs.copyFileSync(LEGACY_CONFIG_PATH, CONFIG_PATH); } catch {}
+  return legacy;
+}
 function clone(x) { return (x && typeof x === 'object') ? JSON.parse(JSON.stringify(x)) : x; }
 function deepMerge(base, over) {
   const out = clone(base);
@@ -197,7 +224,7 @@ function deepMerge(base, over) {
 }
 function loadConfig() {
   let merged;
-  try { merged = deepMerge(DEFAULTS, JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))); }
+  try { merged = deepMerge(DEFAULTS, readConfigFile()); }
   catch { merged = clone(DEFAULTS); }
   // a hand-edited config can null out a whole section; restore anything critical
   for (const k of ['show', 'thresholds', 'color', 'profileLabels']) {
@@ -218,6 +245,8 @@ function loadConfig() {
   merged.reserveCols = (Number.isFinite(rc) && rc >= 0) ? Math.floor(rc) : DEFAULTS.reserveCols;
   const gc = Number(merged.gitCacheMs);
   merged.gitCacheMs = (Number.isFinite(gc) && gc >= 0) ? Math.floor(gc) : DEFAULTS.gitCacheMs;
+  const bd = Number(merged.boardDecayMinutes); // 0 or negative would make every finished session instantly grey
+  merged.boardDecayMinutes = (Number.isFinite(bd) && bd > 0) ? Math.floor(bd) : DEFAULTS.boardDecayMinutes;
   if (!Array.isArray(merged.order) || !merged.order.length) merged.order = clone(DEFAULT_ORDER);
   else {
     // MIGRATION: a saved/example `order` from an older version is missing segments added
@@ -241,7 +270,7 @@ let CONFIG = loadConfig();
 // low-level helpers
 // ===========================================================================
 // os.homedir() can throw (arbitrary-UID containers with no passwd entry); never die for it
-let HOME; try { HOME = os.homedir(); } catch { HOME = process.env.HOME || process.env.USERPROFILE || os.tmpdir(); }
+const HOME = homeDirSafe();
 const CFG = process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
 const K = CONFIG.color;
 const c = (n, s) => `\x1b[38;5;${n}m${s}\x1b[0m`;
@@ -249,15 +278,22 @@ const SEP = c(K.dim, ' │ ');
 
 function readFileSafe(f) { try { return fs.readFileSync(f, 'utf8'); } catch { return ''; } }
 function settingsVal(key) {
-  try { return JSON.parse(readFileSafe(path.join(CFG, 'settings.json')))[key]; } catch { return undefined; }
+  try { return parseJsonText(readFileSafe(path.join(CFG, 'settings.json')))[key]; } catch { return undefined; }
 }
 
 // terminal cell width of ONE codepoint: 0 (VS16/ZWJ), 2 (wide/fullwidth/emoji-presentation), else 1.
 // Flat integer comparisons only (this is on the hot path, C3): no regex, no per-call allocation.
+// Emoji_Presentation code points below U+1F000 (Unicode East Asian Width W)
+const EMOJI_WIDE_BMP = new Set([0x231A, 0x231B, 0x23E9, 0x23EA, 0x23EB, 0x23EC, 0x23F0, 0x25FD, 0x25FE, 0x2614, 0x2615,
+  0x2648, 0x2649, 0x264A, 0x264B, 0x264C, 0x264D, 0x264E, 0x264F, 0x2650, 0x2651, 0x2652, 0x2653, 0x267F, 0x2693, 0x26AA,
+  0x26AB, 0x26BD, 0x26BE, 0x26C4, 0x26C5, 0x26CE, 0x26D4, 0x26EA, 0x26F2, 0x26F3, 0x26F5, 0x26FA, 0x26FD, 0x2705, 0x270A,
+  0x270B, 0x2728, 0x274C, 0x274E, 0x2753, 0x2754, 0x2755, 0x2757, 0x2795, 0x2796, 0x2797, 0x27B0, 0x27BF, 0x2B1B, 0x2B1C,
+  0x2B50, 0x2B55]);
 function glyphWidth(cp) {
   if (cp === 0xFE0F || cp === 0x200D) return 0;                 // variation selector / ZWJ
   if (cp >= 0x1F000) return 2;                                  // astral emoji & symbols
   if (cp === 0x26A1 || cp === 0x2600 || cp === 0x26A0 || cp === 0x23F3) return 2; // ⚡ ☀ ⚠ ⏳ (⬆/⬇ stay 1)
+  if (EMOJI_WIDE_BMP.has(cp)) return 2;                          // BMP emoji terminals draw 2 cells wide (✅ ❌ ⭐ ☕ ...)
   // East Asian Wide / Fullwidth ranges that actually occur in folder/branch/session names.
   // 0xFF00-0xFF60 is fullwidth (wide); halfwidth kana 0xFF61-0xFF9F stays 1 (deliberately excluded).
   if ((cp >= 0x1100 && cp <= 0x115F) || (cp >= 0x2E80 && cp <= 0x303E) ||
@@ -396,7 +432,7 @@ function writeResumeTicket(input, pct, windowName, resetEpoch, escalate) {
       if (!escalate) return true;
       try { const m = fs.readFileSync(file, 'utf8').match(/usage (\d+)%/); if (m && Math.round(pct) <= parseInt(m[1], 10)) return true; } catch {}
     }
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const cwd = (input.workspace && input.workspace.current_dir) || input.cwd || process.cwd();
     const name = input.session_name || '(unnamed session)';
     const when = resetEpoch ? fmtReset(resetEpoch) : 'the next window';
@@ -417,7 +453,7 @@ function writeResumeTicket(input, pct, windowName, resetEpoch, escalate) {
       '',
       'Or, from that project directory with this profile active, run `claude --continue`.',
       '',
-    ].join('\n'));
+    ].join('\n'), { mode: 0o600 });
     for (const f of fs.readdirSync(dir)) { // keep the drawer tidy: 14-day retention
       try { const p = path.join(dir, f); if (Date.now() - fs.statSync(p).mtimeMs > 14 * 86400 * 1000) fs.unlinkSync(p); } catch {}
     }
@@ -448,7 +484,9 @@ function plural(n, singular, pluralForm) { return n === 1 ? singular : (pluralFo
 // test suite and CI never launch anything; file side effects (checkpoints) are not.
 function actAllowed() { return !process.env.CCBSL_NO_ACT; }
 const SID_RE = /^[A-Za-z0-9-]+$/;
-function guardDir() { return path.join(CFG, 'guardian'); }
+// --status / --disarm walk every profile by pointing this at each one in turn
+let GUARD_CFG = CFG;
+function guardDir() { return path.join(GUARD_CFG, 'guardian'); }
 
 // read the last `bytes` of a transcript as parsed JSONL lines (newest work is at the tail)
 function readTranscriptTail(tp, bytes) {
@@ -478,25 +516,58 @@ function scanTodos(lines) {
 // the most recent TodoWrite state: [{content,status,activeForm}] or null. `fullScan` (used
 // by the Stop hook, off the hot path) re-reads the whole file if a big tool_result pushed
 // the last TodoWrite out of the tail window — so keep-working doesn't wrongly see "no todos".
-function latestTodos(tp, fullScan) {
-  let todos = scanTodos(readTranscriptTail(tp, 524288));
-  if (todos === null && fullScan && tp) {
-    try { if (fs.statSync(tp).size > 524288) todos = scanTodos(fs.readFileSync(tp, 'utf8').split('\n').filter(Boolean)); } catch {}
+// Newer Claude Code tracks work with TaskCreate / TaskUpdate instead of TodoWrite. Rebuild the same
+// [{content,status,activeForm}] list from them, in transcript order: a task's id is the "Task #N" its
+// create returned (else its creation order), and a deleted task drops out. null = no Task tools used.
+function scanTasks(lines) {
+  const tasks = new Map(), created = new Map();
+  let n = 0, seen = false;
+  for (const line of lines) {
+    let o; try { o = JSON.parse(line); } catch { continue; }
+    if (!o || o.isSidechain) continue;
+    const content = o.message && o.message.content;
+    if (!Array.isArray(content)) continue;
+    for (const b of content) {
+      if (!b) continue;
+      if (b.type === 'tool_use' && b.name === 'TaskCreate' && b.input) {
+        seen = true;
+        const id = String(++n);
+        created.set(b.id, id);
+        tasks.set(id, { content: String(b.input.subject || b.input.description || ''), status: 'pending', activeForm: String(b.input.activeForm || '') });
+      } else if (b.type === 'tool_result' && created.has(b.tool_use_id)) {
+        const m = /Task #(\d+)/.exec(typeof b.content === 'string' ? b.content : JSON.stringify(b.content || ''));
+        const guess = created.get(b.tool_use_id); created.delete(b.tool_use_id);
+        if (m && m[1] !== guess && tasks.has(guess) && !tasks.has(m[1])) { tasks.set(m[1], tasks.get(guess)); tasks.delete(guess); }
+      } else if (b.type === 'tool_use' && b.name === 'TaskUpdate' && b.input && b.input.taskId != null) {
+        seen = true;
+        const id = String(b.input.taskId), t = tasks.get(id);
+        if (!t) continue;
+        if (b.input.status === 'deleted') tasks.delete(id);
+        else { if (typeof b.input.status === 'string') t.status = b.input.status; if (b.input.subject) t.content = String(b.input.subject); }
+      }
+    }
   }
-  return todos;
+  return seen ? [...tasks.values()] : null;
+}
+function latestTodos(tp, fullScan) {
+  let lines = readTranscriptTail(tp, 524288);
+  if (fullScan && tp) { try { if (fs.statSync(tp).size > 524288) lines = fs.readFileSync(tp, 'utf8').split('\n').filter(Boolean); } catch {} }
+  const todos = scanTodos(lines);
+  return todos !== null ? todos : scanTasks(lines);
 }
 // the most recent human request text (skips tool_result-only user turns)
+// user-role entries Claude Code writes itself: task notifications, slash-command wrappers and their
+// output, reminders, interrupt markers. None of them is the human's request.
+const SYNTHETIC_USER_RE = /^\s*(<(task-notification|command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat|system-reminder|bash-input|bash-stdout|bash-stderr|user-memory-input)\b|\[Request interrupted)/;
 function latestUserText(tp) {
   const lines = readTranscriptTail(tp, 524288);
   for (let i = lines.length - 1; i >= 0; i--) {
     let o; try { o = JSON.parse(lines[i]); } catch { continue; }
-    if (!o || o.isSidechain || o.type !== 'user' || !o.message) continue;
+    if (!o || o.isSidechain || o.isMeta || o.type !== 'user' || !o.message) continue;
     const cnt = o.message.content;
-    if (typeof cnt === 'string') { if (cnt.trim()) return cnt.trim().slice(0, 500); continue; }
-    if (Array.isArray(cnt)) {
-      const txt = cnt.filter((x) => x && x.type === 'text' && typeof x.text === 'string').map((x) => x.text).join(' ').trim();
-      if (txt) return txt.slice(0, 500);
-    }
+    const txt = typeof cnt === 'string' ? cnt.trim()
+      : Array.isArray(cnt) ? cnt.filter((x) => x && x.type === 'text' && typeof x.text === 'string').map((x) => x.text).join(' ').trim() : '';
+    if (txt && !SYNTHETIC_USER_RE.test(txt)) return txt.slice(0, 500);
   }
   return '';
 }
@@ -524,10 +595,10 @@ function inflightAgents(tp) {
   if (!tp) return [];
   let size;
   try { size = fs.statSync(tp).size; } catch { return []; }
-  const cacheFile = path.join(os.tmpdir(), 'ccbsl-agents-' + strHash(tp) + '.json');
+  const cacheFile = path.join(cacheDir(), 'ccbsl-agents-' + strHash(tp) + '.json');
   try { const c = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); if (c && c.size === size && Array.isArray(c.list)) return c.list; } catch {}
   const list = computeInflightAgents(tp);
-  try { fs.writeFileSync(cacheFile, JSON.stringify({ size, list })); } catch {}
+  try { fs.writeFileSync(cacheFile, JSON.stringify({ size, list }), { mode: 0o600 }); } catch {}
   return list;
 }
 function computeInflightAgents(tp) {
@@ -563,6 +634,8 @@ function downgradeSeg(input, live) {
   if (CONFIG.downgradeAlert === false) return '';
   if (DEMO_DOWNGRADE) return cBold(K.red, '⬇ ' + DEMO_DOWNGRADE[1]) + c(K.dim, ' (was ' + DEMO_DOWNGRADE[0] + ')');
   const sid = input.session_id;
+  // opusplan runs Opus in plan mode and Sonnet otherwise by design: leaving plan mode is no downgrade
+  if (/opusplan/i.test(String(settingsVal('model') || '')) || /opusplan/i.test(String((input.model && input.model.id) || ''))) return '';
   const cur = (input.model && (input.model.display_name || input.model.id)) || '';
   const tier = modelTier(cur);
   if (!tier || !sid || !SID_RE.test(sid)) return '';
@@ -570,7 +643,7 @@ function downgradeSeg(input, live) {
   let top = 0, topName = '';
   try { const o = JSON.parse(fs.readFileSync(f, 'utf8')); top = o.tier || 0; topName = o.name || ''; } catch {}
   if (tier >= top) { // an equal-or-higher tier is the session's ceiling: record it
-    if (live && tier > top) { try { fs.mkdirSync(guardDir(), { recursive: true }); fs.writeFileSync(f, JSON.stringify({ tier, name: cur })); sweepGuardDir(); } catch {} }
+    if (live && tier > top) { try { fs.mkdirSync(guardDir(), { recursive: true, mode: 0o700 }); fs.writeFileSync(f, JSON.stringify({ tier, name: cur })); sweepGuardDir(); } catch {} }
     return '';
   }
   // A drop below the ceiling. Only surface when usage is ELEVATED — that's when Claude Code
@@ -590,10 +663,28 @@ function checkpointPath(sid) { return path.join(guardDir(), sid + '.checkpoint.j
 function inputCwd(input) { return (input.workspace && input.workspace.current_dir) || input.cwd || process.cwd(); }
 // a cheap git fingerprint so a resumed run can RECONCILE (not blindly continue):
 // HEAD sha + whether the tree was dirty when we checkpointed.
+// Find a helper binary by walking PATH ourselves, absolute entries only. A shell (cmd.exe on Windows),
+// and on Windows even a shell-less spawn, looks in the current directory first, so a git.exe or git.bat
+// committed to a cloned repo would run on every render. On Windows only a .exe counts (a .cmd needs a shell).
+function findBin(name) {
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    if (!dir || !path.isAbsolute(dir)) continue;
+    const p = path.join(dir, process.platform === 'win32' ? name + '.exe' : name);
+    try { if (fs.statSync(p).isFile()) return p; } catch {}
+  }
+  return null;
+}
+function git(cwd, args) {
+  const bin = findBin('git');
+  if (!bin) throw new Error('git not found');
+  // 700ms keeps a slow repo from stalling the bar; the env knob only lets tests on slow CI runners wait longer
+  const timeout = parseInt(process.env.CCBSL_GIT_TIMEOUT_MS, 10) || 700;
+  return require('child_process').execFileSync(bin, args, { cwd, stdio: ['ignore', 'pipe', 'ignore'], timeout, encoding: 'utf8', windowsHide: true });
+}
 function gitSnapshot(cwd) {
   try {
-    const head = execSync('git rev-parse HEAD', { cwd, stdio: ['ignore', 'pipe', 'ignore'], timeout: 700, encoding: 'utf8' }).trim();
-    const status = execSync('git --no-optional-locks status --porcelain', { cwd, stdio: ['ignore', 'pipe', 'ignore'], timeout: 700, encoding: 'utf8' });
+    const head = git(cwd, ['rev-parse', 'HEAD']).trim();
+    const status = git(cwd, ['--no-optional-locks', 'status', '--porcelain']);
     return { head, dirty: status.trim().length > 0 };
   } catch { return null; }
 }
@@ -601,7 +692,7 @@ function writeCheckpoint(input, meta) {
   const sid = input.session_id;
   if (!sid || !SID_RE.test(sid)) return null;
   try {
-    fs.mkdirSync(guardDir(), { recursive: true });
+    fs.mkdirSync(guardDir(), { recursive: true, mode: 0o700 });
     const cwd = inputCwd(input);
     // preserve an existing limit-window schedule: a PreCompact snapshot (no resets_at)
     // must not wipe the resets_at/window an armed auto-resume watcher depends on.
@@ -626,7 +717,7 @@ function writeCheckpoint(input, meta) {
       agents: inflightAgents(input.transcript_path).map((a) => a.desc).slice(0, 8), // orchestration in flight at the limit
       git: gitSnapshot(cwd),
     };
-    fs.writeFileSync(checkpointPath(sid), JSON.stringify(data, null, 2) + '\n');
+    fs.writeFileSync(checkpointPath(sid), JSON.stringify(data, null, 2) + '\n', { mode: 0o600 }); // holds your prompt text
     sweepGuardDir();
     return data;
   } catch { return null; }
@@ -644,24 +735,27 @@ function readCheckpoint(sid) {
   try { return JSON.parse(fs.readFileSync(checkpointPath(sid), 'utf8')); } catch { return null; }
 }
 // turn a checkpoint into a resume prompt that forbids repeating finished work
-function resumePromptFromCheckpoint(cp, crossAccount, unattended) {
+function resumePromptFromCheckpoint(cp, crossAccount, unattended, compacted) {
   const todos = Array.isArray(cp.todos) ? cp.todos : [];
   const done = todos.filter((t) => t && t.status === 'completed').map((t) => t.content).filter(Boolean);
   const rest = todos.filter((t) => t && t.status !== 'completed')
     .map((t) => (t.status === 'in_progress' ? '[in progress] ' : '') + (t.content || t.activeForm)).filter(Boolean);
-  const why = cp.reason && /limit/.test(cp.reason) ? 'You were interrupted mid-task by a Claude usage limit and are resuming now.'
+  // a compaction in the warn band is not a limit stop: the session is live and was never interrupted
+  const why = compacted ? 'Your context was just compacted. Here is the work state captured beforehand so nothing is lost.'
+    : cp.reason && /limit/.test(cp.reason) ? 'You were interrupted mid-task by a Claude usage limit and are resuming now.'
     : cp.reason && /compact/.test(cp.reason) ? 'Your context was just compacted. Here is the work state captured beforehand so nothing is lost.'
     : 'You are resuming this session.';
   // cross-account failover starts a FRESH session (no prior transcript); a same-account
   // --resume has the full transcript. Say the true thing so the model doesn't hallucinate.
   const transcriptLine = crossAccount
     ? ' You are continuing on a different profile, so the earlier transcript is NOT here. Rely on the checkpoint below and the working tree, and run `git status` first.'
+    : compacted ? ' Earlier turns are now summarized, so do NOT redo anything already finished.'
     : ' The full transcript above is intact, so do NOT redo anything already finished.';
   const L = [why + transcriptLine];
   if (cp.last_request) L.push('', 'Original request: ' + cp.last_request);
   if (done.length) L.push('', 'Already DONE (do not repeat):', ...done.map((x) => '- ' + x));
   if (rest.length) L.push('', 'Remaining TODO (continue from the first one):', ...rest.map((x) => '- ' + x));
-  else L.push('', 'No open todos were recorded. Review the last few steps in the transcript and finish the original request.');
+  else if (!compacted) L.push('', 'No open todos were recorded. Review the last few steps in the transcript and finish the original request.');
   if (cp.git && cp.git.head) {
     L.push('', 'When interrupted, git HEAD was ' + cp.git.head.slice(0, 12) + ' and the working tree was ' + (cp.git.dirty ? 'DIRTY (uncommitted changes were in progress)' : 'clean') + '. First run `git status` to reconcile the tree against what the transcript says you did, then continue.');
   }
@@ -677,7 +771,7 @@ function resumePromptFromCheckpoint(cp, crossAccount, unattended) {
       'Do the next concrete step, favour reversible actions, and do NOT kick off new long-running workflows or many parallel subagents unprompted. ' +
       'If the next step needs a human decision, a secret, or is destructive/irreversible, stop and leave a clear note instead of guessing.');
   }
-  L.push('', 'Continue now from the first remaining step.');
+  if (!compacted) L.push('', 'Continue now from the first remaining step.');
   return L.join('\n');
 }
 
@@ -698,7 +792,7 @@ function spawnDetached(cmd, args, opts) {
 // position), so a $(…)/backtick/quote in a session name cannot inject into PowerShell.
 function notifySpec(platform, title, msg) {
   if (platform === 'darwin') return { cmd: 'osascript', args: ['-e', 'display notification ' + JSON.stringify(msg) + ' with title ' + JSON.stringify(title)], env: {} };
-  if (platform === 'linux') return { cmd: 'notify-send', args: [title, msg], env: {} };
+  if (platform === 'linux') return { cmd: 'notify-send', args: ['--', title, msg], env: {} }; // a label starting with '-' is not an option
   if (platform === 'win32') {
     // zero-dep WinRT toast (no BurntToast); reads $env:CCBSL_N_TITLE/$env:CCBSL_N_MSG, so no injection
     const script = [
@@ -725,7 +819,7 @@ function notify(title, msg) {
 function oncePerSession(sid, tag, fn) {
   if (!sid || !SID_RE.test(sid)) return false;
   try {
-    fs.mkdirSync(guardDir(), { recursive: true });
+    fs.mkdirSync(guardDir(), { recursive: true, mode: 0o700 });
     const marker = path.join(guardDir(), sid + '.' + tag);
     if (fs.existsSync(marker)) return false;
     fs.writeFileSync(marker, new Date().toISOString() + '\n');
@@ -756,13 +850,126 @@ function writeBoard(input, sPct, sReset, wPct, wReset, ctx, agents) {
   const sid = input.session_id;
   if (!sid || !SID_RE.test(sid)) return;
   const cwd = inputCwd(input);
+  // transcript size: lets --board notice that a blocked session moved on, with no hook per tool call
+  let tsize = 0; try { tsize = fs.statSync(input.transcript_path).size; } catch {}
   writeJsonAtomic(path.join(boardDir(), sid + '.json'), {
     sid, cwd, project: path.basename(cwd),
+    name: sessionLabel(input, cwd),
     profile: path.basename(CFG),
     model: (input.model && (input.model.display_name || input.model.id)) || '',
     session: sPct, sessionReset: sReset, weekly: wPct, weeklyReset: wReset,
-    ctx: (ctx == null ? null : ctx), agents: agents || 0, ts: Date.now(),
+    ctx: (ctx == null ? null : ctx), agents: agents || 0, tsize, ts: Date.now(),
   });
+}
+
+// --- session-board lamps. The HOOKS stamp what a session is doing (<sid>.lamp); the RENDER stamps
+// liveness + usage (<sid>.json). Two files, one writer each, so neither can lose the other's write
+// and a board record from before the lamps existed still renders. `.lamp` is deliberately not
+// `.json`, so the existing board scan cannot mistake a state stamp for a session record.
+const LAMP_PRI = { blocked: 3, done: 2, working: 1 };
+const BOARD_LIVE_MS = 600000;      // a heartbeat this fresh means the bar is still redrawing
+const BOARD_STALE_MS = 3600000;    // older than this and the record is deleted
+// Notification types that mean Claude Code is waiting on a human. The installed matcher already
+// filters on the type, and the payload field is not documented, so the handler treats a MISSING
+// type as blocked and only skips a type it positively recognises as something else.
+const BLOCKED_NOTIFY = new Set(['permission_prompt', 'elicitation_dialog', 'elicitation_url_dialog', 'agent_needs_input']);
+// idle_prompt (Claude has sat waiting for the user) turns a stuck yellow lamp green: an Esc interrupt or
+// an API error ends a turn without any Stop hook
+const NOTIFY_MATCHER = 'permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|idle_prompt';
+const NOTIFY_WHY = { permission_prompt: 'perms', elicitation_dialog: 'form', elicitation_url_dialog: 'url', agent_needs_input: 'input' };
+
+function lampPath(sid) { return path.join(boardDir(), sid + '.lamp'); }
+function readLamp(sid) { try { return JSON.parse(fs.readFileSync(lampPath(sid), 'utf8')); } catch { return null; } }
+// A label is about to be printed to a terminal and handed to a desktop notifier, and it comes from
+// a file, an env var or session metadata. Drop C0/C1 control bytes (where ESC and the 8-bit CSI
+// live), collapse whitespace, cap the length. Applied at write time AND at read time, because a
+// record can predate this sanitizer or be written by any other local process.
+function cleanLabel(s, max) {
+  if (typeof s !== 'string') return '';
+  let out = '';
+  for (const ch of s) {
+    const cp = ch.codePointAt(0);
+    // C0 (where ESC lives), DEL, and C1 (where the 8-bit CSI lives) collapse to a space
+    out += (cp < 0x20 || cp === 0x7F || (cp >= 0x80 && cp <= 0x9F)) ? ' ' : ch;
+  }
+  // cap by CODE POINT, never by UTF-16 unit: slicing mid-surrogate would leave a lone half that
+  // renders as U+FFFD and makes the macOS notifier's AppleScript literal a syntax error
+  const cap = max || 32;
+  let res = '', n = 0;
+  for (const ch of out.replace(/\s+/g, ' ').trim()) { if (n >= cap) break; res += ch; n++; }
+  return res;
+}
+// cell-aware pad: pad() counts UTF-16 units, which drifts a whole column on a CJK or emoji label
+// and would scramble the in-place redraw's line arithmetic.
+function padCell(s, n) {
+  s = String(s == null ? '' : s);
+  let out = '', w = 0, cut = false;
+  for (const ch of s) {
+    const cw = glyphWidth(ch.codePointAt(0));
+    if (w + cw > n) { cut = true; break; }
+    out += ch; w += cw;
+  }
+  if (cut && n >= 1) { // make room for the ellipsis, one glyph at a time (a wide glyph frees 2 cells)
+    while (w + 1 > n && out.length) { const chars = [...out]; const last = chars.pop(); w -= glyphWidth(last.codePointAt(0)); out = chars.join(''); }
+    out += '…'; w += 1;
+  }
+  return out + ' '.repeat(Math.max(0, n - w));
+}
+// The board's session label. Precedence: env override (this shell only) > the project's
+// .claude/ccrig-name (what /ccrig:name writes) > Claude Code's own session name > folder name.
+// The env var wins because it is per session, while the file is shared by every session in a project.
+function sessionLabel(input, cwd) {
+  // /ccrig:name writes the file at the project root; a session started in a subdirectory still finds it
+  const root = input && input.workspace && typeof input.workspace.project_dir === 'string' ? input.workspace.project_dir : '';
+  let file = '';
+  for (const d of [root, cwd]) { if (!file && d) file = readTextHead(path.join(d, '.claude', 'ccrig-name'), 512).split(/\r?\n/)[0]; }
+  for (const cand of [process.env.CCRIG_SESSION_NAME, file,
+    (input && typeof input.session_name === 'string') ? input.session_name : '', path.basename(cwd || '')]) {
+    const s = cleanLabel(cand, 32);
+    if (s) return s;
+  }
+  return '';
+}
+// A later event wins on the clock; two events inside the same 1.5s are ordered by priority, so a
+// Stop process that loses the scheduler race can never paint over a live "blocked".
+function lampSupersedes(prev, next) {
+  if (!prev || typeof prev !== 'object' || !LAMP_PRI[prev.state]) return true; // absent or corrupt -> write
+  if (next.why === 'prompt') return true;  // the user typed: this turn began after any earlier Stop, however close
+  if ((next.at || 0) - (prev.at || 0) >= 1500) return true;                    // clearly the later event
+  return (LAMP_PRI[next.state] || 0) >= (LAMP_PRI[prev.state] || 0);           // near-simultaneous: priority
+}
+// Stamp this session's lamp. Hook-side only, and on the prompt path, so it stays one small read plus
+// one atomic write: no transcript scan, no network, no spawn. Returns false, never throws.
+function writeLamp(input, state, why, force) {
+  if (CONFIG.sessionBoard !== true) return false;   // board off -> the hooks do nothing at all
+  const sid = input && input.session_id;
+  if (!sid || !SID_RE.test(sid) || !LAMP_PRI[state]) return false;
+  const rec = { v: 1, sid, state, why: cleanLabel(why, 16), at: Date.now() };
+  if (state === 'blocked') { try { rec.tsize = fs.statSync(input.transcript_path).size; } catch { rec.tsize = 0; } }
+  const prev = readLamp(sid);
+  if (!force && !lampSupersedes(prev, rec)) return false;
+  rec.since = (prev && prev.state === state && prev.since) ? prev.since : rec.at; // when this state began
+  return writeJsonAtomic(lampPath(sid), rec);
+}
+function clearLamp(sid) {
+  if (!sid || !SID_RE.test(sid)) return;
+  try { fs.unlinkSync(lampPath(sid)); } catch {}
+  try { fs.unlinkSync(path.join(boardDir(), sid + '.json')); } catch {}
+}
+// Retention sweep over the shared board dir at a once-per-session-end moment (never per render), so
+// the dir converges even for someone who never runs --board.
+function sweepBoardDir() {
+  try {
+    for (const f of fs.readdirSync(boardDir())) {
+      try {
+        const p = path.join(boardDir(), f);
+        if (Date.now() - fs.statSync(p).mtimeMs <= BOARD_STALE_MS) continue;
+        // a lamp can sit unchanged for hours (waiting on you, or finished) while its bar still heartbeats
+        if (f.endsWith('.lamp')) { try { if (Date.now() - fs.statSync(p.slice(0, -5) + '.json').mtimeMs <= BOARD_STALE_MS) continue; } catch {} }
+        fs.unlinkSync(p);
+      } catch {}
+    }
+  } catch {}
 }
 // another profile with headroom, freshest first; null if none qualifies
 function pickFreshProfile(maxPct, maxAgeSec) {
@@ -776,7 +983,7 @@ function pickFreshProfile(maxPct, maxAgeSec) {
       // e.profile becomes CLAUDE_CONFIG_DIR on failover; reject anything that is not a real .claude*
       // basename (never a traversal), matching writeLedger's own name gate, and confirm it stays under HOME.
       if (typeof e.profile !== 'string' || !/^\.claude(-[A-Za-z0-9._-]+)?$/.test(e.profile)) continue;
-      if (!path.resolve(HOME, e.profile).startsWith(HOME + path.sep)) continue;
+      if (!path.resolve(HOME, e.profile).startsWith(path.resolve(HOME) + path.sep)) continue; // resolve: HOME may end in a slash
       const age = Math.floor(Date.now() / 1000) - (e.ts || 0);
       if (age > (maxAgeSec || 6 * 3600)) continue;                 // too stale to trust
       const s = typeof e.session === 'number' ? e.session : 100;
@@ -788,13 +995,31 @@ function pickFreshProfile(maxPct, maxAgeSec) {
   } catch {}
   return best;
 }
+// ONE naming rule everywhere (badge, ledger, install/sessions output), the same as claude-profile's:
+// ~/.claude -> default, ~/.claude-<name> -> <name>, any other dir -> its own name; profileLabels wins
 function profileLabelOf(base) {
-  return (CONFIG.profileLabels && CONFIG.profileLabels[base]) || base.replace(/^\.?claude-?/, '') || 'default';
+  if (CONFIG.profileLabels && CONFIG.profileLabels[base]) return CONFIG.profileLabels[base];
+  return base === '.claude' ? 'default' : (base.startsWith('.claude-') && base.length > 8 ? base.slice(8) : base) || 'default';
 }
 
 // --- Feature 3: burn-rate forecast. Keep a tiny rolling sample of usage over
 // time (per session, in tmp) and project when the window would hit 100%.
-function sampleFile(sid) { return path.join(os.tmpdir(), 'ccbsl-usage-' + strHash(sid) + '.jsonl'); }
+// The tmp caches live in a per-user, owner-checked 0700 dir. On Linux os.tmpdir() is the shared /tmp, where
+// another user could plant a cache file (fake branch text for this bar) or read ours (branches, subagent
+// task names). If that dir is not safely ours, fall back to the profile dir.
+let CACHE_DIR = null;
+function cacheDir() {
+  if (CACHE_DIR) return CACHE_DIR;
+  const mine = (d) => {
+    try { fs.mkdirSync(d, { recursive: true, mode: 0o700 }); } catch {}
+    try { const st = fs.lstatSync(d); return st.isDirectory() && !st.isSymbolicLink() && (typeof process.getuid !== 'function' || st.uid === process.getuid()); } catch { return false; }
+  };
+  const t = path.join(os.tmpdir(), 'ccrig-' + (typeof process.getuid === 'function' ? process.getuid() : 'user'));
+  CACHE_DIR = mine(t) ? t : path.join(CFG, '.cache');
+  if (CACHE_DIR !== t) mine(CACHE_DIR);
+  return CACHE_DIR;
+}
+function sampleFile(sid) { return path.join(cacheDir(), 'ccbsl-usage-' + strHash(sid) + '.jsonl'); }
 function recordSample(sid, sPct, wPct) {
   if (CONFIG.forecast === false || !sid || !SID_RE.test(sid)) return;
   const now = Math.floor(Date.now() / 1000);
@@ -805,7 +1030,7 @@ function recordSample(sid, sPct, wPct) {
   // accumulates in tmp otherwise). Mirrors the 14-day retention on tickets/checkpoints.
   if (!lines.length) {
     try {
-      const tmp = os.tmpdir();
+      const tmp = cacheDir();
       for (const f of fs.readdirSync(tmp)) {
         if (f.startsWith('ccbsl-usage-') && f.endsWith('.jsonl')) {
           try { const p = path.join(tmp, f); if (Date.now() - fs.statSync(p).mtimeMs > 14 * 86400 * 1000) fs.unlinkSync(p); } catch {}
@@ -823,7 +1048,7 @@ function recordSample(sid, sPct, wPct) {
   } catch {}
   lines.push(JSON.stringify({ t: now, s: sPct == null ? null : Math.round(sPct * 10) / 10, w: wPct == null ? null : Math.round(wPct * 10) / 10 }));
   if (lines.length > 40) lines = lines.slice(-40);               // rolling window
-  try { fs.writeFileSync(file, lines.join('\n') + '\n'); } catch {}
+  try { fs.writeFileSync(file, lines.join('\n') + '\n', { mode: 0o600 }); } catch {}
 }
 // least-squares slope (%/sec) of the chosen field over the samples, or null
 function burnRate(sid, field) {
@@ -888,7 +1113,18 @@ function armAutopilot(input, which, pct, resetEpoch) {
   const when = resetEpoch ? fmtReset(resetEpoch) : 'the next window';
   oncePerSession(sid, 'notified', () => notify('Claude Code: ' + label + ' limit',
     'Work checkpointed. ' + (willResume ? 'Auto-resume armed for ' + when + '.' : 'Resume with claude --resume after ' + when + '.')));
-  if (willResume) oncePerSession(sid, 'watch', () => armWatcher(sid, inputCwd(input)));
+  if (willResume) {
+    // the once-marker outlives a watcher killed by a reboot, logout or OOM: re-arm when the pid is gone
+    // and the reset is still ahead (after it, a missing watcher already fired or stood down)
+    const marker = path.join(guardDir(), sid + '.watch');
+    try {
+      if (resetEpoch && resetEpoch > nowSec() && Date.now() - fs.statSync(marker).mtimeMs > 30000) {
+        let pid = 0; try { pid = parseInt(fs.readFileSync(watchPidFile(sid), 'utf8'), 10) || 0; } catch {}
+        if (!pid || !pidAlive(pid)) fs.unlinkSync(marker);
+      }
+    } catch {}
+    oncePerSession(sid, 'watch', () => armWatcher(sid, inputCwd(input)));
+  }
 }
 // Feature 4: a compact hint pointing at another profile that still has headroom
 function failoverHint() {
@@ -943,7 +1179,7 @@ function resumeHintSeg(input, sPct, wPct, sReset, wReset, live) {
   // recovered-mid-window? drop the armed autopilot before doing anything else.
   if (live) disarmIfRecovered(input, sPct, wPct, warnAt);
   // only an ACTIVE window (reset still in the future) counts; a passed reset refreshed it
-  const near = (p, r) => p != null && p >= warnAt && windowActive(r);
+  const near = (p, r) => p != null && p >= Math.min(warnAt, critAt) && windowActive(r); // a critical set below warn still fires
   const sOn = near(sPct, sReset), wOn = near(wPct, wReset);
   if (!sOn && !wOn) return '';
   const sCrit = sOn && sPct >= critAt, wCrit = wOn && wPct >= critAt;
@@ -962,8 +1198,9 @@ function resumeHintSeg(input, sPct, wPct, sReset, wReset, live) {
     return cBold(K.red, '⚠ limit imminent') + tail + (fo ? c(K.dim, ' · ') + fo : '');
   }
   // near but not yet critical: keep a fresh-enough checkpoint + ticket so a wall that
-  // arrives WITHOUT a >=critical render (a jump straight from 9x% to the wall, a per-model
-  // cap, or the last pre-wall render landing sub-critical) still has recovery state. The
+  // arrives WITHOUT a >=critical render (a jump straight from 9x% to the wall, or the last
+  // pre-wall render landing sub-critical) still has recovery state. (A per-model weekly cap is not
+  // in the statusline data at all, so it is only covered while an all-model window is also this high.) The
   // watcher + notify stay critical-only (arming at warn would relaunch a session that ended
   // cleanly before the reset), and this is gated to the guardian so a plain install still
   // checkpoints nothing.
@@ -973,7 +1210,9 @@ function resumeHintSeg(input, sPct, wPct, sReset, wReset, live) {
     if (CONFIG.resumeTickets !== false) writeResumeTicket(input, pct, which, reset);
     maybeNearCheckpoint(input, which, reset);
   }
-  return cBold(K.red, '⚠ near limit') + c(K.dim, ': auto-saved, resume with ') + c(K.yellow, 'claude --continue');
+  // "auto-saved" only when the guardian really saves here (on, with a session id to key it by)
+  const saves = cfgAutopilot() !== 'off' && input.session_id && SID_RE.test(input.session_id);
+  return cBold(K.red, '⚠ near limit') + c(K.dim, saves ? ': auto-saved, resume with ' : ': resume with ') + c(K.yellow, 'claude --continue');
 }
 
 // Feature 3: predictive burn-rate ETA + pace verdict, from the sample ring buffer.
@@ -1019,10 +1258,17 @@ function writeJsonAtomic(file, obj) {
   // pid-unique tmp so two concurrent same-profile writers don't clobber each other's temp
   let tmp;
   try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    tmp = file + '.' + process.pid + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n');
-    fs.renameSync(tmp, file);
+    // write beside the REAL file, so a dotfiles symlink (stow, chezmoi, yadm) stays a link to the updated
+    // file, and keep its mode, so a settings.json locked to 0600 (it can hold env secrets) stays 0600
+    let target = file;
+    try { if (fs.lstatSync(file).isSymbolicLink()) target = fs.realpathSync(file); } catch {}
+    let mode = 0o600;
+    try { mode = fs.statSync(target).mode & 0o777; } catch {}
+    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 }); // a dir we create (board, ledger) is private
+    tmp = target + '.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n', { mode });
+    try { fs.chmodSync(tmp, mode); } catch {} // the umask can only narrow it; set it exactly
+    fs.renameSync(tmp, target);
     return true;
   } catch { try { if (tmp) fs.unlinkSync(tmp); } catch {} return false; } // never strand the tmp (Windows EPERM on rename-over-open)
 }
@@ -1063,7 +1309,7 @@ function maybeCheckUpdate(info) {
   // network-touching child (a C2 violation + a process leak). Fail closed on the throttle.
   if (!writeJsonAtomic(updateCacheFile(), Object.assign({ current: VERSION }, info || {}, { checkedAt: Date.now() }))) return false;
   // NODE_USE_SYSTEM_CA lets the child trust a corporate root CA (no-op on older Node)
-  spawnDetached(process.execPath, [__filename, '--check-update'], { env: Object.assign({}, process.env, { NODE_USE_SYSTEM_CA: '1' }) });
+  spawnDetached(process.execPath, [__filename, '--check-update'], { env: Object.assign({}, process.env, { NODE_USE_SYSTEM_CA: '1', CCBSL_BG_CHECK: '1' }) });
   return true;
 }
 
@@ -1101,10 +1347,13 @@ function httpGetText(url, depth, cb) {
       return httpGetText(nextU.toString(), depth + 1, finish);
     }
     if (res.statusCode !== 200) { res.resume(); return finish(new Error('HTTP ' + res.statusCode)); }
-    let d = '';
-    res.setEncoding('utf8');
-    res.on('data', (x) => { d += x; if (d.length > 6 * 1024 * 1024) { res.destroy(); finish(new Error('response too large')); } });
-    res.on('end', () => finish(null, d));
+    // a body cut short would still pass the shape gates, so check it arrived whole: the byte count
+    // against Content-Length, and no connection-delimited (unframed) body at all
+    const cl = res.headers['content-length'] != null ? Number(res.headers['content-length']) : null;
+    if (cl == null && !/chunked/i.test(res.headers['transfer-encoding'] || '')) { res.resume(); return finish(new Error('response has no length framing')); }
+    const parts = []; let n = 0;
+    res.on('data', (x) => { parts.push(x); n += x.length; if (n > 6 * 1024 * 1024) { res.destroy(); finish(new Error('response too large')); } });
+    res.on('end', () => { if (cl != null && n !== cl) return finish(new Error('truncated response (' + n + ' of ' + cl + ' bytes)')); finish(null, Buffer.concat(parts).toString('utf8')); });
     res.on('error', finish);
   };
   try {
@@ -1121,18 +1370,20 @@ function httpViaProxy(u, proxy, isHttps, headers, onRes, cb) {
   try { p = new URL(proxy); } catch (e) { return cb(e); }
   const auth = p.username ? { 'Proxy-Authorization': 'Basic ' + Buffer.from(decodeURIComponent(p.username) + ':' + decodeURIComponent(p.password || '')).toString('base64') } : {};
   const proxyPort = p.port || (p.protocol === 'https:' ? 443 : 80);
+  // an https:// proxy is spoken to over TLS: its Proxy-Authorization must never cross the wire in clear
+  const tlsProxy = p.protocol === 'https:';
   if (!isHttps) {
-    const http = require('http');
+    const http = require(tlsProxy ? 'https' : 'http');
     const req = http.get({ hostname: p.hostname, port: proxyPort, path: u.toString(), headers: Object.assign({ Host: u.host }, headers, auth), timeout: 7000 }, onRes);
     req.on('error', cb); req.on('timeout', () => req.destroy(new Error('timeout')));
     return;
   }
   const net = require('net'), tls = require('tls');
-  const sock = net.connect(proxyPort, p.hostname);
+  const sock = tlsProxy ? tls.connect({ host: p.hostname, port: proxyPort, servername: p.hostname }) : net.connect(proxyPort, p.hostname);
   let done = false; const fail = (e) => { if (!done) { done = true; try { sock.destroy(); } catch {} cb(e); } };
   sock.setTimeout(7000, () => fail(new Error('proxy timeout')));
   sock.on('error', fail);
-  sock.on('connect', () => {
+  sock.on(tlsProxy ? 'secureConnect' : 'connect', () => {
     sock.write('CONNECT ' + u.hostname + ':' + (u.port || 443) + ' HTTP/1.1\r\nHost: ' + u.hostname + ':' + (u.port || 443) + '\r\n' +
       (auth['Proxy-Authorization'] ? 'Proxy-Authorization: ' + auth['Proxy-Authorization'] + '\r\n' : '') + 'Connection: keep-alive\r\n\r\n');
   });
@@ -1149,7 +1400,7 @@ function httpViaProxy(u, proxy, isHttps, headers, onRes, cb) {
     if (leftover.length) { try { sock.unshift(leftover); } catch {} }
     const tlsSock = tls.connect({ socket: sock, servername: u.hostname }, () => {
       const https = require('https');
-      const req = https.request({ createConnection: () => tlsSock, hostname: u.hostname, path: u.pathname + u.search, headers, timeout: 7000 }, (res) => { done = true; onRes(res); });
+      const req = https.request({ createConnection: () => tlsSock, hostname: u.hostname, port: u.port || 443, path: u.pathname + u.search, headers, timeout: 7000 }, (res) => { done = true; onRes(res); });
       req.on('error', fail);
       req.on('timeout', () => req.destroy(new Error('timeout'))); // no timeout handler = a mid-body stall hangs forever
       req.end();
@@ -1174,18 +1425,35 @@ function parseChangelogTop(md) {
 }
 // --check-update: fetch the remote version (+ changelog notes) and cache it. Runs both
 // as the detached background checker (stdout ignored) and as a manual command.
+// the newest release: { version, scriptUrl, changelogUrl } or null (offline, blocked, garbage)
+function latestRelease(cb) {
+  if (UPDATE_BASE) {
+    return fetchText(UPDATE_BASE + '/statusline.js', (err, js) => {
+      // a reachable file with no version marker still yields a release, so --update can say WHY it refused
+      cb(err || !js ? null : { version: parseRemoteVersion(js), scriptUrl: UPDATE_BASE + '/statusline.js', changelogUrl: UPDATE_BASE + '/CHANGELOG.md' });
+    });
+  }
+  fetchText(RELEASE_REGISTRY_URL, (err, body) => {
+    let v = null; try { v = JSON.parse(body).version; } catch {}
+    if (err || typeof v !== 'string' || !/^\d+\.\d+\.\d+$/.test(v)) return cb(null);
+    const base = RELEASE_RAW_BASE + '/v' + v;
+    cb({ version: v, scriptUrl: base + '/statusline.js', changelogUrl: base + '/CHANGELOG.md' });
+  });
+}
 function runCheckUpdate() {
-  fetchText(UPDATE_SCRIPT_URL, (err, js) => {
-    const latest = err ? null : parseRemoteVersion(js);
+  latestRelease((rel) => {
+    const latest = rel ? rel.version : null;
     const prev = readUpdateInfo() || {};
     const finish = (notes) => {
-      writeJsonAtomic(updateCacheFile(), { current: VERSION, latest: latest || prev.latest || null, notes: notes || prev.notes || '', seen: prev.seen || null, checkedAt: Date.now(), lastSuccessAt: latest ? Date.now() : (prev.lastSuccessAt || null), source: UPDATE_BASE });
+      writeJsonAtomic(updateCacheFile(), { current: VERSION, latest: latest || prev.latest || null, notes: notes || prev.notes || '', notesFor: notes ? latest : (prev.notesFor || null), seen: prev.seen || null, checkedAt: Date.now(), lastSuccessAt: latest ? Date.now() : (prev.lastSuccessAt || null), source: rel ? rel.scriptUrl : (prev.source || null), autoUpdate: prev.autoUpdate });
+      // the background daily check (never a --check-update you typed) applies it when autoUpdate is on
+      if (process.env.CCBSL_BG_CHECK && CONFIG.autoUpdate === true && latest && semverGt(latest, VERSION)) return autoApply(latest);
       if (!latest) process.stdout.write('Could not check for updates (you may be offline, blocked, or behind a proxy). Your saved version info is unchanged.\n');
-      else if (semverGt(latest, VERSION)) process.stdout.write('A newer version is ready: v' + latest + ' (you have v' + VERSION + ').\n' + (isNpmInstall() ? 'To get it, run:  npm install -g ccrig@latest\n' : 'To get it, run:  node "' + __filename + '" --update\n'));
+      else if (semverGt(latest, VERSION)) process.stdout.write('A newer version is ready: v' + latest + ' (you have v' + VERSION + ').\n' + (isNpmInstall() ? 'To get it, run:  ' + pkgUpdateCmd() + '\n' : 'To get it, run:  node "' + __filename + '" --update\n'));
       else process.stdout.write('You are on the latest version (v' + VERSION + ').\n');
       process.exit(0);
     };
-    if (latest && semverGt(latest, VERSION)) fetchText(UPDATE_CHANGELOG_URL, (e2, md) => finish(parseChangelogTop(md)));
+    if (latest && semverGt(latest, VERSION)) fetchText(rel.changelogUrl, (e2, md) => finish(parseChangelogTop(md)));
     else finish('');
   });
 }
@@ -1208,7 +1476,7 @@ function isNpmInstall() { return /[\\/]node_modules[\\/]/.test(__dirname); }
 function runUpdate() {
   const force = argv.includes('--force');
   if (isNpmInstall()) {
-    process.stdout.write('installed via npm; update with:  npm install -g ccrig@latest\n(the built-in --update download path is for the standalone / curl install.)\n');
+    process.stdout.write('installed with a package manager; update with:  ' + pkgUpdateCmd() + '\n(the built-in --update download path is for the standalone / curl install.)\n');
     process.exit(0);
   }
   if (isOurGitClone()) {
@@ -1222,51 +1490,95 @@ function runUpdate() {
       process.exit(0);
     } catch (e) { process.stdout.write('git pull failed: ' + ((e.stderr || e.message || e) + '').trim() + '\nResolve it by hand in ' + __dirname + '\n'); process.exit(1); }
   }
-  fetchText(UPDATE_SCRIPT_URL, (err, js) => {
-    if (err || !js) { process.stdout.write('The download did not finish: ' + (err ? err.message : 'empty response') + '\nYour file was left unchanged.\n'); process.exit(1); }
-    const latest = parseRemoteVersion(js);
-    // trust gates before we ever overwrite: it must parse as our script and be a sane size
-    if (!latest) { process.stdout.write('Update skipped: the downloaded file has no version marker, so it is not the real script (it may be a proxy error page). Your file was left unchanged.\n'); process.exit(1); }
-    if (js.length < 10000 || !/ccrig|claude-code-better-status-line/.test(js)) { process.stdout.write('Update skipped: the downloaded file does not look like statusline.js, so it was left alone. Your file was left unchanged.\n'); process.exit(1); }
-    if (latest === VERSION && !force) { process.stdout.write('You are already on v' + VERSION + ', so there is nothing to apply. To reinstall this same version and repair a changed copy, run --update --force.\n'); process.exit(0); }
-    if (!semverGt(latest, VERSION) && !force) { process.stdout.write('The available version (v' + latest + ') is not newer than yours (v' + VERSION + '), so nothing was applied. To install it anyway, run --update --force.\n'); process.exit(0); }
-    // keep a .js extension so `node --check` parses it as CommonJS (top-level return is legal there)
-    const tmp = __filename + '.download-' + process.pid + '.js';
-    try {
-      const { execFileSync } = require('child_process');
-      fs.writeFileSync(tmp, js);
-      execFileSync(process.execPath, ['--check', tmp], { stdio: 'ignore', timeout: 20000 }); // syntax-validate (no shell: install path is never interpolated)
-    } catch (e) { try { fs.unlinkSync(tmp); } catch {} process.stdout.write('Update skipped: the downloaded file did not pass a syntax check (' + (e.message || e) + '). Your file was left unchanged.\n'); process.exit(1); }
-    // supply-chain gate: if a signing key is pinned, the download must carry a valid signature
-    verifyUpdate(js, (verr, method) => {
-      if (verr) { try { fs.unlinkSync(tmp); } catch {} process.stdout.write('Update skipped: ' + verr.message + '\nYour file was left unchanged.\n'); process.exit(1); }
-      const bak = __filename + '.bak-v' + VERSION;
-      try { fs.copyFileSync(__filename, bak); fs.renameSync(tmp, __filename); } // backup, then atomic same-dir swap
-      catch (e) { try { fs.unlinkSync(tmp); } catch {} process.stdout.write('update failed while writing (' + (e.message || e) + '); your file is unchanged (backup at ' + bak + ').\n'); process.exit(1); }
-      // prune old backups: keep the two most recent .bak-v* only
+  latestRelease((rel) => {
+    if (!rel) { process.stdout.write('Could not find the latest release (you may be offline, blocked, or behind a proxy). Your file was left unchanged.\n'); process.exit(1); }
+    fetchText(rel.scriptUrl, (err, js) => {
+      if (err || !js) { process.stdout.write('The download did not finish: ' + (err ? err.message : 'empty response') + '\nYour file was left unchanged.\n'); process.exit(1); }
+      const latest = parseRemoteVersion(js);
+      if (latest && latest !== rel.version) { process.stdout.write('Update skipped: the downloaded file says v' + latest + ' but the release is v' + rel.version + '. Your file was left unchanged.\n'); process.exit(1); }
+      // trust gates before we ever overwrite: it must parse as our script and be a sane size
+      if (!latest) { process.stdout.write('Update skipped: the downloaded file has no version marker, so it is not the real script (it may be a proxy error page). Your file was left unchanged.\n'); process.exit(1); }
+      if (js.length < 10000 || !/ccrig|claude-code-better-status-line/.test(js)) { process.stdout.write('Update skipped: the downloaded file does not look like statusline.js, so it was left alone. Your file was left unchanged.\n'); process.exit(1); }
+      if (latest === VERSION && !force) { process.stdout.write('You are already on v' + VERSION + ', so there is nothing to apply. To reinstall this same version and repair a changed copy, run --update --force.\n'); process.exit(0); }
+      if (!semverGt(latest, VERSION) && !force) { process.stdout.write('The available version (v' + latest + ') is not newer than yours (v' + VERSION + '), so nothing was applied. To install it anyway, run --update --force.\n'); process.exit(0); }
+      // keep a .js extension so `node --check` parses it as CommonJS (top-level return is legal there)
+      const tmp = __filename + '.download-' + process.pid + '.js';
       try {
-        const dir = path.dirname(__filename), pre = path.basename(__filename) + '.bak-v';
-        const baks = fs.readdirSync(dir).filter((f) => f.startsWith(pre)).map((f) => ({ f, m: fs.statSync(path.join(dir, f)).mtimeMs })).sort((a, b) => b.m - a.m);
-        for (const old of baks.slice(2)) { try { fs.unlinkSync(path.join(dir, old.f)); } catch {} }
-      } catch {}
-      fetchText(UPDATE_CHANGELOG_URL, (e2, md) => {
-        writeJsonAtomic(updateCacheFile(), { current: latest, latest, notes: '', seen: latest, checkedAt: Date.now(), source: UPDATE_BASE });
-        process.stdout.write('Updated v' + VERSION + ' to v' + latest + '.  (Verified with ' + method + '; a backup is at ' + bak + '.)\n');
-        const notes = parseChangelogTop(md);
-        if (notes) process.stdout.write('\nWhat changed:\n' + notes + '\n');
-        process.stdout.write('\nRestart Claude Code once so any updated hooks load.\n');
-        process.exit(0);
+        const { execFileSync } = require('child_process');
+        fs.writeFileSync(tmp, js);
+        execFileSync(process.execPath, ['--check', tmp], { stdio: 'ignore', timeout: 20000 }); // syntax-validate (no shell: install path is never interpolated)
+        // it must also RUN: a file cut between two statements parses fine but renders nothing
+        execFileSync(process.execPath, [tmp, '--selftest'], { stdio: 'ignore', timeout: 30000, env: Object.assign({}, process.env, { CCBSL_NO_ACT: '1' }) });
+        try { fs.chmodSync(tmp, fs.statSync(__filename).mode & 0o7777); } catch {} // keep a chmod +x copy runnable
+      } catch (e) { try { fs.unlinkSync(tmp); } catch {} process.stdout.write('Update skipped: the downloaded file did not pass its syntax check or self-test (' + (e.message || e) + '). Your file was left unchanged.\n'); process.exit(1); }
+      // supply-chain gate: if a signing key is pinned, the download must carry a valid signature
+      verifyUpdate(js, rel.scriptUrl, (verr, method) => {
+        if (verr) { try { fs.unlinkSync(tmp); } catch {} process.stdout.write('Update skipped: ' + verr.message + '\nYour file was left unchanged.\n'); process.exit(1); }
+        const bak = __filename + '.bak-v' + VERSION;
+        try { fs.copyFileSync(__filename, bak); fs.renameSync(tmp, __filename); } // backup, then atomic same-dir swap
+        catch (e) { try { fs.unlinkSync(tmp); } catch {} process.stdout.write('update failed while writing (' + (e.message || e) + '); your file is unchanged (backup at ' + bak + ').\n'); process.exit(1); }
+        // prune old backups: keep the two most recent .bak-v* only
+        try {
+          const dir = path.dirname(__filename), pre = path.basename(__filename) + '.bak-v';
+          const baks = fs.readdirSync(dir).filter((f) => f.startsWith(pre)).map((f) => ({ f, m: fs.statSync(path.join(dir, f)).mtimeMs })).sort((a, b) => b.m - a.m);
+          for (const old of baks.slice(2)) { try { fs.unlinkSync(path.join(dir, old.f)); } catch {} }
+        } catch {}
+        fetchText(rel.changelogUrl, (e2, md) => {
+          const notes = parseChangelogTop(md);
+          writeJsonAtomic(updateCacheFile(), { current: latest, latest, notes, notesFor: latest, seen: latest, checkedAt: Date.now(), source: rel.scriptUrl });
+          process.stdout.write('Updated v' + VERSION + ' to v' + latest + '.  (Verified with ' + method + '; a backup is at ' + bak + '.)\n');
+          // a new version can add hooks or slash commands: re-wire every profile that already runs this file,
+          // with the NEW file, bar-level only (a guardian stays exactly as the user left it)
+          let rewired = 0;
+          for (const dir of detectProfiles()) {
+            const raw = readSettingsRaw(dir);
+            if (raw.state !== 'ok' || !isPlainObject(raw.value.statusLine) || !isOurCmd(raw.value.statusLine.command)) continue;
+            const r = require('child_process').spawnSync(process.execPath, [__filename, '--install', '--no-guardian', '--this-profile'], { stdio: 'ignore', timeout: 30000, env: Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: dir, CCBSL_REFRESH: '1' }) });
+            if (r.status === 0) rewired++;
+          }
+          if (rewired) process.stdout.write('Refreshed the hooks and slash commands in ' + rewired + ' ' + plural(rewired, 'profile') + '.\n');
+          if (notes) process.stdout.write('\nWhat changed:\n' + notes + '\n');
+          process.stdout.write('\nRestart Claude Code once so any updated hooks load.\n');
+          process.exit(0);
+        });
       });
     });
   });
 }
+// autoUpdate: apply a newer release from the background daily check. Records the outcome in the update
+// cache (and --doctor shows it) instead of printing, since nobody is watching this detached process.
+function autoApply(v) {
+  const note = (error) => { const info = readUpdateInfo() || {}; writeJsonAtomic(updateCacheFile(), Object.assign(info, { autoUpdate: { to: v, at: Date.now(), error: error || null } })); };
+  if (isNpmInstall()) { note(npmSelfUpdate(v)); process.exit(0); }
+  if (isOurGitClone()) { note('a git clone updates with git pull, not automatically'); process.exit(0); }
+  note(null);
+  runUpdate(); // the standalone swap: validated, backed up, atomic; it exits when done
+}
+// An npm install updates with the npm that ships beside this node, into the SAME global prefix this copy
+// lives in (nvm, Homebrew and a custom prefix each have their own). Only when this user can write there:
+// never sudo, never a prompt. pnpm, yarn and bun globals are left to their own tool. Returns an error or null.
+function npmSelfUpdate(v) {
+  const parent = path.dirname(__dirname); // .../node_modules
+  if (path.basename(parent) !== 'node_modules' || /[\\/](pnpm|\.bun|yarn)[\\/]/i.test(__dirname)) return 'not a plain npm global install; update it with the tool that installed it';
+  let prefix = path.dirname(parent);
+  if (path.basename(prefix) === 'lib') prefix = path.dirname(prefix); // POSIX <prefix>/lib/node_modules; Windows <prefix>/node_modules
+  const bin = path.dirname(process.execPath);
+  const npmCli = [path.join(bin, 'node_modules', 'npm', 'bin', 'npm-cli.js'), path.join(bin, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')]
+    .find((p) => { try { return fs.statSync(p).isFile(); } catch { return false; } });
+  if (!npmCli) return 'npm was not found next to ' + process.execPath;
+  try { fs.accessSync(parent, fs.constants.W_OK); } catch { return parent + ' is not writable by you (installed with sudo?); run npm install -g ccrig@latest yourself'; }
+  try {
+    require('child_process').execFileSync(process.execPath, [npmCli, 'install', '-g', '--prefix', prefix, '--no-fund', '--no-audit', '--loglevel=error', 'ccrig@' + v], { stdio: 'ignore', timeout: 300000, windowsHide: true });
+    return null;
+  } catch (e) { return 'npm install failed: ' + (e.message || e); }
+}
 function updatePubkey() { return (typeof CONFIG.updatePubkey === 'string' && CONFIG.updatePubkey.trim()) || UPDATE_PUBKEY || ''; }
 // verify a downloaded update: if a public key is pinned, require a matching Ed25519
 // signature (statusline.js.sig, base64) using zero-dep node:crypto. Else TLS-only.
-function verifyUpdate(js, cb) {
+function verifyUpdate(js, scriptUrl, cb) {
   const pk = updatePubkey();
   if (!pk) return cb(null, 'HTTPS/TLS + validation (unsigned; pin updatePubkey to require signatures)');
-  fetchText(UPDATE_SCRIPT_URL + '.sig', (err, sigB64) => {
+  fetchText(scriptUrl + '.sig', (err, sigB64) => {
     if (err || !sigB64) return cb(new Error('a signing key is pinned but no valid statusline.js.sig was found'));
     try {
       const ok = require('crypto').verify(null, Buffer.from(js, 'utf8'), pk, Buffer.from(sigB64.trim(), 'base64'));
@@ -1277,7 +1589,9 @@ function verifyUpdate(js, cb) {
 // --whatsnew: print the newest changelog section for the INSTALLED version
 function runWhatsnew() {
   let md = ''; try { md = fs.readFileSync(path.join(__dirname, 'CHANGELOG.md'), 'utf8'); } catch {}
-  const notes = parseChangelogTop(md) || (readUpdateInfo() || {}).notes || '';
+  const info = readUpdateInfo() || {};
+  // cached notes describe whatever version they were fetched for: only show them for THIS version
+  const notes = parseChangelogTop(md) || (info.notesFor === VERSION ? info.notes : '') || '';
   process.stdout.write('CCRig v' + VERSION + '\n\n' + (notes || '(no CHANGELOG.md next to the script)') + '\n');
   process.exit(0);
 }
@@ -1311,8 +1625,9 @@ function contextPct(input) {
       const u = o && o.message && o.message.usage;
       if (u && (u.input_tokens != null || u.cache_read_input_tokens != null)) {
         const used = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
-        const idHint = ((input.model && input.model.id) || '') + ' ' + (settingsVal('model') || '');
-        const limit = /\[?1m\]?/i.test(idHint) ? 1000000 : 200000;
+        // the session's own window size (Claude Code sends it); the settings default says nothing about THIS session
+        const size = cw && Number(cw.context_window_size);
+        const limit = size > 0 ? size : /\[1m\]/i.test((input.model && input.model.id) || '') ? 1000000 : 200000;
         return Math.min(100, Math.round((used / limit) * 100));
       }
     }
@@ -1325,7 +1640,8 @@ function effortLevel(input) {
   const e = input.effort;
   if (e && typeof e === 'object' && e.level) return String(e.level);
   if (typeof e === 'string' && e) return e;
-  return settingsVal('effortLevel') || '';
+  // a current Claude Code omits effort when the model has none; only an old one (no version) needs the fallback
+  return input.version ? '' : (settingsVal('effortLevel') || '');
 }
 
 // caveman plugin badge: preserved so this composes with existing tooling
@@ -1339,7 +1655,7 @@ function cavemanBadge() {
   const sfile = path.join(CFG, '.caveman-statusline-suffix');
   try {
     if (fs.existsSync(sfile) && !fs.lstatSync(sfile).isSymbolicLink()) {
-      const sfx = readFileSafe(sfile).slice(0, 64).replace(/[\x00-\x1f]/g, '');
+      const sfx = cleanLabel(readFileSafe(sfile).slice(0, 64), 64);
       if (sfx) badge += ' ' + sfx;
     }
   } catch {}
@@ -1361,7 +1677,9 @@ function hasClaudeMarker(dir) {
 function detectProfiles() {
   const seen = new Set();
   const out = [];
-  const add = (d) => { if (d && !seen.has(d)) { seen.add(d); out.push(d); } };
+  // one profile spelled two ways (a trailing slash, ./, or on Windows a different case) is still one
+  const key = (d) => foldPath(path.resolve(d));
+  const add = (d) => { if (d && !seen.has(key(d))) { seen.add(key(d)); out.push(d); } };
   add(CFG); // the explicit target: always, even if it doesn't exist yet
   try {
     for (const e of fs.readdirSync(HOME).sort()) {
@@ -1370,7 +1688,7 @@ function detectProfiles() {
         const p = path.join(HOME, e);
         // require a Claude marker for NON-active dirs, so --install never writes settings.json into a
         // foreign ~/.claude-* tool dir (claude-code-router, claude-flow, backup dirs, ...).
-        try { if (p === CFG || (fs.statSync(p).isDirectory() && hasClaudeMarker(p))) add(p); } catch {}
+        try { if (key(p) === key(CFG) || (fs.statSync(p).isDirectory() && hasClaudeMarker(p))) add(p); } catch {}
       }
     }
   } catch {}
@@ -1391,10 +1709,7 @@ function markerlessClaudeDirs() {
   return out;
 }
 // a short human label for a profile dir: ~/.claude -> "default", ~/.claude-personal -> "personal"
-function profileLabel(dir) {
-  const b = path.basename(dir);
-  return b === '.claude' ? 'default' : (b.replace(/^\.claude-/, '') || b);
-}
+function profileLabel(dir) { return profileLabelOf(path.basename(dir)); }
 // how many Claude profiles exist on this machine (for the auto-hide profile badge)
 function claudeProfileCount() {
   try { return detectProfiles().length; } catch { return 1; }
@@ -1407,7 +1722,7 @@ function profileSeg() {
   if (mode === false) return '';
   const base = path.basename(CFG);
   if (mode === 'auto' && base === '.claude' && claudeProfileCount() < 2) return '';
-  const label = (CONFIG.profileLabels && CONFIG.profileLabels[base]) || base.replace(/^\.?claude-?/, '') || 'default';
+  const label = profileLabelOf(base);
   const col = base === '.claude' ? K.profileDefault : (base === '.claude-personal' ? K.profilePersonal : K.sky);
   return c(col, '👤 ' + label);
 }
@@ -1429,8 +1744,8 @@ function strHash(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h *
 function gitProbe(cwd) {
   let out;
   try {
-    out = execSync('git --no-optional-locks status --porcelain=v2 --branch', { cwd, stdio: ['ignore', 'pipe', 'ignore'], timeout: 700, encoding: 'utf8' });
-  } catch { return null; }
+    out = git(cwd, ['--no-optional-locks', 'status', '--porcelain=v2', '--branch']);
+  } catch (e) { return (e && (e.code === 'ETIMEDOUT' || e.signal === 'SIGTERM')) ? { timeout: true } : null; }
   let branch = '', ahead = 0, behind = 0, dirty = 0;
   for (const line of out.split('\n')) {
     if (line.startsWith('# branch.head ')) branch = line.slice(14).trim();
@@ -1446,17 +1761,24 @@ function gitProbe(cwd) {
 }
 function gitSeg(cwd) {
   const ttl = CONFIG.gitCacheMs || 0;
-  const cacheFile = path.join(os.tmpdir(), 'ccsl-git-' + strHash(cwd) + '.json');
+  const cacheFile = path.join(cacheDir(), 'ccsl-git-' + strHash(cwd) + '.json');
   let data;
   if (ttl > 0) {
     try { if (Date.now() - fs.statSync(cacheFile).mtimeMs < ttl) data = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); } catch {}
   }
   if (data === undefined) {
     data = gitProbe(cwd);
-    if (ttl > 0) { try { fs.writeFileSync(cacheFile, JSON.stringify(data)); } catch {} }
+    // a slow repo timed out: show the last known state (re-stamped, so the next try waits a full ttl)
+    // instead of caching "no git" and hiding the segment until the next lucky probe
+    if (data && data.timeout) { data = null; try { data = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); } catch {} }
+    if (ttl > 0) { try { fs.writeFileSync(cacheFile, JSON.stringify(data), { mode: 0o600 }); } catch {} }
   }
   if (!data || !data.branch) return '';
-  const parts = [c(K.green, data.branch)];
+  // a branch name is printed to a terminal: no control bytes, and never wider than the line
+  let branch = cleanLabel(String(data.branch), 200);
+  const maxB = Math.max(12, getWidth() - 24);
+  if (dispWidth(branch) > maxB) branch = padCell(branch, maxB).trimEnd();
+  const parts = [c(K.green, branch)];
   if (data.dirty > 0) parts.push(c(K.yellow, '●' + data.dirty));
   if (data.ahead > 0) parts.push(c(K.yellow, '↑' + data.ahead));
   if (data.behind > 0) parts.push(c(K.sky, '↓' + data.behind));
@@ -1480,16 +1802,19 @@ function collectSegments(input, width, gitOverride) {
   let folder = path.basename(projectDir || cwd);
   // true-ancestor only: cwd must continue with a path separator, so /foo isn't treated as a parent of /foobar
   if (cwd && projectDir && cwd !== projectDir && cwd.startsWith(projectDir) && (cwd[projectDir.length] === '/' || cwd[projectDir.length] === '\\')) folder += cwd.slice(projectDir.length);
-  out.folder = `\u{1F4C2} ${c(K.folder, truncFolder(folder, width - 4))}`;
+  // every string below comes from stdin or the filesystem and is printed to a terminal: a dir name, /rename
+  // title or model name holding ESC/OSC or a newline must not reach it (cleanLabel drops C0, DEL and C1)
+  out.folder = `\u{1F4C2} ${c(K.folder, truncFolder(cleanLabel(folder, 500), width - 4))}`;
 
   // String-coerce at the source: a hostile non-string display_name/id (e.g. 123) must not reach .replace()
   let model = String((input.model && input.model.display_name) || (input.model && input.model.id) || 'Claude');
-  model = model.replace(/\s*\(1M context\)/i, '').trim();
-  const oneM = /\[?1m\]?/i.test(((input.model && input.model.id) || '') + ' ' + (settingsVal('model') || ''));
+  model = cleanLabel(model.replace(/\s*\(1M context\)/i, ''), 80);
+  const cws = input.context_window && Number(input.context_window.context_window_size);
+  const oneM = cws > 0 ? cws >= 1000000 : /\[1m\]/i.test((input.model && input.model.id) || '');
   out.model = `${c(K.dim, '★')} ${c(K.model, model)}${oneM ? c(K.dim, ' [1m]') : ''}`;
   out.downgrade = downgradeSeg(input, gitOverride === undefined);
 
-  const effort = effortLevel(input);
+  const effort = cleanLabel(effortLevel(input), 16);
   out.effort = effort ? c(K.effort, '⚡' + effort) : '';
 
   const flags = [];
@@ -1534,7 +1859,7 @@ function collectSegments(input, width, gitOverride) {
     out.cost = s;
   } else out.cost = '';
 
-  const name = typeof input.session_name === 'string' ? input.session_name : '';
+  const name = typeof input.session_name === 'string' ? cleanLabel(input.session_name, 200) : '';
   out.sessionName = name ? c(K.dim, name.length > 28 ? name.slice(0, 27) + '…' : name) : '';
 
   const order = Array.isArray(CONFIG.order) ? CONFIG.order : DEFAULT_ORDER;
@@ -1585,6 +1910,7 @@ if (require.main !== module) {
     truncFolder, fmtReset, resumePromptFromCheckpoint, wrapSegments, bar,
     fetchText, httpGetText, VERSION,
     DEFAULTS, DEFAULT_ORDER, MODES, helpText, watcherCmdMatches, notifySpec, maybeCheckUpdate,
+    cleanLabel, padCell, sessionLabel, lampSupersedes, lampFor, lampPings, winLaunch, parseJsonText, profileLabelOf,
   };
   return;
 }
@@ -1595,9 +1921,21 @@ const SUBCOMMANDS = {
   init: '--install', install: '--install', uninstall: '--uninstall', doctor: '--doctor',
   update: '--update', preview: '--demo', demo: '--demo', sessions: '--sessions',
   board: '--board', config: '--config', help: '--help', version: '--version',
+  status: '--status', disarm: '--disarm', purge: '--purge', options: '--options', whatsnew: '--whatsnew',
+  mode: '--mode', autopilot: '--autopilot', 'keep-working': '--keep-working', 'check-update': '--check-update',
+  selftest: '--selftest', name: '--name',
 };
-if (argv[0] && !argv[0].startsWith('-') && Object.prototype.hasOwnProperty.call(SUBCOMMANDS, argv[0])) {
+if (argv[0] && !argv[0].startsWith('-')) {
+  if (!Object.prototype.hasOwnProperty.call(SUBCOMMANDS, argv[0])) { process.stdout.write('unknown command: ' + argv[0] + '\nRun  ccrig --help  for the list.\n'); process.exit(1); }
   argv[0] = SUBCOMMANDS[argv[0]];
+}
+// validate every flag BEFORE any mode runs: a typo in a modifier (--this-profle, --no-gaurdian) must stop
+// the command, not silently widen it to every profile or wire the guardian. (Claude Code passes no args.)
+if (argv.some((a) => a.startsWith('--'))) {
+  const KNOWN = new Set(['--install', '--install-guardian', '--no-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--options', '--config', '--demo', '--selftest', '--version', '--help', '--cols', '--this-profile', '--auto', '--force', '--hook', '--watch', '--name']);
+  const unknown = argv.find((a) => a.startsWith('--') && !KNOWN.has(a));
+  if (unknown) { process.stdout.write('unknown flag: ' + unknown + '\nRun  ccrig --help  for the flag list.\n'); process.exit(1); }
+  if (argv.includes('--auto') && !argv.includes('--install-guardian')) { process.stdout.write('--auto goes with --install-guardian (ccrig --install-guardian --auto).\n'); process.exit(1); }
 }
 
 function helpText() {
@@ -1616,8 +1954,9 @@ function helpText() {
     '  --mode <m>           set display density: minimal | normal | expanded',
     '  --autopilot <m>      limit behaviour: off | notify | resume',
     '  --keep-working <b>   keep working while todos remain: on | off',
-    '  --board              show every live session across your worktrees/profiles (opt-in)',
+    '  --board [--watch]    traffic-light board of every session (opt-in; --watch redraws in place)',
     '  --sessions           list recent sessions with the command to resume each',
+    '  --name <label>       label this project on the board (writes .claude/ccrig-name)',
     '  --status             list armed auto-resume watchers (nothing is a hidden daemon)',
     '  --disarm [id]        stop auto-resume watcher(s) and clear their state',
     '  --purge              delete all local guardian state (checkpoints, tickets, cache)',
@@ -1633,8 +1972,8 @@ function helpText() {
     '  --version            print the version',
     '  --help               this text',
     '',
-    'Config lives in statusline.config.json next to this file',
-    '(see statusline.config.example.json). Updating the script never wipes it.',
+    'Config lives in ' + CONFIG_PATH,
+    '(see statusline.config.example.json). Updating never wipes it.',
     '',
   ].join('\n');
 }
@@ -1660,7 +1999,7 @@ function guardVal(sid, tag) {
   const f = path.join(guardDir(), sid + '.' + tag);
   return {
     get: () => { try { return parseInt(fs.readFileSync(f, 'utf8'), 10) || 0; } catch { return 0; } },
-    set: (n) => { try { fs.mkdirSync(guardDir(), { recursive: true }); fs.writeFileSync(f, String(n)); return true; } catch { return false; } },
+    set: (n) => { try { fs.mkdirSync(guardDir(), { recursive: true, mode: 0o700 }); fs.writeFileSync(f, String(n)); return true; } catch { return false; } },
   };
 }
 function clearGuardCounters(sid) {
@@ -1675,7 +2014,17 @@ function clearSessionGuardState(sid) {
   }
 }
 // Feature 2 (Relentless mode): a Stop hook that refuses to pause while todos remain.
+// Board lamp for a Stop (its own hook, so a --no-guardian install gets it too). A stop parked on
+// background work is still working. Claude Code runs the guardian's Stop hook alongside this one, and
+// when keep-working refuses the stop it force-stamps "working"; never paint "done" over that.
+function stampStopLamp(input) {
+  const prev = input && SID_RE.test(String(input.session_id || '')) ? readLamp(input.session_id) : null;
+  if (prev && prev.why === 'todos' && Date.now() - (prev.at || 0) < 5000) return;
+  writeLamp(input, (input && Array.isArray(input.background_tasks) && input.background_tasks.length) ? 'working' : 'done', 'stop');
+}
+function runHookBoardStop(input) { stampStopLamp(input); emitHook({}); }
 function runHookStop(input) {
+  stampStopLamp(input); // the board's own Stop hook stamps it too; whichever runs, the lamp is the same
   // an unattended auto-resume must not loop overnight: never force-continue there
   if (process.env.CCBSL_UNATTENDED) return emitHook({});
   const kw = cfgKeepWorking();
@@ -1702,6 +2051,7 @@ function runHookStop(input) {
   const okC = cont.set(n), okS = stuck.set(s), okL = lastN.set(pending.length);
   if (!okC || !okS || !okL) { clearGuardCounters(sid); return emitHook({}); }
   const list = pending.slice(0, 6).map((x) => '- ' + (x.content || x.activeForm)).join('\n');
+  writeLamp(input, 'working', 'todos', true); // keep-working refuses the stop: force past our own 'done'
   emitHook({ decision: 'block', reason:
     'Do not stop yet: ' + pending.length + ' todo(s) still open. Keep working through them:\n' + list +
     '\nIf you are genuinely blocked on a human decision, a missing secret, or a question, state that explicitly, then stop.' });
@@ -1727,6 +2077,11 @@ function runHookSessionStart(input) {
       // Injecting here would duplicate it; clearing here would delete the recovery state
       // BEFORE the resumed run's first request, so a resume that dies against a still-capped
       // account could never be retried. Do neither — leave the checkpoint for the watcher.
+    } else if (cp && source === 'compact') {
+      // a compaction mid-session: hand back the pre-compact state, but never consume a limit checkpoint
+      // or touch an armed watcher, which a later wall or the reset still depends on
+      parts.push(resumePromptFromCheckpoint(cp, false, false, true));
+      if (!/limit/.test(cp.reason || '')) clearSessionGuardState(sid);
     } else if (cp) {
       // A human resume supersedes the armed watcher — but only once the reset has passed.
       // A pre-reset peek (opening the session just to look, or after upgrading a DIFFERENT
@@ -1753,11 +2108,40 @@ function runHookPreCompact(input) {
   writeCheckpoint(input, { reason: 'pre-compact', window: '' });
   emitHook({});
 }
+// Board lamp: the user typed, so this session is working and is no longer waiting on a human.
+// Anything on stdout for UserPromptSubmit becomes context Claude sees, and exit 2 there erases the
+// prompt, so this must stay silent and exit 0: emitHook({}) writes zero bytes.
+function runHookUserPrompt(input) { writeLamp(input, 'working', 'prompt'); emitHook({}); }
+// Board lamp: a notification that means Claude Code is waiting on a human decision. The install
+// wires a matcher on the notification type; the payload field carrying that type is not documented,
+// so a missing type is trusted (the matcher already filtered) and only a recognised non-blocking
+// type is skipped.
+function runHookNotification(input) {
+  const t = String((input && (input.notification_type || input.notificationType)) || '');
+  if (t === 'idle_prompt') {                            // idle, not blocked: settle a stale "working" to done
+    const prev = SID_RE.test(String((input && input.session_id) || '')) ? readLamp(input.session_id) : null;
+    if (prev && prev.state === 'working') writeLamp(input, 'done', 'idle', true);
+    return emitHook({});
+  }
+  if (t && !BLOCKED_NOTIFY.has(t)) return emitHook({}); // auth_success and friends: not blocked
+  writeLamp(input, 'blocked', NOTIFY_WHY[t] || 'input');
+  emitHook({});
+}
+// Board lamp: the session is gone (exit, /clear, a resume switch). Drop its rows so the board never
+// shows a ghost, and take the once-per-session-end retention sweep while we are here.
+function runHookSessionEnd(input) {
+  if (CONFIG.sessionBoard === true) { clearLamp(input && input.session_id); sweepBoardDir(); }
+  emitHook({});
+}
 function runHook(event, input) {
   try {
     if (event === 'stop' || event === 'Stop') return runHookStop(input);
     if (event === 'session-start' || event === 'SessionStart') return runHookSessionStart(input);
     if (event === 'pre-compact' || event === 'PreCompact') return runHookPreCompact(input);
+    if (event === 'user-prompt' || event === 'UserPromptSubmit') return runHookUserPrompt(input);
+    if (event === 'notification' || event === 'Notification') return runHookNotification(input);
+    if (event === 'session-end' || event === 'SessionEnd') return runHookSessionEnd(input);
+    if (event === 'board-stop') return runHookBoardStop(input);
   } catch {}
   emitHook({}); // unknown or error -> never block Claude Code
 }
@@ -1766,17 +2150,23 @@ function runHook(event, input) {
 // polling wall-clock (survives laptop suspend + week-long waits), then relaunches
 // the exact session headless. Optionally fails over to a profile with headroom.
 function watchLog(sid, m) {
-  try { const d = path.join(guardDir(), 'logs'); fs.mkdirSync(d, { recursive: true }); fs.appendFileSync(path.join(d, sid + '.log'), new Date().toISOString() + ' ' + m + '\n'); } catch {}
+  try { const d = path.join(guardDir(), 'logs'); fs.mkdirSync(d, { recursive: true, mode: 0o700 }); fs.appendFileSync(path.join(d, sid + '.log'), new Date().toISOString() + ' ' + m + '\n', { mode: 0o600 }); } catch {}
 }
 // On Windows `claude` is a .cmd/.ps1 shim: CreateProcess cannot run it, and post-CVE Node refuses a
 // .cmd without a shell, while routing our multi-line -p prompt through cmd.exe would mangle newlines
 // and expand %VARS%. So resolve the shim to the node entry (cli.js) it launches and run node against
 // it directly: the prompt arg is then passed verbatim, no shell in the loop. Returns null (meaning
 // spawn the bin as-is) for a real .exe or when the shim can't be resolved.
+// can auto-resume start this claude? Exactly the lookup relaunchResume does, never a shell
+function claudeResolves(bin) {
+  if (process.platform === 'win32') return !!winLaunch(bin);
+  if (/[\\/]/.test(bin)) { try { fs.accessSync(bin, fs.constants.X_OK); return true; } catch { return false; } }
+  return !!findBin(bin);
+}
 function winLaunch(bin) {
   const exts = (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD;.PS1').split(';').filter(Boolean);
   const cands = [];
-  if (/[\\/]/.test(bin) || /\.[A-Za-z0-9]+$/.test(bin)) cands.push(bin);
+  if (/[\\/]/.test(bin) || /\.[A-Za-z0-9]+$/.test(bin)) { cands.push(bin); if (!/\.[A-Za-z0-9]+$/.test(bin)) cands.push(bin + '.exe'); }
   else for (const dir of (process.env.PATH || '').split(path.delimiter)) for (const e of [''].concat(exts)) cands.push(path.join(dir, bin + e));
   let shim = null;
   for (const c of cands) { try { if (fs.statSync(c).isFile()) { shim = c; break; } } catch {} }
@@ -1785,7 +2175,8 @@ function winLaunch(bin) {
   let txt = ''; try { txt = fs.readFileSync(shim, 'utf8'); } catch {}
   const m = txt.match(/["']?([^"'\r\n]*\.js)["']?/);              // the cli.js the shim runs
   if (m) {
-    let js = m[1].replace(/%~dp0\\?/gi, path.dirname(shim) + path.sep).replace(/\$basedir[\\/]*/gi, path.dirname(shim) + path.sep);
+    // npm's cmd-shim has spelled the shim dir both %~dp0 and (current) %dp0%
+    let js = m[1].replace(/%~?dp0%?[\\/]?/gi, path.dirname(shim) + path.sep).replace(/\$basedir[\\/]*/gi, path.dirname(shim) + path.sep);
     if (!path.isAbsolute(js)) js = path.join(path.dirname(shim), js);
     try { if (fs.statSync(js).isFile()) return { cmd: process.execPath, pre: [js] }; } catch {}
   }
@@ -1814,17 +2205,22 @@ function relaunchResume(cp, profileDir) {
     args = [...bypass, '--resume', sid, '-p', prompt];
   }
   let fd = 'ignore';
-  try { const d = path.join(guardDir(), 'logs'); fs.mkdirSync(d, { recursive: true }); fd = fs.openSync(path.join(d, sid + '.resume.log'), 'a'); } catch {}
+  try { const d = path.join(guardDir(), 'logs'); fs.mkdirSync(d, { recursive: true, mode: 0o700 }); fd = fs.openSync(path.join(d, sid + '.resume.log'), 'a', 0o600); } catch {}
   try {
     const { spawn } = require('child_process');
     let cmd = claudeBin(), spawnArgs = args;
     const opts = { cwd: cp.cwd, env, stdio: ['ignore', fd, fd], windowsHide: true };
     if (process.platform === 'win32') {
       const wl = winLaunch(cmd);
-      if (wl) { cmd = wl.cmd; spawnArgs = wl.pre.concat(args); }
-      else { opts.shell = true; }                 // fallback: let the shell resolve the shim
+      // no shell fallback: cmd.exe would split an unquoted path at a space, cut the prompt at its first
+      // newline and expand %VARS%. Fail loudly instead and keep the checkpoint for a manual resume.
+      if (!wl) { watchLog(sid, 'cannot resolve "' + cmd + '" to claude.exe or its node entry; set "claudeBin" to claude.exe (checkpoint kept for manual resume)'); notify('Claude Code auto-resume did not take', (cp.session_name || sid) + ': could not start claude. Resume by hand:  claude --resume ' + sid); process.exit(1); }
+      cmd = wl.cmd; spawnArgs = wl.pre.concat(args);
     }
     const child = spawn(cmd, spawnArgs, opts);
+    // --disarm / --purge / a manual resume SIGTERM the watcher: take the unattended claude down with it
+    const stopChild = () => { watchLog(sid, 'stopped; ending the relaunched claude'); try { child.kill(); } catch {} process.exit(1); };
+    process.on('SIGTERM', stopChild); process.on('SIGINT', stopChild);
     child.on('error', (e) => { watchLog(sid, 'spawn error: ' + e.message + ' (checkpoint kept for manual resume)'); process.exit(1); });
     // Consume guard state ONLY on a clean exit. A headless resume can launch fine yet die
     // immediately: the 5h window reset but a still-active weekly cap blocks it, expired auth,
@@ -1890,6 +2286,9 @@ function runWatch(sid) {
       const fresh = readCheckpoint(sid);
       if (!fresh || !fresh.resets_at) { watchLog(sid, 'checkpoint gone or lost its reset; standing down'); process.exit(0); }
       cp = fresh;
+      // `--autopilot off|notify` after this watcher was armed: stand down (the checkpoint stays for a manual resume)
+      let ap; try { ap = readConfigFile().autopilot; } catch {}
+      if (ap === 'off' || ap === 'notify') { watchLog(sid, 'autopilot is now "' + ap + '"; standing down'); process.exit(0); }
       const newTarget = cp.resets_at * 1000 + bufferMs();
       if (newTarget !== target) { target = newTarget; try { fs.writeFileSync(watchPidFile(sid), String(process.pid) + '\n' + target); } catch {} watchLog(sid, 'target refreshed to ' + new Date(target).toISOString()); }
       // Failover can fire before the reset (that's the point), but NOT while you're still
@@ -1920,14 +2319,19 @@ function isOurWatcher(pid, sid) {
         { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] });
       return watcherCmdMatches(cmd, sid);
     }
+    // Linux: /proc needs no ps (slim images ship without procps)
+    if (process.platform === 'linux') { try { return watcherCmdMatches(fs.readFileSync('/proc/' + Number(pid) + '/cmdline', 'utf8').replace(/\0/g, ' '), sid); } catch {} }
     const cmd = require('child_process').execFileSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] });
     return watcherCmdMatches(cmd, sid);
   } catch { return false; }   // fail closed: never signal a process we cannot confirm is our watcher
 }
 // --status: list armed auto-resume watchers (nothing is a hidden daemon)
+function guardProfiles() { const d = detectProfiles(); return d.some((x) => path.resolve(x) === path.resolve(CFG)) ? d : [CFG].concat(d); }
 function runStatus() {
-  process.stdout.write('CCRig v' + VERSION + ' guardian status\n  Profile: ' + CFG + '\n\n');
+  process.stdout.write('CCRig v' + VERSION + ' guardian status\n');
   let any = false;
+  for (const dir of guardProfiles()) {
+  GUARD_CFG = dir;
   try {
     for (const f of fs.readdirSync(guardDir())) {
       if (!f.endsWith('.watch.pid')) continue;
@@ -1937,26 +2341,33 @@ function runStatus() {
       try { const p = fs.readFileSync(path.join(guardDir(), f), 'utf8').split('\n'); pid = parseInt(p[0], 10) || 0; target = parseInt(p[1], 10) || 0; } catch {}
       const cp = readCheckpoint(sid) || {};
       const alive = isOurWatcher(pid, sid);   // a recycled-PID orphan must not report ARMED
-      process.stdout.write('  ' + (alive ? 'Ready' : 'Inactive') + '  session ' + sid + '  process ' + pid + (alive ? '' : ' (no longer running)') +
+      process.stdout.write('  ' + (alive ? 'Ready' : 'Inactive') + '  [' + profileLabel(dir) + ']  session ' + sid + '  process ' + pid + (alive ? '' : ' (no longer running)') +
         (target ? '  fires about ' + new Date(target).toLocaleString() : '') + (cp.window ? '  [' + cp.window + ' window]' : '') + '\n');
     }
   } catch {}
-  if (!any) process.stdout.write('  No auto-resume watchers are set up right now.\n');
+  }
+  GUARD_CFG = CFG;
+  if (!any) process.stdout.write('  No auto-resume watchers are set up right now, in any profile.\n');
   process.stdout.write('\n  To stop a watcher:  node "' + __filename + '" --disarm [session-id]\n  To clear all saved state:  node "' + __filename + '" --purge\n');
   process.exit(0);
 }
 // --disarm [sid]: stop watcher(s) and clear their state
 function runDisarm(sid) {
-  process.stdout.write('CCRig v' + VERSION + ': disarm\n  profile: ' + CFG + '\n');
+  process.stdout.write('CCRig v' + VERSION + ': disarm\n');
   const targets = [];
-  try { for (const f of fs.readdirSync(guardDir())) { if (!f.endsWith('.watch.pid')) continue; const s = f.slice(0, -'.watch.pid'.length); if (!sid || s === sid) targets.push(s); } } catch {}
+  for (const dir of guardProfiles()) {
+    GUARD_CFG = dir;
+    try { for (const f of fs.readdirSync(guardDir())) { if (!f.endsWith('.watch.pid')) continue; const s = f.slice(0, -'.watch.pid'.length); if (!sid || s === sid) targets.push([dir, s]); } } catch {}
+  }
   let killed = 0;
-  for (const s of targets) {
+  for (const [dir, s] of targets) {
+    GUARD_CFG = dir;
     let pid = 0; try { pid = parseInt(fs.readFileSync(watchPidFile(s), 'utf8'), 10) || 0; } catch {}
     if (isOurWatcher(pid, s)) { try { process.kill(pid); killed++; } catch {} }
     clearSessionGuardState(s);
     try { fs.unlinkSync(watchPidFile(s)); } catch {}
   }
+  GUARD_CFG = CFG;
   process.stdout.write('Stopped ' + targets.length + ' ' + plural(targets.length, 'watcher') + (killed ? ' and ended ' + killed + ' running ' + plural(killed, 'process', 'processes') : '') + '.\n');
   process.exit(0);
 }
@@ -1971,7 +2382,9 @@ function runPurge() {
   try { fs.unlinkSync(updateCacheFile()); } catch {}
   try { fs.unlinkSync(path.join(CFG, 'statusline-error.log')); } catch {} // pure state, squarely inside purge's contract
   try { fs.unlinkSync(path.join(ledgerDir(), path.basename(CFG) + '.json')); } catch {}
-  try { for (const f of fs.readdirSync(os.tmpdir())) if (f.startsWith('ccbsl-usage-') || f.startsWith('ccbsl-agents-') || f.startsWith('ccsl-git-')) { try { fs.unlinkSync(path.join(os.tmpdir(), f)); } catch {} } } catch {}
+  for (const d of [os.tmpdir(), cacheDir()]) { // os.tmpdir(): caches from versions before the per-user dir
+    try { for (const f of fs.readdirSync(d)) if (f.startsWith('ccbsl-usage-') || f.startsWith('ccbsl-agents-') || f.startsWith('ccsl-git-')) { try { fs.unlinkSync(path.join(d, f)); } catch {} } } catch {}
+  }
   rm(boardDir()); // shared session-board files (live sessions republish on their next render)
   process.stdout.write("Cleared the saved state on this machine: checkpoints, resume tickets, watchers, the update cache, this profile's ledger entry, the session board, and temporary samples.\n");
   process.exit(0);
@@ -1993,35 +2406,191 @@ function resumeCmdLine(cfgDir, cwd, sid) {
   const cd = cwd ? 'cd ' + shellQuote(cwd) + ' && ' : '';
   return cd + 'CLAUDE_CONFIG_DIR=' + shellQuote(cfgDir) + ' claude --resume ' + sid;
 }
+// readHead that also decodes a UTF-16 file (Windows PowerShell 5.1's `>` writes UTF-16LE with a BOM)
+function readTextHead(p, bytes) {
+  let buf; try { const fd = fs.openSync(p, 'r'); buf = Buffer.alloc(bytes); buf = buf.slice(0, fs.readSync(fd, buf, 0, bytes, 0)); fs.closeSync(fd); } catch { return ''; }
+  if (buf[0] === 0xFF && buf[1] === 0xFE) return buf.slice(2).toString('utf16le');
+  if (buf[0] === 0xFE && buf[1] === 0xFF) return Buffer.from(buf.slice(2, 2 + ((buf.length - 2) & ~1))).swap16().toString('utf16le');
+  return buf.toString('utf8').replace(/^\uFEFF/, '');
+}
 function readHead(p, bytes) { try { const fd = fs.openSync(p, 'r'); const buf = Buffer.alloc(bytes); const n = fs.readSync(fd, buf, 0, bytes, 0); fs.closeSync(fd); return buf.slice(0, n).toString('utf8'); } catch { return ''; } }
-// --board: every live session across your worktrees/profiles (opt-in via sessionBoard)
-function runBoard() {
-  const dir = boardDir();
-  const now = Date.now();
-  const entries = [];
+// --board: every session across your worktrees/profiles as a traffic light (opt-in via
+// sessionBoard). Each row comes from two records: <sid>.json (the render's heartbeat + usage) and
+// <sid>.lamp (the hooks' state stamp). Blocked sorts first: it is the row that needs you.
+const LAMPS = {
+  blocked: { glyph: '●', word: 'blocked', color: 'red', rank: 0 },
+  done: { glyph: '●', word: 'done', color: 'green', rank: 1 },
+  working: { glyph: '●', word: 'working', color: 'yellow', rank: 2 },
+  ready: { glyph: '○', word: 'ready', color: 'dim', rank: 3 },   // live, not prompted yet
+  idle: { glyph: '○', word: 'idle', color: 'dim', rank: 4 },
+};
+const BOARD_COLS = [['state', 14], ['session', 18], ['project', 12], ['profile', 8], ['model', 8], ['usage', 11]];
+// Widest line a frame can produce: lamp gutter + every padded column + the padded age cell. Derived
+// from BOARD_COLS so it cannot drift, and used to decide whether an in-place redraw is safe.
+const BOARD_FRAME_COLS = 4 + BOARD_COLS.reduce((n, [, w]) => n + w, 0) + (BOARD_COLS.length - 1) + 1 + 8;
+function boardDecayMs() {
+  const n = Number(CONFIG.boardDecayMinutes);
+  return (Number.isFinite(n) && n > 0 ? Math.floor(n) : 30) * 60000;
+}
+// A timestamp from a shared dir can sit in the future (a second machine or VM whose clock is
+// ahead). Clamping to now keeps every age non-negative, so a skewed record cannot render a
+// nonsense width or dodge the staleness prune by comparing the wrong way round.
+function boardAge(now, ts) { return Math.max(0, now - (ts || 0)); }
+// the whole state machine, as one pure function of what is on disk
+function lampFor(e, lamp, now, decayMs) {
+  const age = boardAge(now, e && e.ts);
+  const live = age < BOARD_LIVE_MS;
+  const st = lamp && LAMP_PRI[lamp.state] ? lamp.state : '';
+  // a permission prompt you already answered fires no event, so the red lamp would stick for the
+  // rest of the turn. The transcript growing past its size at prompt time means the tool result
+  // landed and the session moved on, which self-heals it without a hook on every tool call.
+  const healed = st === 'blocked' && typeof lamp.tsize === 'number' && lamp.tsize > 0 && ((e && e.tsize) || 0) > lamp.tsize;
+  // blocked and done both outlive the heartbeat by their own window: the bar stops redrawing the
+  // moment a session finishes, so gating either on liveness would cap them at BOARD_LIVE_MS and
+  // make boardDecayMinutes inert for everything except a value under ten minutes.
+  if (st === 'blocked' && !healed) return (live || age < decayMs) ? 'blocked' : 'idle';
+  if (st === 'done') return boardAge(now, lamp.since || lamp.at) >= decayMs ? 'idle' : 'done';
+  if (!live) return 'idle';
+  // no lamp yet: a fresh, /clear-ed or resumed session that has not been prompted is ready, not working
+  if (!st) return 'ready';
+  return 'working'; // working, or a healed blocked
+}
+// read + prune the board dir. The session id comes from the FILE NAME and is validated, never from
+// the record, so a hand-written record cannot point us at another path.
+function boardRows(now) {
+  const dir = boardDir(), decay = boardDecayMs(), seen = new Set(), out = [];
   let files = []; try { files = fs.readdirSync(dir); } catch {}
   for (const f of files) {
     if (!f.endsWith('.json')) continue;
+    const sid = f.slice(0, -5);
     const p = path.join(dir, f);
-    try { const e = JSON.parse(fs.readFileSync(p, 'utf8')); if (e && e.ts && now - e.ts < 3600000) entries.push(e); else fs.unlinkSync(p); } catch { try { fs.unlinkSync(p); } catch {} } // prune >1h stale
+    let e = null; try { e = JSON.parse(fs.readFileSync(p, 'utf8')); } catch {}
+    // File mtime is the backstop: a live session rewrites its record every couple of seconds, so a
+    // stale mtime is decisive even when the record's own `ts` is unusable (a clock ahead of ours).
+    let mt = 0; try { mt = fs.statSync(p).mtimeMs; } catch {}
+    if (!e || !e.ts || boardAge(now, e.ts) >= BOARD_STALE_MS || (mt && now - mt >= BOARD_STALE_MS)) { try { fs.unlinkSync(p); } catch {} continue; } // prune >1h stale
+    if (!SID_RE.test(sid)) continue;
+    seen.add(sid);
+    const lamp = readLamp(sid);
+    out.push({ sid, e, lamp, lampKey: lampFor(e, lamp, now, decay) });
   }
-  const critAt = CONFIG.thresholds.usage.critical != null ? CONFIG.thresholds.usage.critical : 98;
-  const warnAt = warnAtOf(CONFIG.thresholds.usage);
-  const liveList = entries.filter((e) => now - e.ts < 600000).sort((a, b) => b.ts - a.ts); // updated in last 10 min
-  process.stdout.write('CCRig v' + VERSION + ' session board\n');
-  if (CONFIG.sessionBoard !== true) process.stdout.write('  (The session board is off. Turn on "sessionBoard" in your config so your sessions show up here.)\n');
-  process.stdout.write('\n');
-  if (!liveList.length) { process.stdout.write('  No sessions are active right now.\n'); process.exit(0); }
-  for (const e of liveList) {
-    const usage = Math.max(e.session || 0, e.weekly || 0);
-    const state = usage >= critAt ? '⚠ at limit' : (e.ctx != null && e.ctx >= 85) ? '🔴 ctx ' + e.ctx + '%'
-      : e.agents ? '🤖 ' + e.agents + ' agents' : usage >= warnAt ? '⚠ near limit' : 'active';
-    const age = Math.round((now - e.ts) / 1000);
-    process.stdout.write('  ' + pad(e.project, 20) + ' ' + pad((e.profile || '').replace(/^\.?claude-?/, '') || 'default', 9) + ' ' +
-      pad((e.model || '').split(/[\s(]/)[0], 8) + ' ' + pad('s' + Math.round(e.session || 0) + '% w' + Math.round(e.weekly || 0) + '%', 11) + ' ' +
-      pad(state, 13) + ' ' + (age < 60 ? age + 's' : Math.round(age / 60) + 'm') + ' ago\n');
+  for (const f of files) { // orphaned lamps: the session ended, or its heartbeat was pruned
+    if (!f.endsWith('.lamp') || seen.has(f.slice(0, -5))) continue;
+    try { const p = path.join(dir, f); if (now - fs.statSync(p).mtimeMs > BOARD_STALE_MS) fs.unlinkSync(p); } catch {}
   }
-  process.stdout.write('\n  ' + liveList.length + ' live session(s).\n');
+  out.sort((a, b) => (LAMPS[a.lampKey].rank - LAMPS[b.lampKey].rank) || ((b.e.ts || 0) - (a.e.ts || 0)));
+  return out;
+}
+function rowLabel(r) { return cleanLabel(r.e.name, 32) || cleanLabel(r.e.project, 32) || r.sid.slice(0, 8); }
+// one frame of the board, as a single string ending in a newline, so --watch writes it in one go
+function boardFrame(rows, now, useColor) {
+  const dim = (s) => (useColor ? c(K.dim, s) : s);
+  const L = ['CCRig v' + VERSION + ' session board'];
+  if (CONFIG.sessionBoard !== true) L.push('  (The session board is off. Turn on "sessionBoard" in your config', '   so your sessions show up here.)');
+  L.push('');
+  if (!rows.length) { L.push('  No sessions are active right now.'); return L.join('\n') + '\n'; }
+  L.push(dim('    ' + BOARD_COLS.map(([n, w]) => padCell(n, w)).join(' ') + ' updated'));
+  for (const r of rows) {
+    const e = r.e, lp = LAMPS[r.lampKey];
+    // every field is re-sanitized on the way out: a record can predate the sanitizer or be hand-written
+    const vals = [
+      lp.word + (r.lampKey === 'blocked' && r.lamp && r.lamp.why ? ' ' + cleanLabel(r.lamp.why, 6) : ''),
+      rowLabel(r),
+      cleanLabel(e.project, 32),
+      cleanLabel((typeof e.profile === 'string' ? e.profile : '').replace(/^\.?claude-?/, ''), 20) || 'default',
+      cleanLabel(String(e.model == null ? '' : e.model).split(/[\s(]/)[0], 20),
+      's' + Math.round(e.session || 0) + '% w' + Math.round(e.weekly || 0) + '%',
+    ];
+    const age = Math.round(boardAge(now, e.ts) / 1000);
+    // the age cell is padded like every other one, so no record can widen the frame and desync
+    // the in-place redraw's cursor arithmetic
+    L.push('  ' + (useColor ? c(K[lp.color], lp.glyph) : lp.glyph) + ' ' +
+      BOARD_COLS.map(([, w], i) => padCell(vals[i], w)).join(' ') + ' ' +
+      padCell((age < 60 ? age + 's' : Math.round(age / 60) + 'm') + ' ago', 8));
+  }
+  const nBlocked = rows.filter((r) => r.lampKey === 'blocked').length;
+  const nLive = rows.filter((r) => r.lampKey !== 'idle').length;
+  const nIdle = rows.length - nLive;
+  L.push('');
+  L.push('  ' + nLive + ' live ' + plural(nLive, 'session') + (nIdle ? ', ' + nIdle + ' idle' : '') +
+    (nBlocked ? ', ' + nBlocked + ' waiting on you' : '') + '.');
+  return L.join('\n') + '\n';
+}
+// which rows deserve a desktop ping this tick. Pure, so the dedupe is testable: one ping per
+// blocked STAMP, never one per poll. Keyed on `at` rather than `since`, because a second
+// permission prompt in the same chain carries `since` forward, and the sub-second self-healed
+// frame between the two is easy for a 2s poll to miss: keying on `since` would swallow that ping.
+function lampPings(rows, seen, silent) {
+  const out = [];
+  for (const r of rows) {
+    if (r.lampKey !== 'blocked') { seen.delete(r.sid); continue; }
+    const key = (r.lamp && r.lamp.at) || 0;
+    if (seen.get(r.sid) === key) continue;
+    seen.set(r.sid, key);
+    if (!silent) out.push(r);
+  }
+  return out;
+}
+// --board --watch: redraw in place until Ctrl+C, and ping when a session starts waiting on you.
+// Foreground only, and it writes no pid file, so --status / --disarm / --purge never see it as an
+// auto-resume watcher. Nothing here is a hidden daemon.
+function runBoardWatch() {
+  const ms = Math.max(250, parseInt(process.env.CCBSL_BOARD_INTERVAL_MS, 10) || 2000);
+  const maxTicks = parseInt(process.env.CCBSL_BOARD_TICKS, 10) || 0; // test hook: quit after N frames
+  const tty = !!(process.stdout && process.stdout.isTTY);
+  const useColor = tty && !process.env.NO_COLOR;
+  // An in-place redraw needs a frame that cannot wrap, so the width is re-checked EVERY tick, not
+  // once: a window dragged narrower mid-watch would wrap each row onto two terminal lines while the
+  // cursor-up count still assumed one, and the board would walk down the screen forever.
+  const wideEnough = () => tty && (getWidth() - CONFIG.reserveCols) >= BOARD_FRAME_COLS;
+  let inPlace = wideEnough();
+  const seen = new Map();
+  let prevLines = 0, n = 0, done = false;
+  const showCursor = () => { if (inPlace) { try { process.stdout.write('\x1b[?25h'); } catch {} } };
+  const bye = () => { if (done) return; done = true; showCursor(); try { process.stdout.write('\n'); } catch {} process.exit(0); };
+  process.on('SIGINT', bye); process.on('SIGTERM', bye); process.on('exit', showCursor);
+  // Ctrl+Z: give the shell its cursor back, and redraw cleanly on fg
+  if (process.platform !== 'win32') {
+    process.on('SIGTSTP', () => { showCursor(); process.kill(process.pid, 'SIGSTOP'); });
+    process.on('SIGCONT', () => { if (inPlace) { try { process.stdout.write('\x1b[?25l'); } catch {} } prevLines = 0; });
+  }
+  if (inPlace) process.stdout.write('\x1b[?25l');
+  const tick = () => {
+    if (done) return;
+    const wide = wideEnough();
+    if (wide !== inPlace) { // the window was resized: drop the stale cursor math, restart cleanly
+      if (inPlace) { try { process.stdout.write('\x1b[?25h'); } catch {} } else { try { process.stdout.write('\x1b[?25l'); } catch {} }
+      inPlace = wide; prevLines = 0;
+    }
+    const now = Date.now();
+    const rows = boardRows(now);
+    if (CONFIG.boardNotify !== false) {
+      for (const r of lampPings(rows, seen, n === 0)) { // the first frame seeds silently: no ping storm
+        notify('Claude Code is waiting on you', rowLabel(r) + ' needs a decision to continue.');
+      }
+    }
+    const lines = boardFrame(rows, now, useColor).split('\n');
+    let buf = '';
+    // a frame taller than the terminal: cursor-up stops at the top row, so redraw from home instead
+    if (inPlace && process.stdout.rows && lines.length >= process.stdout.rows) {
+      buf = '\x1b[H\x1b[2J' + lines.join('\n'); prevLines = 0;
+    } else if (inPlace) {
+      if (prevLines) buf += '\x1b[' + prevLines + 'A';   // back to the top of the last frame
+      buf += lines.map((l) => l + '\x1b[K').join('\n');  // clear each line as it is drawn: no wipe, no flicker
+      if (lines.length - 1 < prevLines) buf += '\x1b[J'; // the frame shrank: clear what is left below
+      prevLines = lines.length - 1;
+    } else buf = lines.join('\n');
+    process.stdout.write(buf);
+    n++;
+    if (maxTicks && n >= maxTicks) return bye();
+    setTimeout(tick, ms);
+  };
+  tick();
+}
+function runBoard(watch) {
+  if (watch) return runBoardWatch();
+  const now = Date.now();
+  process.stdout.write(boardFrame(boardRows(now), now, !!(process.stdout && process.stdout.isTTY) && !process.env.NO_COLOR));
   process.exit(0);
 }
 // --sessions: recent sessions in this profile, newest first, with the resume command
@@ -2068,7 +2637,7 @@ function runSessions() {
 // one mode at a time: silently ignoring the second flag misleads the user. This gate sits ABOVE
 // the one-shot dispatch so a combined command (e.g. `--purge --install`) is rejected, not half-run.
 // --hook/--watch are installer-wired internals, never user-typed, so they are exempt.
-const EXCLUSIVE = ['--install', '--install-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--config', '--demo', '--selftest', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--options', '--update', '--check-update', '--whatsnew', '--dismiss-update'];
+const EXCLUSIVE = ['--install', '--install-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--config', '--demo', '--selftest', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--options', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--name'];
 const picked = EXCLUSIVE.filter((m) => argv.includes(m));
 if (picked.length > 1) {
   process.stdout.write('pick one of: ' + picked.join(', ') + '\n');
@@ -2076,7 +2645,8 @@ if (picked.length > 1) {
 }
 
 if (argv.includes('--hook')) { let inp = {}; try { inp = JSON.parse(fs.readFileSync(0, 'utf8')); } catch {} runHook(argv[argv.indexOf('--hook') + 1], inp); }
-if (argv.includes('--watch')) { runWatch(argv[argv.indexOf('--watch') + 1]); return; }
+// `--board --watch` is the board's own redraw loop, not the auto-resume watcher, so --board wins here
+if (argv.includes('--watch') && !argv.includes('--board')) { runWatch(argv[argv.indexOf('--watch') + 1]); return; }
 if (argv.includes('--status')) runStatus();
 if (argv.includes('--disarm')) {
   const v = argv[argv.indexOf('--disarm') + 1];
@@ -2085,8 +2655,25 @@ if (argv.includes('--disarm')) {
   runDisarm(v);
 }
 if (argv.includes('--purge')) runPurge();
-if (argv.includes('--board')) runBoard();
+// --name <label>: the board label for this project, written by node so /ccrig:name needs no Write into
+// Claude Code's protected .claude/ dir (a Write there always prompts, and dontAsk mode denies it)
+if (argv.includes('--name')) {
+  const label = cleanLabel(argv.slice(argv.indexOf('--name') + 1).join(' '), 18);
+  if (!label) { process.stdout.write('usage: --name <label>   (up to 18 characters; run it in the project folder)\n'); process.exit(1); }
+  const f = path.join(process.cwd(), '.claude', 'ccrig-name');
+  try { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, label + '\n'); }
+  catch (e) { process.stdout.write('could not write ' + f + ': ' + e.message + '\n'); process.exit(1); }
+  process.stdout.write('ok  board label -> ' + label + '  (' + f + ')\n');
+  process.exit(0);
+}
+if (argv.includes('--board')) { runBoard(argv.includes('--watch')); return; } // watch mode returns to its timer loop
 if (argv.includes('--sessions')) runSessions();
+// a corporate root CA often lives only in the OS store; the background check already trusts it, so a
+// typed --update / --check-update re-runs itself the same way (Node 22.15+ reads NODE_USE_SYSTEM_CA)
+if ((argv.includes('--check-update') || argv.includes('--update')) && !process.env.NODE_USE_SYSTEM_CA) {
+  const r = require('child_process').spawnSync(process.execPath, process.argv.slice(1), { stdio: 'inherit', env: Object.assign({}, process.env, { NODE_USE_SYSTEM_CA: '1' }) });
+  process.exit(r.status == null ? 1 : r.status);
+}
 if (argv.includes('--check-update')) { runCheckUpdate(); return; } // async: exits in its callback
 if (argv.includes('--update')) { runUpdate(); return; }             // async: exits in its callback
 if (argv.includes('--whatsnew')) runWhatsnew();
@@ -2105,6 +2692,9 @@ function runOptions() {
   o += 'resume tickets: ' + (CONFIG.resumeTickets === false ? 'off' : 'on') + '\n';
   o += 'update check:   ' + (CONFIG.updateCheck === false ? 'off' : 'on') + '        once/day background check for a newer version\n';
   o += 'git cache:      ' + (CONFIG.gitCacheMs || 0) + 'ms\n';
+  o += 'session board:  ' + (CONFIG.sessionBoard === true ? 'on' : 'off') + '        --board lists every session with a blocked/working/done/idle lamp\n';
+  o += '  done decay:    ' + Math.round(boardDecayMs() / 60000) + 'm       how long a finished session stays green before it goes grey\n';
+  o += '  blocked ping:  ' + (CONFIG.boardNotify === false ? 'off' : 'on') + '        desktop ping when a session watched by --board --watch starts waiting on you\n';
   o += '\nguardian (needs --install-guardian to wire the hooks):\n';
   o += '  keep-working:  ' + (cfgKeepWorking() ? 'on' : 'off') + '        keep the session working while todos remain\n';
   o += '  autopilot:     ' + cfgAutopilot() + '        off | notify | resume (auto-relaunch at reset)\n';
@@ -2117,9 +2707,18 @@ function runOptions() {
   o += 'segments  ([x] on  [ ] off  [a] auto;  normal mode honors these, minimal/expanded override):\n';
   for (const n of order) o += '  ' + box(S[n]) + ' ' + n + '\n';
   o += '\nthresholds (percent of the window used):\n';
-  o += '  context: green<=' + tc.green + '  yellow<=' + tc.yellow + '  (else red)\n';
-  o += '  usage:   green<=' + tu.green + '  yellow<=' + tu.yellow + '  warn>=' + (tu.warn != null ? tu.warn : 90) + '  critical>=' + (tu.critical != null ? tu.critical : 95) + '\n';
+  o += '  context: green<=' + tc.green + '  yellow<' + tc.yellow + '  red>=' + tc.yellow + '\n';
+  o += '  usage:   green<=' + tu.green + '  yellow until warn, then red;  warn>=' + (tu.warn != null ? tu.warn : 90) + '  critical>=' + (tu.critical != null ? tu.critical : 98) + '\n';
   o += '\nprofile labels: ' + (Object.keys(labels).length ? JSON.stringify(labels) : '(none set; derived from dir names)') + '\n';
+  o += '\nmore:\n';
+  o += '  claudeBin:            ' + claudeBin() + '   the claude auto-resume relaunches\n';
+  o += '  continuousCheckpoint: ' + (CONFIG.continuousCheckpoint !== false) + '   refresh the checkpoint every ~10s near a limit\n';
+  o += '  downgradeAlert:       ' + (CONFIG.downgradeAlert !== false) + '   flag a silent Opus -> Sonnet drop\n';
+  o += '  reinjectOnCompact:    ' + JSON.stringify(CONFIG.reinjectOnCompact) + '   re-include a rules file after a compaction (true = CLAUDE.md)\n';
+  o += '  autoUpdate:           ' + (CONFIG.autoUpdate === true) + '   install new releases from the daily check\n';
+  o += '  updatePubkey:         ' + (updatePubkey() ? 'pinned (signed updates required)' : 'none (TLS-only)') + '\n';
+  o += '  reserveCols:          ' + CONFIG.reserveCols + '   columns kept free at the right edge\n';
+  o += '  color:                ' + (JSON.stringify(CONFIG.color) === JSON.stringify(DEFAULTS.color) ? 'defaults' : 'custom') + '   ANSI color numbers per role (see the example config)\n';
   o += '\nchange it:\n';
   o += '  in a Claude Code session:   /statusline-config\n';
   o += '  set a mode:                 node "' + __filename + '" --mode <' + MODES.join('|') + '>\n';
@@ -2133,12 +2732,13 @@ if (argv.includes('--options')) runOptions();
 // ---- push-button install: wire settings.json to this file, backup first ----
 function settingsPathOf(dir = CFG) { return path.join(dir, 'settings.json'); }
 function isPlainObject(x) { return !!x && typeof x === 'object' && !Array.isArray(x); }
-// state: 'missing' | 'invalid' (unparseable) | 'notObject' (an array/number/null) | 'ok'
+// state: 'missing' | 'unreadable' (permissions) | 'invalid' (unparseable) | 'notObject' (an array/number/null) | 'ok'
 function readSettingsRaw(dir = CFG) {
   const sp = settingsPathOf(dir);
   if (!fs.existsSync(sp)) return { state: 'missing', value: null };
-  let v;
-  try { v = JSON.parse(fs.readFileSync(sp, 'utf8')); } catch { return { state: 'invalid', value: null }; }
+  let txt, v;
+  try { txt = fs.readFileSync(sp, 'utf8'); } catch (e) { return { state: 'unreadable', value: null, code: e.code }; }
+  try { v = parseJsonText(txt); } catch { return { state: 'invalid', value: null }; }
   return isPlainObject(v) ? { state: 'ok', value: v } : { state: 'notObject', value: null };
 }
 function backupSettings(dir = CFG) {
@@ -2165,14 +2765,15 @@ function slashCommandPath(dir = CFG) { return path.join(slashCommandDir(dir), 's
 function ccrigCommandFiles(dir = CFG) {
   const d = slashCommandDir(dir);
   return ['statusline-config.md', 'ccrig.md', path.join('ccrig', 'config.md'), path.join('ccrig', 'status.md'),
-    path.join('ccrig', 'sessions.md'), path.join('ccrig', 'doctor.md'), path.join('ccrig', 'update.md')].map((f) => path.join(d, f));
+    path.join('ccrig', 'sessions.md'), path.join('ccrig', 'doctor.md'), path.join('ccrig', 'update.md'),
+    path.join('ccrig', 'name.md')].map((f) => path.join(d, f));
 }
 // the interactive config menu, shared by /statusline-config and /ccrig:config
 function configMenuDoc(sl) {
   return [
     '---',
     'description: Open an interactive menu to configure your CCRig status line',
-    'argument-hint: [optional: a change to apply directly, e.g. "minimal mode"]',
+    'argument-hint: "[optional: a change to apply directly, e.g. minimal mode]"',
     '---',
     '',
     'Open an INTERACTIVE MENU so the user configures their CCRig by',
@@ -2198,7 +2799,7 @@ function configMenuDoc(sl) {
     '   "Toggle a segment" -> a menu of the segments with their on/off state, then which way to set it.',
     '4. Apply the change:',
     '     - Display mode: `node "' + sl + '" --mode <minimal|normal|expanded>`',
-    '     - Anything else: edit statusline.config.json next to the script, deep-merging ONLY the keys',
+    '     - Anything else: edit ' + CONFIG_PATH + ', deep-merging ONLY the keys',
     '       being changed and keeping valid JSON. Never edit statusline.js.',
     '5. Verify with `node "' + sl + '" --doctor` (must pass) and show a fresh `node "' + sl + '" --demo`.',
     '6. Ask with AskUserQuestion "Change something else?" (Yes -> back to the main menu; Done -> stop).',
@@ -2213,6 +2814,20 @@ function configMenuDoc(sl) {
 function actionDoc(desc, sl, flag, instruction) {
   return ['---', 'description: ' + desc, 'allowed-tools: Bash(node:*)', '---', '', instruction, '',
     '!`node "' + sl + '" ' + flag + '`', ''].join('\n');
+}
+// /ccrig:name - label THIS project's sessions on the board (writes the file the board reads)
+function nameDoc(sl) {
+  return ['---', 'description: Name this session so it is easy to spot on the CCRig board',
+    'argument-hint: "[the label, for example billing refactor]"',
+    'allowed-tools: Bash(node:*)', '---', '',
+    'Give this work a short label for the CCRig session board (`node "' + sl + '" --board`).', '',
+    'If a label is given below, use it. Otherwise suggest one from what we are working on and confirm it with me first.',
+    'Save it by running, from the project root:  node "' + sl + '" --name "<label>"',
+    'Keep it plain text, one line, 18 characters at most (the board column width).',
+    'Then tell me it applies to every session in this project, and that setting CCRIG_SESSION_NAME in a',
+    'shell overrides it for that one session.', '',
+    '$ARGUMENTS', '',
+  ].join('\n');
 }
 // write the whole /ccrig command suite (+ the legacy /statusline-config). Returns the config path
 // (a truthy command path) so the caller can report that commands were added; null on failure.
@@ -2232,16 +2847,17 @@ function writeSlashCommands(dir = CFG) {
       'Run the command below and tell me, in plain language, whether my CCRig setup is healthy. If it flags a problem, explain it and the exact fix.'));
     fs.writeFileSync(path.join(d, 'ccrig', 'update.md'), actionDoc('Check whether a newer CCRig is available', sl, '--check-update',
       'Run the command below and tell me whether a newer CCRig is available and how to get it. Do not update anything without asking me first.'));
+    fs.writeFileSync(path.join(d, 'ccrig', 'name.md'), nameDoc(sl));
     fs.writeFileSync(path.join(d, 'ccrig.md'), ['---',
       'description: CCRig, your Claude Code status line and usage-limit guardian',
-      'argument-hint: [status | sessions | doctor | update | config]',
+      'argument-hint: "[status | sessions | doctor | update | config | name]"',
       'allowed-tools: Bash(node:*)',
       '---', '',
       "You are helping with CCRig, the user's Claude Code status line and usage-limit guardian.",
-      'If an argument is given below, do that action (status, sessions, doctor, update, or config).',
+      'If an argument is given below, do that action (status, sessions, doctor, update, config, or name).',
       'Otherwise, run the status check below, tell the user in a line or two what CCRig is doing right',
       'now, and list what they can run next: /ccrig:status, /ccrig:sessions, /ccrig:doctor,',
-      '/ccrig:update, and /ccrig:config.', '',
+      '/ccrig:update, /ccrig:config, and /ccrig:name.', '',
       '!`node "' + sl + '" --status`', '',
       '$ARGUMENTS', '',
     ].join('\n'));
@@ -2250,11 +2866,13 @@ function writeSlashCommands(dir = CFG) {
 }
 // wire ONE profile. Returns a result the caller reports; never exits, never throws for a
 // bad settings.json (so one broken profile can't block the others).
+const REFRESH = !!process.env.CCBSL_REFRESH;
 function installStatusLineInto(dir, withGuardian) {
   try {
     fs.mkdirSync(dir, { recursive: true });
     const sp = settingsPathOf(dir);
     const raw = readSettingsRaw(dir);
+    if (raw.state === 'unreadable') return { dir, sp, err: 'settings.json cannot be read (' + raw.code + '); check who owns it (a `sudo claude` run can leave it root-owned)' };
     if (raw.state === 'invalid') return { dir, sp, err: 'settings.json is not valid JSON (fix or delete it, then re-run)' };
     if (raw.state === 'notObject') return { dir, sp, err: 'settings.json is not a JSON object (fix it, then re-run)' };
     const settings = raw.value || {};
@@ -2262,15 +2880,21 @@ function installStatusLineInto(dir, withGuardian) {
     const prevSl = isPlainObject(settings.statusLine) && typeof settings.statusLine.command === 'string' ? settings.statusLine.command : '';
     const replacedForeign = (prevSl && !isOurCmd(prevSl)) ? prevSl : null;
     const bak = backupSettings(dir);
-    // process.execPath = the node running this installer: absolute, exists, cross-platform
-    settings.statusLine = { type: 'command', command: `"${process.execPath}" "${__filename}"`, refreshInterval: 2 };
+    settings.statusLine = { type: 'command', command: ourCommand(''), refreshInterval: 2 };
     // The guardian is on by default (SessionStart restore + PreCompact + Stop hooks); --no-guardian
     // installs the bar only. The autopilot MODE (notify vs resume) is config, defaulting to notify.
-    if (withGuardian) addGuardianHooks(settings);
+    // An npm update (postinstall) or a standalone --update runs in REFRESH mode: it re-points a guardian
+    // that is already wired at this copy, and never adds or removes one. A --no-guardian you typed takes
+    // the guardian out, so "just the bar" is true.
+    const hadGuardian = GUARD_EVENTS.some(([Ev, slug]) => isPlainObject(settings.hooks) && Array.isArray(settings.hooks[Ev]) && settings.hooks[Ev].some((g) => groupHasSlug(g, slug)));
+    let strippedGuardian = false;
+    if (withGuardian || (REFRESH && hadGuardian)) addGuardianHooks(settings);
+    else if (hadGuardian) { settings.hooks = stripGuardianHooks(settings.hooks).hooks || {}; strippedGuardian = true; }
+    addBoardHooks(settings); // the board lamps ride with the bar, so --no-guardian keeps them
     if (!writeJsonAtomic(sp, settings)) throw new Error('could not save ' + sp + '; it was left unchanged');
     JSON.parse(fs.readFileSync(sp, 'utf8')); // round-trip validate
     const cmd = writeSlashCommands(dir);
-    return { dir, sp, bak, cmd, replacedForeign, guardian: !!withGuardian };
+    return { dir, sp, bak, cmd, replacedForeign, guardian: !!withGuardian || (REFRESH && hadGuardian), strippedGuardian, hooksOff: settings.disableAllHooks === true };
   } catch (e) { return { dir, sp: settingsPathOf(dir), err: e.message }; }
 }
 function runInstall() {
@@ -2286,10 +2910,17 @@ function runInstall() {
     process.stdout.write('Set up the status line for the ' + profileLabel(r.dir) + ' profile.  (' + r.sp + ')'
       + (r.bak ? '  A backup was saved first.' : '') + '\n');
     if (r.replacedForeign) process.stdout.write('  Replaced the status line that was there before' + (r.bak ? ' (the old one is in the backup)' : '') + '.\n');
+    if (r.strippedGuardian) process.stdout.write('  Took the guardian hooks out of it (--no-guardian).\n');
+    if (r.hooksOff) process.stdout.write('  Note: "disableAllHooks" is true in this profile, so Claude Code runs neither the bar nor any hook until you turn it off (/hooks).\n');
   }
-  if (okd.some((r) => r.cmd)) process.stdout.write('Added the /ccrig commands to Claude Code: /ccrig, /ccrig:status, /ccrig:sessions, /ccrig:doctor, /ccrig:update, and /ccrig:config.\n');
+  if (okd.some((r) => r.cmd)) process.stdout.write('Added the /ccrig commands to Claude Code: /ccrig, /ccrig:status, /ccrig:sessions, /ccrig:doctor, /ccrig:update, /ccrig:config, and /ccrig:name.\n');
   for (const r of failed) process.stdout.write('Could not set up the ' + profileLabel(r.dir) + ' profile (' + r.sp + '): ' + r.err + '\n');
-  if (!thisOnly) for (const d of markerlessClaudeDirs()) process.stdout.write('Skipped the ' + profileLabel(d) + ' profile: it has no Claude settings yet. To set it up, run:  CLAUDE_CONFIG_DIR=' + d + ' node "' + __filename + '" --install --this-profile\n');
+  if (!thisOnly) for (const d of markerlessClaudeDirs()) {
+    const how = process.platform === 'win32'
+      ? "$env:CLAUDE_CONFIG_DIR='" + d.replace(/'/g, "''") + "'; node \"" + __filename + "\" --install --this-profile; Remove-Item Env:CLAUDE_CONFIG_DIR"
+      : 'CLAUDE_CONFIG_DIR=' + shellQuote(d) + ' node "' + __filename + '" --install --this-profile';
+    process.stdout.write('Skipped the ' + profileLabel(d) + ' profile: it has no Claude settings yet (log in to it once first). To set it up, run:  ' + how + '\n');
+  }
   if (!okd.length) { process.stdout.write('Setup did not finish: no profile could be set up. Run --doctor to see what is wrong.\n'); process.exit(1); }
   if (!thisOnly && profiles.length > 1) {
     // honest summary: only claim "all profiles" when nothing was skipped. Exit stays 0 on a partial
@@ -2303,15 +2934,25 @@ function runInstall() {
   const helperPs = path.join(__dirname, 'claude-profiles.ps1');
   if (process.platform === 'win32') {
     if (fs.existsSync(helperPs)) process.stdout.write('To switch accounts in PowerShell:  . "' + helperPs + '"\n');
+    if (fs.existsSync(helperSh)) process.stdout.write('To switch accounts in Git Bash:  source "' + helperSh.replace(/\\/g, '/') + '"\n');
   } else if (fs.existsSync(helperSh)) {
     process.stdout.write('To switch accounts from your shell:  source "' + helperSh + '"\n');
   }
   process.stdout.write('\nPreview it now:  node "' + __filename + '" --demo\n');
   if (withGuardian) {
-    process.stdout.write('The guardian is on (autopilot: notify): at a usage limit it checkpoints your work, keeps that checkpoint fresh, saves a resume ticket, and sends a desktop ping. It never launches anything unattended.\n');
-    process.stdout.write('Go hands-free (auto-relaunch at reset):  node "' + __filename + '" --install-guardian --auto\n');
-    process.stdout.write('Prefer just the bar? Reinstall with --no-guardian, or set "autopilot": "off".\n');
+    // wiring the guardian hooks turns an autopilot left "off" (by --uninstall-guardian) back to notify
+    if (cfgAutopilot() === 'off') { CONFIG.autopilot = 'notify'; saveConfig(); }
+    if (cfgAutopilot() === 'resume') process.stdout.write('The guardian is on (autopilot: resume): at a usage limit it checkpoints your work and relaunches the session on its own at the reset.\n');
+    else {
+      process.stdout.write('The guardian is on (autopilot: notify): at a usage limit it checkpoints your work, keeps that checkpoint fresh, saves a resume ticket, and sends a desktop ping. It never launches anything unattended.\n');
+      process.stdout.write('Go hands-free (auto-relaunch at reset):  node "' + __filename + '" --install-guardian --auto\n');
+    }
+    process.stdout.write('Prefer just the bar? Reinstall with --no-guardian.\n');
+  } else if (REFRESH) {
+    process.stdout.write('Refreshed the status line' + (okd.some((r) => r.guardian) ? ' and the guardian hooks' : '') + ' for this copy.\n');
   } else {
+    // bar only means no limit side effects either: the render-side checkpoint and ping follow autopilot
+    if (!detectProfiles().some(profileHasGuardian) && cfgAutopilot() !== 'off') { CONFIG.autopilot = 'off'; CONFIG.keepWorking = false; saveConfig(); }
     process.stdout.write('Installed the status line only (guardian off). Turn it on any time:  node "' + __filename + '" --install-guardian\n');
   }
   // honest one-line privacy note; the render is zero-network, a once-a-day check is the only exception
@@ -2320,20 +2961,77 @@ function runInstall() {
   process.exit(0);
 }
 
-// ---- guardian: wire the Stop / SessionStart / PreCompact hooks (Features 1, 2, 5) ----
-const GUARD_EVENTS = [['Stop', 'stop'], ['SessionStart', 'session-start'], ['PreCompact', 'pre-compact']];
-function guardianHookCommand(slug) { return `"${process.execPath}" "${__filename}" --hook ${slug}`; }
-// Add our Stop/SessionStart/PreCompact hooks to a settings object. Idempotent: strips any prior
-// copy of ours first, keeps the user's own hooks. Shared by the default install (guardian is on
-// out of the box) and --install-guardian. Pure JSON mutation, so it is identical on every OS.
-function addGuardianHooks(settings) {
-  settings.hooks = stripGuardianHooks(isPlainObject(settings.hooks) ? settings.hooks : {}).hooks || {};
-  for (const [Event, slug] of GUARD_EVENTS) {
+// ---- hook wiring. 'guardian' hooks power Relentless mode + resume (Features 1, 2, 5); 'board'
+// hooks only stamp the session-board lamp, so they ride with the status line instead, which keeps
+// them for a --no-guardian install and gets them wired by an ordinary npm update.
+// [ClaudeCodeEvent, cliSlug, group, matcher, timeoutSeconds]
+const HOOK_EVENTS = [
+  ['Stop', 'stop', 'guardian', '', 0],
+  ['SessionStart', 'session-start', 'guardian', '', 0],
+  ['PreCompact', 'pre-compact', 'guardian', '', 0],
+  ['UserPromptSubmit', 'user-prompt', 'board', '', 5],
+  ['Notification', 'notification', 'board', NOTIFY_MATCHER, 5],
+  // no timeout on SessionEnd: a settings-file timeout RAISES its shared exit budget, which would
+  // make quitting Claude Code feel slower than it does today
+  ['SessionEnd', 'session-end', 'board', '', 0],
+  // the green "done" lamp needs a Stop hook of its own, or a --no-guardian install never shows it
+  ['Stop', 'board-stop', 'board', '', 5],
+];
+const GUARD_EVENTS = HOOK_EVENTS.filter((e) => e[2] === 'guardian');
+const BOARD_EVENTS = HOOK_EVENTS.filter((e) => e[2] === 'board');
+function guardianHookCommand(slug) { return ourCommand('--hook ' + slug); }
+// The command string settings.json runs. Claude Code runs it through Git Bash, or through PowerShell on
+// a Windows machine without Git Bash, and PowerShell reads a QUOTED first token as a string, not a
+// program ("Unexpected token"). So on Windows the first token is never quoted: the node path in forward
+// slashes when it has no spaces, else plain `node` from PATH. Everywhere, a node on PATH that is the same
+// binary wins over the versioned real path, so `brew upgrade node` (a new Cellar dir) does not strand it.
+function nodeForCommand() {
+  const exe = process.execPath;
+  let real = exe; try { real = fs.realpathSync(exe); } catch {}
+  let onPath = null;
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    if (!dir || !path.isAbsolute(dir)) continue;
+    const p = path.join(dir, process.platform === 'win32' ? 'node.exe' : 'node');
+    try { if (fs.realpathSync(p) === real) { onPath = p; break; } } catch {}
+  }
+  if (process.platform !== 'win32') return '"' + (onPath || exe) + '"';
+  const p = (onPath || exe).replace(/\\/g, '/');
+  return /\s/.test(p) ? 'node' : p;
+}
+// pnpm resolves __filename into its versioned store (node_modules/.pnpm/ccrig@1.2.3/node_modules/ccrig);
+// the global node_modules/ccrig link next to it survives an update, the store dir does not
+function stableScriptPath() {
+  const m = /^(.*)[\\/]\.pnpm[\\/]ccrig@[^\\/]+[\\/]node_modules[\\/]ccrig[\\/]statusline\.js$/.exec(__filename);
+  if (m) { const p = path.join(m[1], 'ccrig', 'statusline.js'); try { if (fs.realpathSync(p) === fs.realpathSync(__filename)) return p; } catch {} }
+  return __filename;
+}
+function pkgUpdateCmd() {
+  if (/[\\/]\.?pnpm[\\/]/i.test(__filename)) return 'pnpm add -g ccrig@latest';
+  if (/[\\/]\.bun[\\/]/.test(__filename)) return 'bun add -g ccrig@latest';
+  if (/[\\/]yarn[\\/]/i.test(__filename)) return 'yarn global add ccrig@latest';
+  return 'npm install -g ccrig@latest';
+}
+function ourCommand(args) {
+  const f0 = stableScriptPath();
+  const file = process.platform === 'win32' ? f0.replace(/\\/g, '/') : f0;
+  return nodeForCommand() + ' "' + file + '"' + (args ? ' ' + args : '');
+}
+// Add ONE group of our hooks to a settings object. Idempotent: strips any prior copy of THAT group
+// first, keeps the user's own hooks, leaves the other group alone. The literal `--hook` token is
+// load-bearing: isGuardianHookCmd identifies our entries by it. Pure JSON mutation, so it is
+// identical on every OS.
+function addHooks(settings, events) {
+  settings.hooks = stripOurHooks(isPlainObject(settings.hooks) ? settings.hooks : {}, events).hooks || {};
+  for (const [Event, slug, , matcher, timeout] of events) {
     const kept = Array.isArray(settings.hooks[Event]) ? settings.hooks[Event] : [];
-    kept.push({ hooks: [{ type: 'command', command: guardianHookCommand(slug) }] });
+    const hook = { type: 'command', command: guardianHookCommand(slug) };
+    if (timeout) hook.timeout = timeout;
+    kept.push(matcher ? { matcher, hooks: [hook] } : { hooks: [hook] });
     settings.hooks[Event] = kept;
   }
 }
+function addGuardianHooks(settings) { addHooks(settings, GUARD_EVENTS); }
+function addBoardHooks(settings) { addHooks(settings, BOARD_EVENTS); }
 // paths a settings command references (quoted tokens first, then whitespace-split bare tokens)
 function cmdPaths(cmd) {
   const quoted = [...String(cmd).matchAll(/"([^"]+)"/g)].map((m) => m[1]);
@@ -2343,21 +3041,28 @@ function cmdPaths(cmd) {
 // (existence-agnostic). Used to strip guardian hooks even from a moved/deleted copy (reversibility).
 function refsStatuslineJs(cmd) {
   if (typeof cmd !== 'string') return false;
-  if (cmd.includes(__filename)) return true;
+  if (cmd.includes(__filename) || cmd.includes(__filename.replace(/\\/g, '/'))) return true;
   return cmdPaths(cmd).some((t) => /(^|[\/\\])statusline\.js$/.test(t));
 }
 // does this statusLine command belong to THIS install to REMOVE safely? our exact file, OR a
 // stale reference to a now-MISSING statusline.js (a moved/partial install) — never a LIVE foreign
 // script that merely shares the name. Guards --uninstall against deleting someone else's bar.
+// NTFS and default APFS ignore case, and Windows tools disagree on the drive letter's (c:\ vs C:\)
+function foldPath(p) { p = String(p); return (process.platform === 'win32' || process.platform === 'darwin') ? p.toLowerCase() : p; }
+function expandHomeToken(t) { return String(t).replace(/^(~|\$HOME|\$\{HOME\}|%USERPROFILE%)(?=[\\/])/i, () => HOME); }
 function isOurCmd(cmd) {
   if (typeof cmd !== 'string') return false;
-  if (cmd.includes(__filename)) return true;
+  const low = foldPath(cmd);
+  if (low.includes(foldPath(__filename)) || low.includes(foldPath(__filename.replace(/\\/g, '/')))) return true;
   let selfReal; try { selfReal = fs.realpathSync(__filename); } catch { selfReal = __filename; }
-  for (const t of cmdPaths(cmd)) {
-    if (/(^|[\/\\])statusline\.js$/.test(t)) {
-      // symlink-aware same-file check (a symlinked TMPDIR spells our own path two ways); a
-      // MISSING path is a stale reference to a moved/deleted copy of ours, so still ours to clean.
-      try { const real = fs.realpathSync(t); return real === selfReal || real === __filename; }
+  for (const t0 of cmdPaths(cmd)) {
+    if (/(^|[\/\\])statusline\.js$/.test(t0)) {
+      const t = expandHomeToken(t0);
+      // a relative path is somebody else's command, never a copy we wrote (we always write absolute)
+      if (!path.isAbsolute(t)) return false;
+      // symlink-aware same-file check (a symlinked TMPDIR spells our own path two ways); a MISSING
+      // absolute path is a stale reference to a moved/deleted copy of ours, so still ours to clean.
+      try { const real = foldPath(fs.realpathSync(t)); return real === foldPath(selfReal) || real === foldPath(__filename); }
       catch { return true; }
     }
   }
@@ -2365,20 +3070,24 @@ function isOurCmd(cmd) {
 }
 // a guardian hook of ours: the --hook convention + any statusline.js reference (any install).
 function isGuardianHookCmd(h) { return h && typeof h.command === 'string' && h.command.includes('--hook') && refsStatuslineJs(h.command); }
-function isGuardianHookGroup(g) { return g && Array.isArray(g.hooks) && g.hooks.some(isGuardianHookCmd); }
 // remove ONLY our individual hook entries, per-hook, so a user's hook that shares a
 // group object with ours is never dropped. Empty groups (and events) are pruned.
 // Returns the possibly-emptied hooks object (undefined if now empty) + a removed count.
-function stripGuardianHooks(hooks) {
+// the `--hook <slug>` of one of our commands (Stop carries both a guardian and a board hook)
+function hookSlug(cmd) { const m = /--hook\s+(\S+)/.exec(String(cmd || '')); return m ? m[1] : null; }
+function groupHasSlug(g, slug) { return !!(g && Array.isArray(g.hooks) && g.hooks.some((h) => isGuardianHookCmd(h) && hookSlug(h.command) === slug)); }
+function stripOurHooks(hooks, events) {
   if (!isPlainObject(hooks)) return { hooks, removed: 0 };
   let removed = 0;
-  for (const [Event] of GUARD_EVENTS) {
+  const slugs = new Set(events.map((e) => e[1]));
+  const ours = (h) => isGuardianHookCmd(h) && (hookSlug(h.command) === null || slugs.has(hookSlug(h.command)));
+  for (const [Event] of events) {
     if (!Array.isArray(hooks[Event])) continue;
     const kept = [];
     for (const g of hooks[Event]) {
       if (g && Array.isArray(g.hooks)) {
         const before = g.hooks.length;
-        g.hooks = g.hooks.filter((h) => !isGuardianHookCmd(h));
+        g.hooks = g.hooks.filter((h) => !ours(h));
         removed += before - g.hooks.length;
         if (!g.hooks.length) continue; // this group held only our hook(s) -> drop it
       }
@@ -2388,21 +3097,24 @@ function stripGuardianHooks(hooks) {
   }
   return { hooks: Object.keys(hooks).length ? hooks : undefined, removed };
 }
+function stripGuardianHooks(hooks) { return stripOurHooks(hooks, GUARD_EVENTS); }
 // wire the guardian hooks into ONE profile. Returns a result; never exits/throws.
 function installGuardianInto(dir) {
   try {
     fs.mkdirSync(dir, { recursive: true });
     const sp = settingsPathOf(dir);
     const raw = readSettingsRaw(dir);
+    if (raw.state === 'unreadable') return { dir, sp, err: 'settings.json cannot be read (' + raw.code + '); check who owns it (a `sudo claude` run can leave it root-owned)' };
     if (raw.state === 'invalid') return { dir, sp, err: 'settings.json is not valid JSON (fix it, then re-run)' };
     if (raw.state === 'notObject') return { dir, sp, err: 'settings.json is not a JSON object (fix it, then re-run)' };
     const settings = raw.value || {};
     const bak = backupSettings(dir);
     if (!isPlainObject(settings.statusLine) || typeof settings.statusLine.command !== 'string') {
-      settings.statusLine = { type: 'command', command: `"${process.execPath}" "${__filename}"`, refreshInterval: 2 };
+      settings.statusLine = { type: 'command', command: ourCommand(''), refreshInterval: 2 };
     }
     // strip any prior guardian hooks surgically (keeps the user's own), then add fresh
     addGuardianHooks(settings);
+    addBoardHooks(settings); // keep the board lamps wired for anyone who only ever runs this command
     if (!writeJsonAtomic(sp, settings)) throw new Error('could not save ' + sp + '; it was left unchanged');
     JSON.parse(fs.readFileSync(sp, 'utf8')); // round-trip validate
     writeSlashCommands(dir);
@@ -2416,16 +3128,16 @@ function runInstallGuardian() {
   const okd = results.filter((r) => !r.err);
   const failed = results.filter((r) => r.err);
   for (const r of okd) {
-    process.stdout.write('Set up the guardian for the ' + profileLabel(r.dir) + ' profile (Stop, SessionStart, and PreCompact hooks).  (' + r.sp + ')'
+    process.stdout.write('Set up the guardian for the ' + profileLabel(r.dir) + ' profile (Stop, SessionStart, and PreCompact hooks), plus the session-board lamp hooks.  (' + r.sp + ')'
       + (r.bak ? '  A backup was saved first.' : '') + '\n');
   }
   for (const r of failed) process.stdout.write('Could not set up the ' + profileLabel(r.dir) + ' profile (' + r.sp + '): ' + r.err + '\n');
   if (!okd.length) { process.stdout.write('Guardian setup did not finish: no profile could be set up. Run --doctor to see what is wrong.\n'); process.exit(1); }
   // config (keep-working + autopilot) is shared across profiles — set it once
   const want = argv.includes('--auto') ? 'resume' : (cfgAutopilot() === 'off' ? 'notify' : cfgAutopilot());
-  CONFIG.keepWorking = true;
+  CONFIG.keepWorking = CONFIG.keepWorking || true; // keep custom loop-guard limits
   CONFIG.autopilot = want;
-  saveConfig();
+  if (!saveConfig()) process.stdout.write('The hooks are wired, but keep-working and autopilot could not be saved to ' + CONFIG_PATH + ', so they keep their old values.\n');
   if (!thisOnly && profiles.length > 1) {
     process.stdout.write('\nSet up the guardian for ' + okd.length + ' ' + plural(okd.length, 'profile')
       + (failed.length ? '. ' + failed.length + ' could not be set up.' : '.') + ' (Add --this-profile to set up just one.)\n');
@@ -2440,11 +3152,28 @@ function runInstallGuardian() {
   process.exit(0);
 }
 // remove the guardian hooks from ONE profile. Returns a result; never exits/throws.
+// stop every armed auto-resume watcher of one profile, so an uninstall never leaves one to fire later
+function disarmWatchersIn(dir) {
+  const gd = path.join(dir, 'guardian');
+  let n = 0;
+  try {
+    for (const f of fs.readdirSync(gd)) {
+      if (!f.endsWith('.watch.pid')) continue;
+      const s = f.slice(0, -'.watch.pid'.length);
+      let pid = 0; try { pid = parseInt(fs.readFileSync(path.join(gd, f), 'utf8'), 10) || 0; } catch {}
+      if (isOurWatcher(pid, s)) { try { process.kill(pid); n++; } catch {} }
+      try { fs.unlinkSync(path.join(gd, f)); } catch {}
+    }
+  } catch {}
+  return n;
+}
 function uninstallGuardianFrom(dir) {
+  disarmWatchersIn(dir);
   try {
     const sp = settingsPathOf(dir);
     const raw = readSettingsRaw(dir);
-    if (raw.state !== 'ok') return { dir, sp, removed: 0 };
+    if (raw.state === 'missing') return { dir, sp, removed: 0 };
+    if (raw.state !== 'ok') return { dir, sp, removed: 0, err: 'settings.json ' + (raw.state === 'unreadable' ? 'cannot be read (' + raw.code + ')' : 'does not parse') + ', so any CCRig hooks in it are still there; fix it, then run this again' };
     const settings = raw.value;
     const res = stripGuardianHooks(settings.hooks);
     if (!res.removed) return { dir, sp, removed: 0 };
@@ -2461,18 +3190,35 @@ function runUninstallGuardian() {
   const removedAny = results.filter((r) => r.removed);
   for (const r of removedAny) process.stdout.write('Removed ' + r.removed + ' guardian ' + plural(r.removed, 'hook') + ' from the ' + profileLabel(r.dir) + ' profile.  (' + r.sp + ')' + (r.bak ? '  A backup was saved first.' : '') + '\n');
   for (const r of results.filter((r) => r.err)) process.stdout.write('The ' + profileLabel(r.dir) + ' profile ran into a problem: ' + r.err + '\n');
-  if (!removedAny.length) { process.stdout.write('There is nothing to remove: no profile has guardian hooks.\n'); process.exit(0); }
-  CONFIG.keepWorking = false; CONFIG.autopilot = 'off'; saveConfig();
+  const errs = results.filter((r) => r.err).length;
+  if (!removedAny.length) { if (errs) process.exit(1); process.stdout.write('There is nothing to remove: no profile has guardian hooks.\n'); process.exit(0); }
+  // the config is shared by every profile: turn the guardian's behavior off only once no profile has its hooks
+  const still = detectProfiles().filter(profileHasGuardian);
+  if (still.length) {
+    process.stdout.write('Left autopilot and keep-working as they are, since the ' + still.map(profileLabel).join(', ') + ' ' + plural(still.length, 'profile') + ' still ' + (still.length === 1 ? 'has' : 'have') + ' the guardian. The status line itself stays in place.\n');
+    process.exit(errs ? 1 : 0);
+  }
+  CONFIG.keepWorking = false; CONFIG.autopilot = 'off';
+  if (!saveConfig()) { process.stdout.write('The hooks are gone, but autopilot and keep-working could not be switched off in ' + CONFIG_PATH + '.\n'); process.exit(1); }
   process.stdout.write('Turned off Relentless mode and Autopilot. The status line itself stays in place.\n');
-  process.exit(0);
+  process.exit(errs ? 1 : 0);
+}
+function profileHasGuardian(dir) {
+  const raw = readSettingsRaw(dir);
+  const hooks = raw.state === 'ok' && isPlainObject(raw.value.hooks) ? raw.value.hooks : {};
+  return GUARD_EVENTS.some(([Ev, slug]) => Array.isArray(hooks[Ev]) && hooks[Ev].some((g) => groupHasSlug(g, slug)));
 }
 // remove OUR status line (+ guardian hooks + slash command) from ONE profile. Never
 // touches a third-party status line. Returns a result; never exits/throws.
 function uninstallFrom(dir) {
+  disarmWatchersIn(dir);
   try {
     const sp = settingsPathOf(dir);
     const raw = readSettingsRaw(dir);
-    const gres = raw.state === 'ok' ? stripGuardianHooks(raw.value.hooks) : { removed: 0 };
+    // strip BOTH groups: --uninstall removes everything we ever wired. The second call's return is
+    // the definitive shape, since it saw the first call's edits.
+    const gres = raw.state === 'ok' ? stripOurHooks(raw.value.hooks, GUARD_EVENTS) : { removed: 0 };
+    const bres = raw.state === 'ok' ? stripOurHooks(raw.value.hooks, BOARD_EVENTS) : { removed: 0 };
     // only remove a statusLine that is THIS script's, so we never delete a third-party
     // status line the user switched to (a statusLine with no readable command is treated
     // as ours: it's almost certainly a stale/partial entry from a moved install).
@@ -2488,13 +3234,14 @@ function uninstallFrom(dir) {
       try { fs.rmdirSync(path.join(slashCommandDir(dir), 'ccrig')); } catch {} // drop the now-empty /ccrig subdir
     } catch {}
     try { fs.unlinkSync(path.join(dir, '.ccbsl-update.json')); } catch {}
-    if (raw.state !== 'ok' || (!ownsStatusLine && !gres.removed)) return { dir, sp, removedSL: false, removedHooks: 0, foreign, removedCmd };
+    if (raw.state === 'unreadable' || raw.state === 'invalid' || raw.state === 'notObject') return { dir, sp, err: 'settings.json ' + (raw.state === 'unreadable' ? 'cannot be read (' + raw.code + ')' : 'does not parse') + ', so the CCRig status line and hooks in it are still there; fix it, then run --uninstall again' };
+    if (raw.state !== 'ok' || (!ownsStatusLine && !gres.removed && !bres.removed)) return { dir, sp, removedSL: false, removedHooks: 0, removedBoard: 0, foreign, removedCmd };
     const settings = raw.value;
     const bak = backupSettings(dir);
     if (ownsStatusLine) delete settings.statusLine;
-    if (gres.removed) { if (gres.hooks === undefined) delete settings.hooks; else settings.hooks = gres.hooks; }
+    if (gres.removed || bres.removed) { if (bres.hooks === undefined) delete settings.hooks; else settings.hooks = bres.hooks; }
     if (!writeJsonAtomic(sp, settings)) throw new Error('could not save ' + sp + '; it was left unchanged');
-    return { dir, sp, removedSL: ownsStatusLine, removedHooks: gres.removed, foreign, bak, removedCmd };
+    return { dir, sp, removedSL: ownsStatusLine, removedHooks: gres.removed, removedBoard: bres.removed, foreign, bak, removedCmd };
   } catch (e) { return { dir, sp: settingsPathOf(dir), err: e.message }; }
 }
 function runUninstall() {
@@ -2508,11 +3255,12 @@ function runUninstall() {
     if (r.removedSL) { process.stdout.write('Removed the status line from the ' + profileLabel(r.dir) + ' profile.  (' + r.sp + ')' + (r.bak ? '  A backup was saved first.' : '') + '\n'); touched++; }
     else if (r.foreign) process.stdout.write('Left the ' + profileLabel(r.dir) + " profile's status line alone, since it belongs to another tool.\n");
     if (r.removedHooks) { process.stdout.write('Removed ' + r.removedHooks + ' guardian ' + plural(r.removedHooks, 'hook') + ' from the ' + profileLabel(r.dir) + ' profile.\n'); touched++; }
+    if (r.removedBoard) { process.stdout.write('Removed ' + r.removedBoard + ' session-board ' + plural(r.removedBoard, 'hook') + ' from the ' + profileLabel(r.dir) + ' profile.\n'); touched++; }
     if (r.removedCmd) { process.stdout.write('Removed the /ccrig commands from the ' + profileLabel(r.dir) + ' profile.\n'); touched++; }
   }
   if (!touched) {
     if (errs.length) process.exit(1); // a real permission/IO failure, not a clean no-op
-    process.stdout.write('There is nothing to remove: no profile has our status line or guardian hooks.\n');
+    process.stdout.write('There is nothing to remove: no profile has our status line or our hooks.\n');
     process.exit(0);
   }
   process.stdout.write('This file and statusline.config.json were left in place. You can delete them if you like.\n');
@@ -2546,6 +3294,7 @@ function runDoctor() {
   const sp = settingsPathOf();
   const raw = readSettingsRaw();
   if (raw.state === 'missing') bad('no settings.json at ' + sp, 'run: node "' + __filename + '" --install');
+  else if (raw.state === 'unreadable') bad('settings.json cannot be read (' + raw.code + ')', 'check who owns it; a `sudo claude` run can leave it root-owned');
   else if (raw.state === 'invalid') bad('settings.json is not valid JSON', 'fix or delete it, then re-run --install');
   else if (raw.state === 'notObject') bad('settings.json parses but is not a JSON object', 'fix it, then re-run --install');
   else ok('settings.json parses');
@@ -2567,44 +3316,60 @@ function runDoctor() {
     }
   }
   if (fs.existsSync(CONFIG_PATH)) {
-    try { JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); ok('statusline.config.json parses'); }
+    try { parseJsonText(fs.readFileSync(CONFIG_PATH, 'utf8')); ok('statusline.config.json parses'); }
     catch (e) { bad('statusline.config.json is invalid JSON (' + e.message + '); defaults are in use', 'fix it or delete it'); }
   } else info('no statusline.config.json: defaults in use (customize with --config)');
-  try { execSync('git --version', { stdio: 'ignore', timeout: 2000 }); ok('git found'); }
-  catch { info('git not found: the git segment stays hidden'); }
+  if (findBin('git')) ok('git found'); else info('git not found: the git segment stays hidden');
   // subscription-only features: rate_limits is only in stdin for Claude.ai Pro/Max
   if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) info('API key detected: usage bars, forecast, and auto-resume are subscription-only (they need rate_limits, which Claude Code sends only to Pro/Max); you still get context/git/cost/model');
   else info('usage bars/forecast/auto-resume need a Claude.ai Pro/Max subscription (rate_limits in stdin); if they stay blank on a subscription, the stdin schema may have changed');
   // guardian: report which lifecycle hooks are wired, and whether claude is reachable for auto-resume
   if (raw.state === 'ok') {
     const hooks = isPlainObject(raw.value.hooks) ? raw.value.hooks : {};
-    const wired = GUARD_EVENTS.filter(([Event]) => Array.isArray(hooks[Event]) && hooks[Event].some(isGuardianHookGroup)).map(([Event]) => Event);
+    const wired = GUARD_EVENTS.filter(([Event, slug]) => Array.isArray(hooks[Event]) && hooks[Event].some((g) => groupHasSlug(g, slug))).map(([Event]) => Event);
     if (wired.length === GUARD_EVENTS.length) ok('guardian hooks wired (' + wired.join(', ') + ')');
-    else if (wired.length) info('guardian partly wired (' + wired.join(', ') + '); re-run --install-guardian for all three');
-    else info('guardian hooks not wired (Relentless mode + auto-resume off); enable with --install-guardian');
+    else if (wired.length) info('guardian partly wired (' + wired.join(', ') + '); re-run --install-guardian to wire them all');
+    else info('guardian hooks not wired (no Relentless mode, no resume-time context); enable with --install-guardian');
+    if (raw.value.disableAllHooks === true) bad('"disableAllHooks" is true, so Claude Code runs neither the status line nor any hook', 'set it to false (or turn hooks back on in /hooks)');
+    if (cfgKeepWorking() && !wired.includes('Stop')) info('keep-working is on, but no guardian Stop hook is wired, so it does nothing; run --install-guardian');
     if (wired.length) {
       // path-check the hook commands too (doctor only checked statusLine before): after a node-version
       // upgrade, --install fixes statusLine but the hooks still point at a dead node path.
       const hookCmds = [];
-      for (const [Event] of GUARD_EVENTS) for (const g of (Array.isArray(hooks[Event]) ? hooks[Event] : [])) for (const h of (g && Array.isArray(g.hooks) ? g.hooks : [])) if (isGuardianHookCmd(h)) hookCmds.push(h.command);
+      for (const [Event, slug] of GUARD_EVENTS) for (const g of (Array.isArray(hooks[Event]) ? hooks[Event] : [])) for (const h of (g && Array.isArray(g.hooks) ? g.hooks : [])) if (isGuardianHookCmd(h) && hookSlug(h.command) === slug) hookCmds.push(h.command);
       const hookMissing = [];
       for (const hc of hookCmds) for (const m of checkCmdPaths(hc).missing) if (!hookMissing.includes(m)) hookMissing.push(m);
-      if (hookMissing.length) bad('path(s) in guardian hook commands do not exist: ' + hookMissing.join(', '), 're-run: node "' + __filename + '" --install-guardian');
+      // --install re-points every wired command at this copy without touching keep-working or autopilot
+      if (hookMissing.length) bad('path(s) in guardian hook commands do not exist: ' + hookMissing.join(', '), 're-run: node "' + __filename + '" --install');
       info('  keep-working: ' + (cfgKeepWorking() ? 'on' : 'off') + '   autopilot: ' + cfgAutopilot());
-      if (cfgAutopilot() === 'resume') {
-        try {
-          if (process.platform === 'win32') {
-            // auto-resume launches the `claude` shim via winLaunch (node against its cli.js), so a
-            // .cmd/.ps1 shim is fine now; just confirm claude resolves on PATH.
-            execSync('where ' + claudeBin(), { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
-            ok('claude on PATH (auto-resume can relaunch)');
-          } else {
-            execSync('command -v ' + claudeBin(), { stdio: 'ignore', timeout: 2000 });
-            ok('claude on PATH (auto-resume can relaunch)');
-          }
-        } catch { bad('autopilot is "resume" but "' + claudeBin() + '" is not on PATH', 'set "claudeBin" in config to an absolute claude path'); }
-      }
     }
+    // auto-resume arms from the render, hooks or not, so check the relaunch target whenever it is on
+    if (cfgAutopilot() === 'resume') {
+      if (claudeResolves(claudeBin())) ok('"' + claudeBin() + '" found (auto-resume can relaunch)');
+      else bad('autopilot is "resume" but "' + claudeBin() + '" was not found' + (process.platform === 'win32' ? ' as claude.exe or an npm shim' : ' on PATH'), 'set "claudeBin" in config to the full path of claude' + (process.platform === 'win32' ? '.exe' : ''));
+    }
+  }
+  // session board: the lamp hooks, and the shared dir the rows are read from
+  if (CONFIG.sessionBoard !== true) info('session board: off (turn on "sessionBoard" to use --board)');
+  else {
+    const bh = raw.state === 'ok' && isPlainObject(raw.value.hooks) ? raw.value.hooks : {};
+    const bw = BOARD_EVENTS.filter(([Event, slug]) => Array.isArray(bh[Event]) && bh[Event].some((g) => groupHasSlug(g, slug))).map(([Event]) => Event);
+    if (bw.length === BOARD_EVENTS.length) ok('session board lamps wired (' + bw.join(', ') + ')');
+    // name the events that ARE wired the same way the guardian block does, so the list never reads
+    // as if it were naming the missing ones
+    else if (bw.length) info('session board lamps partly wired (' + bw.join(', ') + '); re-run --install to wire them all');
+    else info('session board is on but its lamp hooks are not wired; re-run --install so blocked and done rows light up');
+    const bdir = boardDir();
+    let bst = null; try { bst = fs.lstatSync(bdir); } catch {}
+    if (bst && bst.isSymbolicLink()) bad('the session board dir is a symlink (' + bdir + ')', 'delete it: the board expects plain files there');
+    // a plain file there makes every board write fail silently, and the row count below would
+    // otherwise report a healthy, empty board
+    else if (bst && !bst.isDirectory()) bad('the session board path is not a directory (' + bdir + ')', 'delete or move it: every board write is failing');
+    else {
+      let bn = 0; try { bn = fs.readdirSync(bdir).filter((f) => f.endsWith('.json')).length; } catch {}
+      info('session board: on, ' + bn + ' ' + plural(bn, 'record') + ' in ' + bdir);
+    }
+    info('  done decay: ' + Math.round(boardDecayMs() / 60000) + 'm   blocked ping: ' + (CONFIG.boardNotify === false ? 'off' : 'on'));
   }
   // update system: report the check state + any available version (no network here; reads the cache)
   if (CONFIG.updateCheck === false) info('update check: off');
@@ -2639,7 +3404,8 @@ if (argv.includes('--autopilot')) {
     process.exit(1);
   }
   CONFIG.autopilot = want;
-  if (saveConfig()) process.stdout.write('ok  autopilot -> ' + want + '  (' + CONFIG_PATH + ')\n');
+  if (!saveConfig()) process.exit(1);
+  process.stdout.write('ok  autopilot -> ' + want + '  (' + CONFIG_PATH + ')\n');
   process.exit(0);
 }
 if (argv.includes('--keep-working')) {
@@ -2648,8 +3414,10 @@ if (argv.includes('--keep-working')) {
     process.stdout.write('usage: --keep-working <on|off>' + (want ? '  (got "' + want + '")' : '') + '\n');
     process.exit(1);
   }
-  CONFIG.keepWorking = (want === 'on');
-  if (saveConfig()) process.stdout.write('ok  keep-working -> ' + want + '  (' + CONFIG_PATH + ')\n');
+  // `on` keeps custom loop-guard limits ({maxContinues, maxStuck}) instead of resetting them
+  CONFIG.keepWorking = want === 'on' ? (CONFIG.keepWorking || true) : false;
+  if (!saveConfig()) process.exit(1);
+  process.stdout.write('ok  keep-working -> ' + want + '  (' + CONFIG_PATH + ')\n');
   process.exit(0);
 }
 
@@ -2661,7 +3429,8 @@ if (argv.includes('--mode')) {
     process.exit(1);
   }
   CONFIG.mode = want;
-  if (saveConfig()) process.stdout.write('ok  display mode -> ' + want + '  (' + CONFIG_PATH + ')\nPreview:  node "' + __filename + '" --demo\n');
+  if (!saveConfig()) process.exit(1);
+  process.stdout.write('ok  display mode -> ' + want + '  (' + CONFIG_PATH + ')\nPreview:  node "' + __filename + '" --demo\n');
   process.exit(0);
 }
 
@@ -2761,7 +3530,12 @@ function diffFromDefaults(cur, def) {
 }
 function saveConfig() {
   try {
-    if (fs.existsSync(CONFIG_PATH)) fs.copyFileSync(CONFIG_PATH, CONFIG_PATH + '.bak');
+    if (fs.existsSync(CONFIG_PATH)) {
+      // a config we could not parse was ignored at load; saving now would replace it with defaults
+      try { parseJsonText(fs.readFileSync(CONFIG_PATH, 'utf8')); }
+      catch { throw new Error(CONFIG_PATH + ' is not valid JSON, so it was left as is. Fix or delete it, then run this again'); }
+      fs.copyFileSync(CONFIG_PATH, CONFIG_PATH + '.bak');
+    }
     // persist only overrides, never a full snapshot, so future default changes still reach the user
     const sparse = diffFromDefaults(CONFIG, DEFAULTS) || {};
     if (!writeJsonAtomic(CONFIG_PATH, sparse)) throw new Error('could not save ' + CONFIG_PATH + '; it was left unchanged');
@@ -2793,7 +3567,11 @@ async function runConfigEditor() {
       out += `  ${String(i + 1).padStart(2)}) ${box} ${n}${n === 'profile' ? ` (mode: ${v})` : ''}\n`;
     });
     out += `\n   m) mode: ${CONFIG.mode}  (minimal / normal / expanded)\n`;
-    out += `   r) reset-time style: ${CONFIG.resetStyle}\n   s) save & quit    q) quit without saving\n`;
+    out += `   r) reset-time style: ${CONFIG.resetStyle}\n`;
+    out += `   b) session board: ${CONFIG.sessionBoard === true ? 'on' : 'off'}  (lamps in --board)\n`;
+    out += `   d) done decay: ${Math.round(boardDecayMs() / 60000)}m  (a finished session goes grey after this)\n`;
+    out += `   p) board ping: ${CONFIG.boardNotify !== false ? 'on' : 'off'}  (--board --watch pings when a session waits on you)\n`;
+    out += `   s) save & quit    q) quit without saving\n`;
     if (CONFIG.mode !== 'normal') out += `   note: mode is ${CONFIG.mode}, so the segment toggles above only take effect in normal mode.\n`;
     process.stdout.write(out);
     const a = (await ask('\n> ')).trim().toLowerCase();
@@ -2801,6 +3579,9 @@ async function runConfigEditor() {
     if (a === 's') { if (saveConfig()) process.stdout.write(`Saved → ${CONFIG_PATH}\n`); break; }
     if (a === 'm') { CONFIG.mode = MODES[(MODES.indexOf(CONFIG.mode) + 1) % MODES.length]; continue; }
     if (a === 'r') { CONFIG.resetStyle = CONFIG.resetStyle === 'clock' ? 'relative' : 'clock'; continue; }
+    if (a === 'b') { CONFIG.sessionBoard = CONFIG.sessionBoard !== true; continue; }
+    if (a === 'p') { CONFIG.boardNotify = CONFIG.boardNotify === false; continue; }
+    if (a === 'd') { const steps = [15, 30, 60, 120]; CONFIG.boardDecayMinutes = steps[(steps.indexOf(Math.round(boardDecayMs() / 60000)) + 1) % steps.length]; continue; }
     if (/^\d+$/.test(a)) {
       const n = order[parseInt(a, 10) - 1];
       if (!n) { process.stdout.write('No such segment.\n'); continue; }
@@ -2808,25 +3589,21 @@ async function runConfigEditor() {
       else CONFIG.show[n] = !CONFIG.show[n];
       continue;
     }
-    process.stdout.write('Enter a segment number, r, s, or q.\n');
+    process.stdout.write('Enter a segment number, b, d, m, r, s, or q.\n');
   }
   rl.close();
   process.exit(0);
 }
 
 // strict unknown-flag rejection: a typo like `--instal` should error, not silently render a bar.
-// Claude Code always invokes with argv.length===0, so this never runs on the render hot path (C3).
-if (argv.some((a) => a.startsWith('--'))) {
-  const KNOWN = new Set(['--install', '--install-guardian', '--no-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--options', '--config', '--demo', '--selftest', '--version', '--help', '--cols', '--this-profile', '--auto', '--force', '--hook', '--watch']);
-  const unknown = argv.find((a) => a.startsWith('--') && !KNOWN.has(a));
-  if (unknown) { process.stdout.write('unknown flag: ' + unknown + '\nRun  node "' + __filename + '" --help  for the flag list.\n'); process.exit(1); }
-}
 
 // ===========================================================================
 // normal path: Claude Code pipes the status JSON on stdin
 // ===========================================================================
 if (!argv.includes('--config')) {
-  if (process.stdin.isTTY) {
+  // tty.isatty, not process.stdin.isTTY: touching process.stdin opens fd 0 non-blocking, and the blocking
+  // read below then fails with EAGAIN if Claude Code has not written the JSON yet (the bar renders `{}`)
+  if (require('tty').isatty(0)) {
     // a human ran this bare in a terminal: don't block on stdin, show help
     process.stdout.write(helpText());
     process.exit(0);

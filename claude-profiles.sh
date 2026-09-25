@@ -11,11 +11,18 @@
 #
 # Works in bash and zsh.
 
-_cc_valid_name() {   # reject names that would escape the .claude-* namespace (slashes, .., leading - or .)
-  case "$1" in
-    ''|*/*|*..*|-*|.*) return 1 ;;
+_cc_valid_name() {   # letters, digits, . _ - only (as the .ps1 and ccrig's ledger); no leading - or ., no
+                     # trailing . (Windows drops it, so "work." would alias "work"), no .., and never ccrig's own dirs
+  case "${1:-}" in
+    ''|*[!A-Za-z0-9._-]*|[.-]*|*.|*..*|usage-ledger|rig-sessions) return 1 ;;
     *) return 0 ;;
   esac
+}
+_cc_trim() {  # forward slashes (Git Bash inherits C:\Users\me\.claude-work), no trailing slash (tab completion)
+  local p="${1:-}"
+  p="${p//\\//}"
+  while [ "${p%/}" != "$p" ] && [ "${p%/}" != "" ]; do p="${p%/}"; done
+  printf '%s' "$p"
 }
 _cc_profile_dir() {   # name -> dir
   case "$1" in
@@ -24,10 +31,11 @@ _cc_profile_dir() {   # name -> dir
   esac
 }
 _cc_profile_name() {  # dir -> name
-  case "${1##*/}" in
+  local d; d="$(_cc_trim "${1:-}")"
+  case "${d##*/}" in
     .claude)   printf 'default' ;;
-    .claude-*) printf '%s' "${1##*/.claude-}" ;;
-    *)         printf '%s' "${1##*/}" ;;
+    .claude-*) printf '%s' "${d##*/.claude-}" ;;
+    *)         printf '%s' "${d##*/}" ;;
   esac
 }
 
@@ -35,44 +43,48 @@ claude-profile() {
   local cmd="${1:-list}"; [ $# -gt 0 ] && shift
   case "$cmd" in
     list|ls)
-      local cur="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" d
+      local cur d; cur="$(_cc_trim "${CLAUDE_CONFIG_DIR:-$HOME/.claude}")"
       {
         [ -d "$HOME/.claude" ] && printf '%s\n' "$HOME/.claude"
-        find "$HOME" -maxdepth 1 -type d -name '.claude-*' 2>/dev/null | grep -vE '/\.claude-(usage-ledger|rig-sessions)$' | sort
+        # -L: a symlinked profile dir is still a profile (use/run accept it, ccrig counts it)
+        find -L "$HOME" -maxdepth 1 -type d -name '.claude-*' 2>/dev/null | grep -vE '/\.claude-(usage-ledger|rig-sessions)$' | sort
       } | while IFS= read -r d; do
         if [ "$d" = "$cur" ]; then printf '  \033[32m* %s\033[0m\n' "$(_cc_profile_name "$d")"
         else printf '    %s\n' "$(_cc_profile_name "$d")"; fi
       done
       ;;
     use|switch)
-      [ -z "$1" ] && { echo "usage: claude-profile use <name>"; return 1; }
+      [ -z "${1:-}" ] && { echo "usage: claude-profile use <name>"; return 1; }
       _cc_valid_name "$1" || { echo "invalid profile name '$1' (letters, digits, . _ - only)"; return 1; }
       local dir; dir="$(_cc_profile_dir "$1")"
       [ -d "$dir" ] || { echo "profile '$1' not found. create it:  claude-profile new $1"; return 1; }
-      export CLAUDE_CONFIG_DIR="$dir"
+      # default = the variable UNSET: Claude Code keys its login (the macOS keychain entry) off an explicit
+      # CLAUDE_CONFIG_DIR, so exporting ~/.claude would look like a different, logged-out account
+      if [ "$1" = "default" ]; then unset CLAUDE_CONFIG_DIR; else export CLAUDE_CONFIG_DIR="$dir"; fi
       echo "✅ Claude profile → $1   ($dir)"
       echo "   run 'claude' to start it in this shell."
       ;;
     run)
-      [ -z "$1" ] && { echo "usage: claude-profile run <name> [claude args]"; return 1; }
+      [ -z "${1:-}" ] && { echo "usage: claude-profile run <name> [claude args]"; return 1; }
       _cc_valid_name "$1" || { echo "invalid profile name '$1' (letters, digits, . _ - only)"; return 1; }
       local name="$1"; shift; local dir; dir="$(_cc_profile_dir "$name")"
       [ -d "$dir" ] || { echo "profile '$name' not found. create it:  claude-profile new $name"; return 1; }
-      CLAUDE_CONFIG_DIR="$dir" claude "$@"
+      if [ "$name" = "default" ]; then (unset CLAUDE_CONFIG_DIR; claude "$@"); else CLAUDE_CONFIG_DIR="$dir" claude "$@"; fi
       ;;
     new|create)
-      [ -z "$1" ] && { echo "usage: claude-profile new <name>"; return 1; }
+      [ -z "${1:-}" ] && { echo "usage: claude-profile new <name>"; return 1; }
       _cc_valid_name "$1" || { echo "invalid profile name '$1' (letters, digits, . _ - only)"; return 1; }
       local dir; dir="$(_cc_profile_dir "$1")"
       [ -d "$dir" ] && { echo "profile '$1' already exists ($dir)"; return 1; }
-      mkdir -p "$dir" && echo "✅ created profile '$1'.  Start it:  claude-profile use $1 && claude   (then /login)"
+      mkdir -p "$dir" && echo "✅ created profile '$1'.  Start it:  claude-profile use $1 && claude   (then /login)" \
+        && echo "   After that first login, run 'ccrig init' once so the status line and guardian reach it."
       ;;
     current|who)
-      local cur="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+      local cur; cur="$(_cc_trim "${CLAUDE_CONFIG_DIR:-$HOME/.claude}")"
       printf '%s   (%s)\n' "$(_cc_profile_name "$cur")" "$cur"
       ;;
     remove|rm)
-      [ -z "$1" ] && { echo "usage: claude-profile remove <name>"; return 1; }
+      [ -z "${1:-}" ] && { echo "usage: claude-profile remove <name>"; return 1; }
       [ "$1" = "default" ] && { echo "refusing to remove the default profile (~/.claude)"; return 1; }
       _cc_valid_name "$1" || { echo "invalid profile name '$1' (letters, digits, . _ - only)"; return 1; }
       local dir; dir="$(_cc_profile_dir "$1")"
