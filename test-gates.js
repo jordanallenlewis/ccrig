@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*
- * Quality gates for ccrig. Zero dependencies (node:test, Node 18+). Auto-discovered by
- * `node --test` alongside test.js / test-unit.js, so it needs no CI change. One file, one
+ * Quality gates for ccrig. Zero dependencies (node:test, Node 18+). Run by `npm test`
+ * alongside test.js / test-unit.js (the file list is pinned in package.json). One file, one
  * shared rule source, covering the three authored output surfaces:
  *   - docs + CLI literals: a plain-voice scan (no em-dash, no AI-tell vocabulary)
  *   - config SSOT: the example config must match the DEFAULTS object, and every CONFIG.<key>
@@ -120,4 +120,51 @@ test('GATE: package.json version matches VERSION, bin points at the script, no d
   assert.strictEqual(pkg.bin && pkg.bin.ccrig, 'statusline.js', 'the ccrig bin must point at statusline.js');
   assert.ok(Array.isArray(pkg.files) && pkg.files.includes('statusline.js'), 'files must ship statusline.js');
   assert.ok(!pkg.dependencies || Object.keys(pkg.dependencies).length === 0, 'must stay zero-dependency (C1)');
+});
+
+// ---- gate: the Claude Code mod ships the same release as npm ----
+// /plugin pins an installed mod to plugin.json's version, so a release that bumps package.json but not
+// plugin.json would never reach mod users. The marketplace must list the repo root as the plugin, since
+// the mod runs the statusline.js next to it.
+test('GATE: the mod manifest versions with the package and the marketplace points at the repo root', () => {
+  const pkg = JSON.parse(R('package.json'));
+  const plugin = JSON.parse(R('.claude-plugin/plugin.json'));
+  const market = JSON.parse(R('.claude-plugin/marketplace.json'));
+  assert.strictEqual(plugin.version, pkg.version, '.claude-plugin/plugin.json version must equal package.json version');
+  assert.strictEqual(plugin.name, 'ccrig');
+  // the marketplace installs the tagged release, never whatever is on main, so the tag must be this version
+  const entry = market.plugins.find((p) => p.name === plugin.name);
+  assert.ok(entry && entry.source && typeof entry.source === 'object', 'marketplace.json must list ccrig with a github source');
+  assert.strictEqual(entry.source.source, 'github');
+  assert.strictEqual(entry.source.repo, 'jordanallenlewis/ccrig');
+  assert.strictEqual(entry.source.ref, 'v' + pkg.version, 'marketplace.json ref must be the release tag v' + pkg.version);
+  assert.deepStrictEqual(JSON.parse(R('hooks/hooks.json')).modules, ['./ccrig.ts']);
+  const voice = scanLines('.claude-plugin/plugin.json', R('.claude-plugin/plugin.json'))
+    .concat(scanLines('.claude-plugin/marketplace.json', R('.claude-plugin/marketplace.json')));
+  assert.strictEqual(voice.length, 0, 'banned tells in the mod manifests:\n' + voice.join('\n'));
+});
+
+// ---- gate: the mod's board lamps fire on the same notifications as the wired hook ----
+test('GATE: the mod\'s Notification matcher equals NOTIFY_MATCHER', () => {
+  const m = /notification_type:\s*\[([^\]]*)\]/.exec(R('hooks/ccrig.ts'));
+  assert.ok(m, 'hooks/ccrig.ts must hook classic.Notification with a notification_type list');
+  const mod = m[1].split(',').map((s) => s.trim().replace(/^'|'$/g, '')).filter(Boolean).sort();
+  assert.deepStrictEqual(mod, SL.NOTIFY_MATCHER.split('|').sort());
+});
+
+// ---- gate: the mod's trust surface is the documented one ----
+// `claude plugin validate` shows users every mods API call before they install. A new call must be
+// added here AND to SECURITY.md in the same change, so the documented surface never drifts.
+const MOD_CALLS = [
+  '$.clock.after', '$.clock.every', '$.clock.now', '$.command.register', '$.env.get', '$.fs.exists', '$.fs.read',
+  '$.plugin.root', '$.process.run', '$.prompt.submit', '$.session.cwd', '$.session.id', '$.session.model',
+  '$.session.root', '$.session.usage', '$.session.version', '$.settings.read', '$.ui.close', '$.ui.copy',
+  '$.ui.invalidate', '$.ui.log', '$.ui.open', '$.ui.resolve', '$.ui.toast',
+];
+test('GATE: the mod calls exactly the mods API methods SECURITY.md lists', () => {
+  const found = [...new Set(R('hooks/ccrig.ts').match(/\$\.[a-z]+\.[a-zA-Z]+/g) || [])].sort();
+  assert.deepStrictEqual(found, [...MOD_CALLS].sort(), 'the mod\'s mods API calls changed: update MOD_CALLS and SECURITY.md');
+  const sec = R('SECURITY.md');
+  const missing = MOD_CALLS.filter((c) => !sec.includes('`' + c + '`'));
+  assert.deepStrictEqual(missing, [], 'SECURITY.md must list every mods API call the mod makes');
 });

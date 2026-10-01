@@ -70,7 +70,7 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const VERSION = '1.7.0';
+const VERSION = '1.8.0';
 
 // where updates come from. The npm registry's `latest` decides whether a newer RELEASE exists (a tag push
 // publishes it only after CI passes on all three OSes), and a standalone copy downloads that release's
@@ -197,8 +197,11 @@ const DEFAULTS = {
 // npm replaces the whole package directory on every update, so a config saved next to an npm-installed
 // script was wiped by `npm install -g ccrig@latest`. An npm install keeps its config in ~/.ccrig instead;
 // a standalone or git copy keeps it next to the script, where --update never touches it.
+// The Claude Code mod (hooks/ccrig.ts) runs this file out of the plugin cache, which /plugin also replaces
+// on every update, so it sets CCRIG_HOST=mod and shares the npm location: one config for both installs.
 const LEGACY_CONFIG_PATH = path.join(__dirname, 'statusline.config.json');
-const CONFIG_PATH = /[\\/]node_modules[\\/]/.test(__dirname) ? path.join(homeDirSafe(), '.ccrig', 'statusline.config.json') : LEGACY_CONFIG_PATH;
+const MOD_HOST = process.env.CCRIG_HOST === 'mod';
+const CONFIG_PATH = (MOD_HOST || /[\\/]node_modules[\\/]/.test(__dirname)) ? path.join(homeDirSafe(), '.ccrig', 'statusline.config.json') : LEGACY_CONFIG_PATH;
 function homeDirSafe() { try { return os.homedir(); } catch { return process.env.HOME || process.env.USERPROFILE || os.tmpdir(); } }
 // a JSON file saved by a Windows editor (or PowerShell 5.1 Set-Content -Encoding UTF8) can start with a
 // UTF-8 BOM, which JSON.parse rejects
@@ -1113,7 +1116,9 @@ function armAutopilot(input, which, pct, resetEpoch) {
   const when = resetEpoch ? fmtReset(resetEpoch) : 'the next window';
   oncePerSession(sid, 'notified', () => notify('Claude Code: ' + label + ' limit',
     'Work checkpointed. ' + (willResume ? 'Auto-resume armed for ' + when + '.' : 'Resume with claude --resume after ' + when + '.')));
-  if (willResume) {
+  // CCRIG_MOD_OWNS_RESUME: the Claude Code mod resumes this session in place at the reset, and arms
+  // the detached watcher only when the terminal closes first (--hook mod-exit)
+  if (willResume && process.env.CCRIG_MOD_OWNS_RESUME !== '1') {
     // the once-marker outlives a watcher killed by a reboot, logout or OOM: re-arm when the pid is gone
     // and the reset is still ahead (after it, a missing watcher already fired or stood down)
     const marker = path.join(guardDir(), sid + '.watch');
@@ -1217,8 +1222,8 @@ function resumeHintSeg(input, sPct, wPct, sReset, wReset, live) {
 
 // Feature 3: predictive burn-rate ETA + pace verdict, from the sample ring buffer.
 // Shows only when it has something worth saying (enough samples + a live window).
-function forecastSeg(sid, sPct, sReset, wPct, wReset) {
-  if (CONFIG.forecast === false || !sid) return '';
+function forecastInfo(sid, sPct, sReset, wPct, wReset) {
+  if (CONFIG.forecast === false || !sid) return null;
   const now = nowSec();
   // pick the window projected to hit its ceiling first
   const cands = [];
@@ -1233,18 +1238,47 @@ function forecastSeg(sid, sPct, sReset, wPct, wReset) {
   };
   consider('session', sPct, sReset);
   consider('weekly', wPct, wReset);
-  if (!cands.length) return '';
+  if (!cands.length) return null;
   cands.sort((a, b) => a.etaSec - b.etaSec);
   // A window that resets before it would exhaust never blocks you. Show the soonest
   // window that WILL actually block; only if none will, report the soonest as safe.
   const threats = cands.filter((c) => c.etaSec < c.toReset);
-  if (!threats.length) return c(K.green, '⏳ ' + cands[0].name + ' safe (resets first)');
+  if (!threats.length) return { window: cands[0].name, etaSec: cands[0].etaSec, safe: true, mins: null, text: '⏳ ' + cands[0].name + ' safe (resets first)' };
   const top = threats[0];
   const mins = Math.max(1, Math.round(top.etaSec / 60));
   const human = mins >= 60 ? Math.floor(mins / 60) + 'h' + (mins % 60 ? (mins % 60) + 'm' : '') : mins + 'm';
-  const col = mins <= 15 ? K.red : mins <= 45 ? K.yellow : K.green;
   const verdict = mins <= 15 ? ' · slow down' : '';
-  return c(col, '⏳ ~' + human + ' to ' + top.name + ' limit' + verdict);
+  return { window: top.name, etaSec: top.etaSec, safe: false, mins, text: '⏳ ~' + human + ' to ' + top.name + ' limit' + verdict };
+}
+function forecastSeg(sid, sPct, sReset, wPct, wReset) {
+  const f = forecastInfo(sid, sPct, sReset, wPct, wReset);
+  if (!f) return '';
+  if (f.safe) return c(K.green, f.text);
+  return c(f.mins <= 15 ? K.red : f.mins <= 45 ? K.yellow : K.green, f.text);
+}
+// What the Claude Code mod needs to decide nothing on its own: the thresholds, the guardian settings, the
+// forecast, the armed resume and the update hint, printed beside the segments under CCRIG_HOST=mod.
+function modState(input) {
+  const rl = input.rate_limits || {};
+  const pctOf = (o) => (o && typeof o.used_percentage === 'number') ? o.used_percentage : null;
+  const resetOf = (o) => (o && typeof o.resets_at === 'number') ? o.resets_at : null;
+  const t = CONFIG.thresholds.usage;
+  const f = forecastInfo(input.session_id, pctOf(rl.five_hour), resetOf(rl.five_hour), pctOf(rl.seven_day), resetOf(rl.seven_day));
+  const sid = typeof input.session_id === 'string' && SID_RE.test(input.session_id) ? input.session_id : '';
+  const cp = sid ? readCheckpoint(sid) : null;
+  const armed = !!(cp && /limit/.test(cp.reason || '') && cp.resets_at && windowActive(cp.resets_at));
+  const info = CONFIG.updateCheck === false ? null : readUpdateInfo();
+  const latest = info && info.latest && semverGt(info.latest, VERSION) ? info.latest : null;
+  return {
+    thresholds: { green: t.green, yellow: t.yellow, warn: warnAtOf(t), critical: t.critical != null ? t.critical : 98 },
+    mode: CONFIG.mode,
+    autopilot: cfgAutopilot(),
+    keepWorking: !!cfgKeepWorking(),
+    sessionBoard: CONFIG.sessionBoard === true,
+    forecast: f ? { window: f.window, etaSec: Math.round(f.etaSec), safe: f.safe, text: f.text } : null,
+    resume: { armed, window: armed ? cp.window || '' : '', resetsAt: armed ? cp.resets_at : null },
+    update: { latest, hint: latest ? MOD_UPDATE_CMD : '' },
+  };
 }
 
 // ===========================================================================
@@ -1296,7 +1330,7 @@ function updateSeg(info) {
     const stale = info && (info.lastSuccessAt != null ? info.lastSuccessAt : info.checkedAt);
     if (stale != null && (Date.now() - stale) > 30 * 86400 * 1000) return '';
   }
-  return cBold(K.update, '⬆ v' + latest) + c(K.dim, ' update');
+  return cBold(K.update, '⬆ v' + latest) + c(K.dim, installKind() === 'mod' ? ' /plugin update' : ' update');
 }
 // once-a-day, spawn the detached background check; never blocks the render. Takes the
 // cache already read this render (no second read on the hot path).
@@ -1449,7 +1483,7 @@ function runCheckUpdate() {
       // the background daily check (never a --check-update you typed) applies it when autoUpdate is on
       if (process.env.CCBSL_BG_CHECK && CONFIG.autoUpdate === true && latest && semverGt(latest, VERSION)) return autoApply(latest);
       if (!latest) process.stdout.write('Could not check for updates (you may be offline, blocked, or behind a proxy). Your saved version info is unchanged.\n');
-      else if (semverGt(latest, VERSION)) process.stdout.write('A newer version is ready: v' + latest + ' (you have v' + VERSION + ').\n' + (isNpmInstall() ? 'To get it, run:  ' + pkgUpdateCmd() + '\n' : 'To get it, run:  node "' + __filename + '" --update\n'));
+      else if (semverGt(latest, VERSION)) process.stdout.write('A newer version is ready: v' + latest + ' (you have v' + VERSION + ').\n' + (installKind() === 'mod' ? 'To get it, run:  ' + MOD_UPDATE_CMD + '\n' : isNpmInstall() ? 'To get it, run:  ' + pkgUpdateCmd() + '\n' : 'To get it, run:  node "' + __filename + '" --update\n'));
       else process.stdout.write('You are on the latest version (v' + VERSION + ').\n');
       process.exit(0);
     };
@@ -1473,8 +1507,41 @@ function isOurGitClone() {
 // validate (node --check + shape), back up, atomic swap, then print what changed.
 // an npm-installed copy lives under node_modules; its updates are npm's job, not ours
 function isNpmInstall() { return /[\\/]node_modules[\\/]/.test(__dirname); }
+// The Claude Code mod runs this file out of its plugin directory (CCRIG_HOST=mod), usually the plugin
+// cache, which /plugin replaces on every update: never self-update or wire settings.json from there.
+function isModCopy() { return MOD_HOST || /[\\/]plugins[\\/]cache[\\/]/.test(__dirname); }
+function installKind() { return isModCopy() ? 'mod' : isNpmInstall() ? 'npm' : 'standalone'; }
+const MOD_UPDATE_CMD = '/plugin update ccrig@ccrig';
+const MOD_UNINSTALL_NOTE = 'The CCRig mod is a Claude Code plugin; remove it with:  /plugin uninstall ccrig@ccrig\n';
+const MOD_REFUSAL = "This copy is the Claude Code mod's bundled statusline.js. /plugin replaces it on every update, so it is never self-updated or wired into settings.json.";
+// The mod writes ~/.ccrig/mod.json on its renders, so the CLI (doctor, init, uninstall) knows a mod is
+// active without reading Claude Code's plugin registry. Fresh = seen in the last 7 days.
+function modMarkerPath() { return path.join(homeDirSafe(), '.ccrig', 'mod.json'); }
+function modMarker() { try { const m = parseJsonText(fs.readFileSync(modMarkerPath(), 'utf8')); return isPlainObject(m) ? m : null; } catch { return null; } }
+function modFresh(m) { return !!m && typeof m.at === 'number' && Date.now() - m.at < 7 * 86400 * 1000; }
+function writeModMarker(input) {
+  const file = modMarkerPath();
+  try { if (Date.now() - fs.statSync(file).mtimeMs < 60000) return; } catch {}
+  writeJsonAtomic(file, {
+    v: VERSION, root: __dirname, claude: CFG, at: Date.now(),
+    session_id: typeof input.session_id === 'string' ? input.session_id : '',
+    interactive: process.env.CCRIG_INTERACTIVE === '1', pure: process.env.CCRIG_PURE === '1',
+    profile: profileLabelOf(path.basename(CFG)),
+  });
+}
+function ageText(ms) {
+  const m = Math.max(0, Math.round(ms / 60000));
+  if (m < 1) return 'just now';
+  if (m < 60) return m + 'm ago';
+  if (m < 48 * 60) return Math.round(m / 60) + 'h ago';
+  return Math.round(m / 1440) + ' days ago';
+}
 function runUpdate() {
   const force = argv.includes('--force');
+  if (installKind() === 'mod') {
+    process.stdout.write(MOD_REFUSAL + '\nUpdate the mod with:  ' + MOD_UPDATE_CMD + '\n');
+    process.exit(1);
+  }
   if (isNpmInstall()) {
     process.stdout.write('installed with a package manager; update with:  ' + pkgUpdateCmd() + '\n(the built-in --update download path is for the standalone / curl install.)\n');
     process.exit(0);
@@ -1549,6 +1616,7 @@ function runUpdate() {
 // cache (and --doctor shows it) instead of printing, since nobody is watching this detached process.
 function autoApply(v) {
   const note = (error) => { const info = readUpdateInfo() || {}; writeJsonAtomic(updateCacheFile(), Object.assign(info, { autoUpdate: { to: v, at: Date.now(), error: error || null } })); };
+  if (installKind() === 'mod') { note('mod install: update through /plugin'); process.exit(0); }
   if (isNpmInstall()) { note(npmSelfUpdate(v)); process.exit(0); }
   if (isOurGitClone()) { note('a git clone updates with git pull, not automatically'); process.exit(0); }
   note(null);
@@ -1812,7 +1880,11 @@ function collectSegments(input, width, gitOverride) {
   const cws = input.context_window && Number(input.context_window.context_window_size);
   const oneM = cws > 0 ? cws >= 1000000 : /\[1m\]/i.test((input.model && input.model.id) || '');
   out.model = `${c(K.dim, '★')} ${c(K.model, model)}${oneM ? c(K.dim, ' [1m]') : ''}`;
-  out.downgrade = downgradeSeg(input, gitOverride === undefined);
+  // CCRIG_PURE: the mod draws the bar while a wired status line already owns the side effects.
+  // A mod-host render is live only with CCRIG_INTERACTIVE=1: a claude -p or SDK session (the
+  // guardian's own --resume -p relaunch included) must never checkpoint, ping or arm a watcher.
+  const live = gitOverride === undefined && process.env.CCRIG_PURE !== '1' && (!MOD_HOST || process.env.CCRIG_INTERACTIVE === '1');
+  out.downgrade = downgradeSeg(input, live);
 
   const effort = cleanLabel(effortLevel(input), 16);
   out.effort = effort ? c(K.effort, '⚡' + effort) : '';
@@ -1836,7 +1908,6 @@ function collectSegments(input, width, gitOverride) {
   const sPct = pctOf(rl.five_hour), wPct = pctOf(rl.seven_day);
   const sReset = resetOf(rl.five_hour), wReset = resetOf(rl.seven_day);
   // side effects only on the LIVE render (Claude Code's stdin), never in --demo / --config / --selftest
-  const live = gitOverride === undefined;
   if (live) {
     maybeCheckUpdate(updateInfo);                  // once/day background version check (never blocks)
     writeBoard(input, sPct, sReset, wPct, wReset, ctx, inflightAgents(input.transcript_path).length); // attention board (opt-in)
@@ -1911,6 +1982,7 @@ if (require.main !== module) {
     fetchText, httpGetText, VERSION,
     DEFAULTS, DEFAULT_ORDER, MODES, helpText, watcherCmdMatches, notifySpec, maybeCheckUpdate,
     cleanLabel, padCell, sessionLabel, lampSupersedes, lampFor, lampPings, winLaunch, parseJsonText, profileLabelOf,
+    NOTIFY_MATCHER,
   };
   return;
 }
@@ -2129,8 +2201,45 @@ function runHookNotification(input) {
 }
 // Board lamp: the session is gone (exit, /clear, a resume switch). Drop its rows so the board never
 // shows a ghost, and take the once-per-session-end retention sweep while we are here.
-function runHookSessionEnd(input) {
+function sessionEndWork(input) {
   if (CONFIG.sessionBoard === true) { clearLamp(input && input.session_id); sweepBoardDir(); }
+}
+function runHookSessionEnd(input) {
+  sessionEndWork(input);
+  emitHook({});
+}
+// The Claude Code mod resumes an open session in place at the reset (it owns the render and runs with
+// CCRIG_MOD_OWNS_RESUME=1, so no detached watcher was armed). It asks here first: the decision, the
+// stand-down rules and the resume prompt stay the watcher's own. Prints { prompt } or {}; never launches.
+function runHookModResume(input) {
+  const sid = input && input.session_id;
+  if (!sid || !SID_RE.test(sid)) return emitHook({});
+  if (cfgAutopilot() !== 'resume') return emitHook({});
+  const cp = readCheckpoint(sid);
+  if (!cp || !/limit/.test(cp.reason || '') || !cp.resets_at || cp.resets_at > nowSec()) return emitHook({});
+  if (cp.window !== 'session' && CONFIG.autopilotWeekly !== true) return emitHook({});    // weekly resumes are opt-in
+  if (resumedManuallySince(cp)) { clearSessionGuardState(sid); return emitHook({}); }   // already picked back up
+  try { if (cp.transcript_path && Date.now() - fs.statSync(cp.transcript_path).mtimeMs < 120000) return emitHook({}); } catch {}
+  const cur = latestTodos(cp.transcript_path, true);
+  if (cur && cur.length && !cur.some((x) => x && x.status !== 'completed')) { clearSessionGuardState(sid); return emitHook({}); }
+  // a watcher armed earlier (say, by a status line that was wired at the time) stands down: this session resumes itself
+  try { const pid = parseInt(fs.readFileSync(watchPidFile(sid), 'utf8'), 10) || 0; if (isOurWatcher(pid, sid)) process.kill(pid); } catch {}
+  const prompt = resumePromptFromCheckpoint(cp, false, false);
+  clearSessionGuardState(sid);
+  emitHook({ prompt });
+}
+// The mod's session end: the board cleanup, then, when the terminal closes with a limit still ahead and
+// autopilot on resume, the detached watcher takes over the resume the mod would have done in place.
+function runHookModExit(input) {
+  sessionEndWork(input);
+  const sid = input && input.session_id;
+  if (sid && SID_RE.test(sid) && cfgAutopilot() === 'resume') {
+    const cp = readCheckpoint(sid);
+    const qualifies = cp && (cp.window === 'session' || CONFIG.autopilotWeekly === true);
+    if (qualifies && /limit/.test(cp.reason || '') && cp.resets_at && cp.resets_at > nowSec()) {
+      oncePerSession(sid, 'watch', () => armWatcher(sid, cp.cwd || inputCwd(input)));
+    }
+  }
   emitHook({});
 }
 function runHook(event, input) {
@@ -2142,6 +2251,8 @@ function runHook(event, input) {
     if (event === 'notification' || event === 'Notification') return runHookNotification(input);
     if (event === 'session-end' || event === 'SessionEnd') return runHookSessionEnd(input);
     if (event === 'board-stop') return runHookBoardStop(input);
+    if (event === 'mod-resume') return runHookModResume(input);
+    if (event === 'mod-exit') return runHookModExit(input);
   } catch {}
   emitHook({}); // unknown or error -> never block Claude Code
 }
@@ -2835,9 +2946,12 @@ function writeSlashCommands(dir = CFG) {
   try {
     const d = slashCommandDir(dir);
     const sl = __filename;
-    fs.mkdirSync(path.join(d, 'ccrig'), { recursive: true });
+    fs.mkdirSync(d, { recursive: true });
     const cfg = configMenuDoc(sl);
     fs.writeFileSync(path.join(d, 'statusline-config.md'), cfg);
+    // the mod's /ccrig answers at once with no Claude turn; a markdown /ccrig beside it would only collide
+    if (modFresh(modMarker())) return path.join(d, 'statusline-config.md');
+    fs.mkdirSync(path.join(d, 'ccrig'), { recursive: true });
     fs.writeFileSync(path.join(d, 'ccrig', 'config.md'), cfg);
     fs.writeFileSync(path.join(d, 'ccrig', 'status.md'), actionDoc('Show your CCRig guardian status (auto-resume watchers)', sl, '--status',
       'Run the command below and give me a short, plain summary of my CCRig guardian status: which sessions are watched for auto-resume and when they will fire. If nothing is armed, say so.'));
@@ -2897,7 +3011,13 @@ function installStatusLineInto(dir, withGuardian) {
     return { dir, sp, bak, cmd, replacedForeign, guardian: !!withGuardian || (REFRESH && hadGuardian), strippedGuardian, hooksOff: settings.disableAllHooks === true };
   } catch (e) { return { dir, sp: settingsPathOf(dir), err: e.message }; }
 }
+function refuseModCopy() {
+  if (installKind() !== 'mod') return;
+  process.stdout.write(MOD_REFUSAL + '\nFor a status line under the prompt, install with npm:  npm install -g ccrig && ccrig init\n');
+  process.exit(1);
+}
 function runInstall() {
+  refuseModCopy();
   // By default wire EVERY profile on this machine, so a work + personal setup never ends
   // up with the bar on only one. --this-profile scopes it to the active CLAUDE_CONFIG_DIR.
   const thisOnly = argv.includes('--this-profile');
@@ -2913,7 +3033,9 @@ function runInstall() {
     if (r.strippedGuardian) process.stdout.write('  Took the guardian hooks out of it (--no-guardian).\n');
     if (r.hooksOff) process.stdout.write('  Note: "disableAllHooks" is true in this profile, so Claude Code runs neither the bar nor any hook until you turn it off (/hooks).\n');
   }
-  if (okd.some((r) => r.cmd)) process.stdout.write('Added the /ccrig commands to Claude Code: /ccrig, /ccrig:status, /ccrig:sessions, /ccrig:doctor, /ccrig:update, /ccrig:config, and /ccrig:name.\n');
+  const mm = modMarker();
+  if (modFresh(mm)) process.stdout.write('The CCRig mod is active (v' + mm.v + ' at ' + mm.root + '), so /ccrig stays the mod\'s and the band above the prompt now shows only limit alerts. Set the band to "always" in /config for the full bar there.\n');
+  else if (okd.some((r) => r.cmd)) process.stdout.write('Added the /ccrig commands to Claude Code: /ccrig, /ccrig:status, /ccrig:sessions, /ccrig:doctor, /ccrig:update, /ccrig:config, and /ccrig:name.\n');
   for (const r of failed) process.stdout.write('Could not set up the ' + profileLabel(r.dir) + ' profile (' + r.sp + '): ' + r.err + '\n');
   if (!thisOnly) for (const d of markerlessClaudeDirs()) {
     const how = process.platform === 'win32'
@@ -3122,6 +3244,7 @@ function installGuardianInto(dir) {
   } catch (e) { return { dir, sp: settingsPathOf(dir), err: e.message }; }
 }
 function runInstallGuardian() {
+  refuseModCopy();
   const thisOnly = argv.includes('--this-profile');
   const profiles = thisOnly ? [CFG] : detectProfiles();
   const results = profiles.map(installGuardianInto);
@@ -3261,9 +3384,11 @@ function runUninstall() {
   if (!touched) {
     if (errs.length) process.exit(1); // a real permission/IO failure, not a clean no-op
     process.stdout.write('There is nothing to remove: no profile has our status line or our hooks.\n');
+    if (modFresh(modMarker())) process.stdout.write(MOD_UNINSTALL_NOTE);
     process.exit(0);
   }
   process.stdout.write('This file and statusline.config.json were left in place. You can delete them if you like.\n');
+  if (modFresh(modMarker())) process.stdout.write(MOD_UNINSTALL_NOTE);
   process.exit(errs.length ? 1 : 0);
 }
 
@@ -3288,6 +3413,11 @@ function runDoctor() {
   process.stdout.write('CCRig v' + VERSION + ' doctor\n');
   process.stdout.write('  script:  ' + __filename + '\n  profile: ' + CFG + '\n\n');
 
+  const mm = modMarker();
+  const modOn = modFresh(mm);
+  if (modOn) ok('mod ccrig v' + mm.v + ' active ' + ageText(Date.now() - mm.at) + ' (' + mm.root + ')');
+  else if (mm && typeof mm.at === 'number') info('mod: last seen ' + ageText(Date.now() - mm.at));
+  else info('mod: not seen (it installs in Claude Code with /plugin install ccrig@ccrig)');
   const major = parseInt(process.versions.node, 10);
   if (major >= 18) ok('node ' + process.versions.node); else bad('node ' + process.versions.node + ' is too old', 'use Node 18 or newer');
 
@@ -3303,7 +3433,8 @@ function runDoctor() {
     const cmd = typeof sl.command === 'string' ? sl.command : '';
     if (raw.value.statusLine && !isPlainObject(raw.value.statusLine)) bad('statusLine is not an object', 're-run: node "' + __filename + '" --install');
     else if (sl.command != null && typeof sl.command !== 'string') bad('statusLine.command is not a string', 're-run: node "' + __filename + '" --install');
-    else if (!cmd) bad('statusLine is not configured', 'run: node "' + __filename + '" --install');
+    else if (!cmd && modOn) info('statusLine not wired: the mod draws the bar in the band above the prompt, so there is nothing to wire');
+    else if (!cmd) bad('statusLine is not configured', installKind() === 'mod' ? 'install with npm (npm install -g ccrig && ccrig init), or let the mod draw the bar' : 'run: node "' + __filename + '" --install');
     else {
       ok('statusLine is configured');
       if (!isOurCmd(cmd)) info('statusLine points at a different script: ' + cmd);
@@ -3376,7 +3507,7 @@ function runDoctor() {
   else {
     const u = readUpdateInfo();
     if (!u) info('update check: on (not run yet; a daily background check will populate it)');
-    else if (u.latest && semverGt(u.latest, VERSION)) info('update check: on, v' + u.latest + ' available (run --update); you have v' + VERSION);
+    else if (u.latest && semverGt(u.latest, VERSION)) info('update check: on, v' + u.latest + ' available (run ' + (installKind() === 'mod' ? MOD_UPDATE_CMD : isNpmInstall() ? pkgUpdateCmd() : '--update') + '); you have v' + VERSION);
     else info('update check: on, up to date (v' + VERSION + ')');
   }
   // the /statusline-config command bakes in the script path; flag a stale one after a move
@@ -3387,6 +3518,9 @@ function runDoctor() {
       if (m && !fs.existsSync(m)) bad('the /statusline-config command points at a missing script (' + m + ')', 're-run: node "' + __filename + '" --install');
     }
   } catch {}
+  if (modOn && (fs.existsSync(path.join(slashCommandDir(), 'ccrig.md')) || fs.existsSync(path.join(slashCommandDir(), 'ccrig')))) {
+    info('the /ccrig:* markdown commands are superseded by the mod\'s /ccrig; delete ' + path.join(slashCommandDir(), 'ccrig.md') + ' and ' + path.join(slashCommandDir(), 'ccrig') + ' to drop them');
+  }
   try { render(demoInput(), 80, DEMO_GIT()); ok('test render'); }
   catch (e) { bad('rendering throws: ' + e.message, 'update this file, or report it'); }
   const elog = path.join(CFG, 'statusline-error.log');
@@ -3614,7 +3748,12 @@ if (!argv.includes('--config')) {
     // JSON.parse('null')/'42'/'[]' all succeed and overwrite the {} fallback; render() reads
     // input.workspace etc, so coerce anything that is not a plain object back to {}.
     if (!input || typeof input !== 'object' || Array.isArray(input)) input = {};
-    process.stdout.write(render(input, getWidth() - CONFIG.reserveCols));
+    // the mod lays the segments out itself, so it can wrap them to the band and color them natively
+    if (MOD_HOST) {
+      const segs = collectSegments(input, getWidth() - CONFIG.reserveCols);
+      writeModMarker(input);
+      process.stdout.write(JSON.stringify({ v: VERSION, segments: segs, widths: segs.map(dispWidth), sep: dispWidth(SEP), state: modState(input) }));
+    } else process.stdout.write(render(input, getWidth() - CONFIG.reserveCols));
   } catch (e) {
     // the status line must never die silently: leave a trail and a next step
     try { fs.writeFileSync(path.join(CFG, 'statusline-error.log'), new Date().toISOString() + '\n' + (e.stack || e.message) + '\n'); } catch {}

@@ -1,6 +1,6 @@
 {
   "name": "ccrig",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "A status line and usage-limit guardian for Claude Code. One Node file, zero dependencies.",
   "keywords": ["claude", "claude-code", "statusline", "status-line", "cli", "terminal", "guardian", "anthropic"],
   "homepage": "https://github.com/jordanallenlewis/ccrig",
@@ -23,7 +23,7 @@
   "engines": { "node": ">=18" },
   "scripts": {
     "postinstall": "node postinstall.js",
-    "test": "node --test",
+    "test": "node --test test.js test-unit.js test-gates.js",
     "selftest": "node statusline.js --selftest"
   }
 }

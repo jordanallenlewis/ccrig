@@ -30,9 +30,27 @@ jobs:
           git config --global user.email ci@example.invalid
           git config --global user.name ci
       - name: Tests + quality gates
-        run: node --test
+        run: npm test
       - name: Self-test render
         run: node statusline.js --selftest
+
+  mod:
+    # The Claude Code mod: manifest, marketplace and hooks-module checks, then the mod's own tests,
+    # which run offline in Claude Code's test kit (no session, sign-in or network). Pinned so a new
+    # Claude Code release cannot fail main without a change here.
+    name: mod (claude plugin validate + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Validate the marketplace, the plugin and the hooks module
+        run: |
+          npx -y @anthropic-ai/claude-code@2.1.287 plugin validate . --strict
+          npx -y @anthropic-ai/claude-code@2.1.287 plugin validate .claude-plugin/plugin.json --strict
+      - name: Mod tests
+        run: npx -y @anthropic-ai/claude-code@2.1.287 plugin test
 
   smoke:
     name: smoke (${{ matrix.os }}, node ${{ matrix.node }})

@@ -1,0 +1,21 @@
+{
+  "name": "ccrig",
+  "owner": {
+    "name": "Jordan Allen Lewis",
+    "url": "https://jordanallenlewis.com"
+  },
+  "metadata": {
+    "description": "CCRig, the status line and usage-limit guardian for Claude Code, as a mod."
+  },
+  "plugins": [
+    {
+      "name": "ccrig",
+      "source": {
+        "source": "github",
+        "repo": "jordanallenlewis/ccrig",
+        "ref": "v1.8.0"
+      },
+      "description": "Your plan usage above the prompt and on the spinner, a toast before you hit a limit, /ccrig with no Claude turn, and the usage-limit guardian."
+    }
+  ]
+}
