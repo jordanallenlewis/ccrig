@@ -337,16 +337,26 @@ export function resumeCommand(sessionId: string): string {
 
 // ---- settings and hooks ------------------------------------------------------------------------
 
-type HookEntry = { hooks?: { command?: unknown }[] }
+type HookEntry = { hooks?: { command?: unknown; args?: unknown }[] }
 const OURS = /statusline\.js|\bccrig\b/i
 type SettingsShape = { statusLine?: { command?: unknown }; hooks?: Record<string, HookEntry[] | undefined> }
+
+// A hook is shell form (one command string) or exec form (an executable plus `args`, which CCRig uses
+// on Windows so its hooks never start Git Bash). Read both as one line: the executable first.
+function hookLine(h: { command?: unknown; args?: unknown } | null | undefined): string {
+  if (!h || typeof h.command !== 'string') return ''
+  if (!Array.isArray(h.args)) return h.command
+  const q = (t: unknown) => (/\s/.test(String(t)) ? '"' + String(t) + '"' : String(t))
+  return [h.command, ...h.args].map(q).join(' ')
+}
 
 function ourHookCommands(s: SettingsShape): string[] {
   const out: string[] = []
   for (const entries of Object.values(s.hooks ?? {})) {
     for (const entry of Array.isArray(entries) ? entries : []) {
       for (const h of Array.isArray(entry?.hooks) ? entry.hooks : []) {
-        if (typeof h?.command === 'string' && OURS.test(h.command)) out.push(h.command)
+        const line = hookLine(h)
+        if (line && OURS.test(line)) out.push(line)
       }
     }
   }

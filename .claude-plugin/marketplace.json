@@ -13,7 +13,7 @@
       "source": {
         "source": "github",
         "repo": "jordanallenlewis/ccrig",
-        "ref": "v1.8.0"
+        "ref": "v1.8.1"
       },
       "description": "Your plan usage above the prompt and on the spinner, a toast before you hit a limit, /ccrig with no Claude turn, and the usage-limit guardian."
     }

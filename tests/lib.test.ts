@@ -120,6 +120,13 @@ test('detectWiring names each CCRig hook by its slug', () => {
   expect(detectWiring(null)).toEqual({ statusLine: false, hooks: [] })
 })
 
+test('detectWiring and nodeFromSettings read exec-form hooks (Windows, no Git Bash)', () => {
+  const exec = (slug: string) => ({ hooks: [{ type: 'command', command: 'C:\\Program Files\\nodejs\\node.exe', args: ['C:\\npm\\node_modules\\ccrig\\statusline.js', '--hook', slug] }] })
+  const settings = { statusLine: { command: 'node C:/npm/node_modules/ccrig/statusline.js' }, hooks: { Stop: [exec('stop'), exec('board-stop')], UserPromptSubmit: [exec('user-prompt')] } }
+  expect(detectWiring(settings)).toEqual({ statusLine: true, hooks: ['board-stop', 'stop', 'user-prompt'] })
+  expect(nodeFromSettings({ hooks: { Stop: [exec('stop')] } })).toBe('C:\\Program Files\\nodejs\\node.exe')
+})
+
 test('nodeFromSettings finds the node a wired CCRig command runs', () => {
   expect(nodeFromSettings({ statusLine: { command: '"C:\\Program Files\\nodejs\\node.exe" "C:\\x\\statusline.js"' } })).toBe('C:\\Program Files\\nodejs\\node.exe')
   expect(nodeFromSettings({ statusLine: { command: 'C:/nodejs/node.exe C:/x/statusline.js' } })).toBe('C:/nodejs/node.exe')
