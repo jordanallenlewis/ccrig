@@ -2995,3 +2995,189 @@ test('REGRESSION: claude-profile (bash + zsh) enforces its charset, reserves ccr
     assert.ok(!fs.existsSync(path.join(sb.home, '.claude-a b')));
   }
 });
+
+// ===========================================================================
+// the Claude Code mod host (hooks/ccrig.ts runs this file with CCRIG_HOST=mod)
+// ===========================================================================
+test('mod host: CCRIG_HOST=mod prints the segments as JSON, with their cell widths', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_HOST: 'mod' };
+  const r = render(baseInput({ session_id: 'mod-1' }), { env });
+  const o = JSON.parse(r.out);
+  assert.ok(Array.isArray(o.segments) && o.segments.length > 0);
+  assert.strictEqual(o.widths.length, o.segments.length);
+  assert.ok(o.widths.every((w) => Number.isInteger(w) && w > 0));
+  assert.strictEqual(o.sep, 3);
+  assert.ok(o.segments.some((s) => /Opus 4\.8/.test(strip(s))), 'the model segment is there');
+  assert.ok(o.segments.some((s) => /ctx/.test(strip(s))), 'the context segment is there');
+});
+
+test('mod host: config lives in ~/.ccrig like npm, since /plugin replaces the plugin directory', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir);
+  const r = run(['--mode', 'minimal'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_HOST: 'mod' }, script });
+  assert.strictEqual(r.code, 0, r.out);
+  const saved = path.join(sb.home, '.ccrig', 'statusline.config.json');
+  assert.strictEqual(JSON.parse(fs.readFileSync(saved, 'utf8')).mode, 'minimal');
+  assert.ok(!fs.existsSync(path.join(sb.dir, 'statusline.config.json')), 'nothing written next to the script');
+});
+
+test('mod host: CCRIG_PURE renders the warning but leaves tickets and checkpoints to the wired status line', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_HOST: 'mod', CCRIG_PURE: '1' };
+  const input = baseInput({ session_id: 'pure-1', rate_limits: { five_hour: { used_percentage: 97, resets_at: Math.floor(Date.now() / 1000) + 600 } } });
+  const o = JSON.parse(render(input, { env }).out);
+  assert.ok(o.segments.some((s) => /⚠ session/.test(strip(s))), 'the bar still warns');
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'resume-tickets')), 'no ticket from a pure render');
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'guardian', 'pure-1.checkpoint.json')), 'no checkpoint from a pure render');
+  // without CCRIG_INTERACTIVE a mod-host render is still pure: a claude -p session must not checkpoint
+  render(input, { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_HOST: 'mod' } });
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'resume-tickets')), 'no ticket from a headless mod render');
+  // the interactive mod render is the live one, and saves the ticket
+  render(input, { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_HOST: 'mod', CCRIG_INTERACTIVE: '1' } });
+  assert.ok(fs.existsSync(path.join(sb.cfg, 'resume-tickets', 'pure-1.md')), 'a live mod render saves the ticket');
+});
+
+test('mod host: the badge and --check-update point at /plugin, and --update refuses', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_HOST: 'mod' };
+  fs.writeFileSync(path.join(sb.cfg, '.ccbsl-update.json'), JSON.stringify({ latest: '99.0.0', checkedAt: Date.now(), lastSuccessAt: Date.now() }));
+  const o = JSON.parse(render(baseInput(), { env }).out);
+  assert.ok(o.segments.some((s) => /⬆ v99\.0\.0 \/plugin update/.test(strip(s))), 'the badge names /plugin update');
+  assert.strictEqual(o.state.update.latest, '99.0.0');
+  assert.strictEqual(o.state.update.hint, '/plugin update ccrig@ccrig');
+  const inst = path.join(sb.dir, 'inst'); fs.mkdirSync(inst);
+  const script = path.join(inst, 'statusline.js'); fs.copyFileSync(SCRIPT, script);
+  const mirror = { ...env, ...releaseMirror(sb.dir, '9.9.9') };
+  assert.match(run(['--check-update'], { env: mirror, script }).out, /To get it, run: {2}\/plugin update ccrig@ccrig/);
+  const before = fs.readFileSync(script, 'utf8');
+  const r = run(['--update'], { env: mirror, script });
+  assert.strictEqual(r.code, 1, r.out);
+  assert.match(r.out, /\/plugin update ccrig@ccrig/);
+  assert.strictEqual(fs.readFileSync(script, 'utf8'), before, 'the mod copy is never swapped');
+});
+
+test('mod host: init from a plugin-cache path refuses and leaves settings.json alone', () => {
+  const sb = sandbox();
+  const dir = path.join(sb.dir, 'plugins', 'cache', 'ccrig', 'ccrig', '1.8.0'); fs.mkdirSync(dir, { recursive: true });
+  const script = path.join(dir, 'statusline.js'); fs.copyFileSync(SCRIPT, script);
+  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), '{"theme":"dark"}');
+  for (const flag of ['--install', '--install-guardian']) {
+    const r = run([flag], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, script });
+    assert.strictEqual(r.code, 1, r.out);
+    assert.match(r.out, /npm install -g ccrig && ccrig init/);
+  }
+  assert.strictEqual(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'), '{"theme":"dark"}');
+});
+
+test('mod host: a render writes the marker, and --doctor, init and --uninstall read it', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  render(baseInput({ session_id: 'mark-1' }), { env: { ...env, CCRIG_HOST: 'mod', CCRIG_INTERACTIVE: '1' } });
+  const markerFile = path.join(sb.home, '.ccrig', 'mod.json');
+  const m = JSON.parse(fs.readFileSync(markerFile, 'utf8'));
+  assert.strictEqual(m.session_id, 'mark-1');
+  assert.strictEqual(m.interactive, true);
+  assert.ok(m.v && m.root && typeof m.at === 'number');
+  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), '{}');
+  let out = run(['--doctor'], { env }).out;
+  assert.match(out, /ok {4}mod ccrig v\S+ active/);
+  assert.doesNotMatch(out, /FAIL {2}statusLine is not configured/);
+  assert.match(out, /the mod draws the bar in the band/);
+  // a stale marker: the FAIL comes back
+  fs.writeFileSync(markerFile, JSON.stringify({ ...m, at: Date.now() - 10 * 86400 * 1000 }));
+  out = run(['--doctor'], { env }).out;
+  assert.match(out, /mod: last seen 10 days ago/);
+  assert.match(out, /FAIL {2}statusLine is not configured/);
+  // fresh again: init skips the markdown /ccrig suite and says the mod owns /ccrig
+  fs.writeFileSync(markerFile, JSON.stringify({ ...m, at: Date.now() }));
+  const r = run(['--install', '--this-profile', '--no-guardian'], { env, script: scriptCopy(sb.dir) });
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /The CCRig mod is active/);
+  assert.ok(fs.existsSync(path.join(sb.cfg, 'commands', 'statusline-config.md')), 'the TTY config command is still written');
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'commands', 'ccrig.md')), 'no markdown /ccrig beside the mod');
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'commands', 'ccrig')), 'no markdown /ccrig:* beside the mod');
+  assert.match(run(['--uninstall', '--this-profile'], { env, script: path.join(sb.dir, 'statusline.js') }).out, /\/plugin uninstall ccrig@ccrig/);
+});
+
+test('mod host: state carries the thresholds, the guardian settings and the forecast shape', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_HOST: 'mod' };
+  // under CCRIG_HOST=mod the config is read from ~/.ccrig, wherever the script lives
+  fs.mkdirSync(path.join(sb.home, '.ccrig'), { recursive: true });
+  fs.writeFileSync(path.join(sb.home, '.ccrig', 'statusline.config.json'), JSON.stringify({ thresholds: { usage: { warn: 85, critical: 93 } }, autopilot: 'resume', keepWorking: true, sessionBoard: true, mode: 'minimal' }));
+  const s = JSON.parse(render(baseInput({ session_id: 'st-1' }), { env }).out).state;
+  assert.deepStrictEqual(s.thresholds, { green: 50, yellow: 80, warn: 85, critical: 93 });
+  assert.strictEqual(s.mode, 'minimal');
+  assert.strictEqual(s.autopilot, 'resume');
+  assert.strictEqual(s.keepWorking, true);
+  assert.strictEqual(s.sessionBoard, true);
+  assert.strictEqual(s.forecast, null, 'no samples, no forecast');
+  assert.deepStrictEqual(s.resume, { armed: false, window: '', resetsAt: null });
+});
+
+test('mod owns resume: the critical render checkpoints but arms no watcher, and mod-exit arms it', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  fs.mkdirSync(path.join(sb.home, '.ccrig'), { recursive: true });
+  fs.writeFileSync(path.join(sb.home, '.ccrig', 'statusline.config.json'), JSON.stringify({ autopilot: 'resume' }));
+  const reset = Math.floor(Date.now() / 1000) + 3600;
+  const input = baseInput({ session_id: 'own-1', rate_limits: { five_hour: { used_percentage: 97, resets_at: reset } } });
+  render(input, { env: { ...env, CCRIG_HOST: 'mod', CCRIG_INTERACTIVE: '1', CCRIG_MOD_OWNS_RESUME: '1' } });
+  const gd = path.join(sb.cfg, 'guardian');
+  assert.ok(fs.existsSync(path.join(gd, 'own-1.checkpoint.json')), 'checkpoint written');
+  assert.ok(fs.existsSync(path.join(gd, 'own-1.notified')), 'the ping still fires');
+  assert.ok(!fs.existsSync(path.join(gd, 'own-1.watch')), 'no watcher while the mod owns the resume');
+  // the terminal closes before the reset: the detached watcher takes over
+  run(['--hook', 'mod-exit'], { env: { ...env, CCRIG_HOST: 'mod' }, stdin: JSON.stringify({ session_id: 'own-1', cwd: '/tmp/proj', reason: 'prompt_input_exit' }) });
+  assert.ok(fs.existsSync(path.join(gd, 'own-1.watch')), 'mod-exit arms the watcher');
+});
+
+test('mod-exit arms nothing without a pending limit checkpoint, or with autopilot notify', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_HOST: 'mod' };
+  fs.mkdirSync(path.join(sb.home, '.ccrig'), { recursive: true });
+  const cfgFile = path.join(sb.home, '.ccrig', 'statusline.config.json');
+  fs.writeFileSync(cfgFile, JSON.stringify({ autopilot: 'resume' }));
+  run(['--hook', 'mod-exit'], { env, stdin: JSON.stringify({ session_id: 'none-1' }) });
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'guardian', 'none-1.watch')));
+  const gd = path.join(sb.cfg, 'guardian'); fs.mkdirSync(gd, { recursive: true });
+  fs.writeFileSync(path.join(gd, 'n-2.checkpoint.json'), JSON.stringify({ session_id: 'n-2', reason: 'session limit critical', window: 'session', resets_at: Math.floor(Date.now() / 1000) + 3600, cwd: '/tmp' }));
+  fs.writeFileSync(cfgFile, JSON.stringify({ autopilot: 'notify' }));
+  run(['--hook', 'mod-exit'], { env, stdin: JSON.stringify({ session_id: 'n-2' }) });
+  assert.ok(!fs.existsSync(path.join(gd, 'n-2.watch')), 'notify never arms a watcher');
+});
+
+test('--hook mod-resume hands back the resume prompt only after the reset, once, and stands down otherwise', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_HOST: 'mod' };
+  fs.mkdirSync(path.join(sb.home, '.ccrig'), { recursive: true });
+  const cfgFile = path.join(sb.home, '.ccrig', 'statusline.config.json');
+  fs.writeFileSync(cfgFile, JSON.stringify({ autopilot: 'resume' }));
+  const gd = path.join(sb.cfg, 'guardian'); fs.mkdirSync(gd, { recursive: true });
+  const tp = path.join(sb.dir, 't.jsonl');
+  fs.writeFileSync(tp, JSON.stringify({ type: 'user', message: { role: 'user', content: 'fix the billing bug' } }) + '\n');
+  const now = Math.floor(Date.now() / 1000);
+  const old = new Date((now - 7200) * 1000); fs.utimesSync(tp, old, old);   // written before the reset
+  const cpFile = path.join(gd, 'mr-1.checkpoint.json');
+  const cp = (resetsAt) => fs.writeFileSync(cpFile, JSON.stringify({ session_id: 'mr-1', reason: 'session limit critical', window: 'session', resets_at: resetsAt, cwd: '/tmp/proj', transcript_path: tp, todos: [], last_request: 'fix the billing bug', git: {} }));
+  const hook = () => run(['--hook', 'mod-resume'], { env, stdin: JSON.stringify({ session_id: 'mr-1', transcript_path: tp, cwd: '/tmp/proj' }) }).out;
+  cp(now + 3600);
+  assert.strictEqual(hook(), '', 'before the reset: nothing');
+  assert.ok(fs.existsSync(cpFile), 'the checkpoint stays');
+  cp(now - 600);
+  const o = JSON.parse(hook());
+  assert.match(o.prompt, /limit/i);
+  assert.ok(!fs.existsSync(cpFile), 'consumed once');
+  assert.strictEqual(hook(), '', 'a second call has nothing to resume');
+  // a weekly window resumes only with autopilotWeekly; autopilot notify never resumes
+  fs.writeFileSync(cpFile, JSON.stringify({ session_id: 'mr-1', reason: 'weekly limit critical', window: 'weekly', resets_at: now - 600, cwd: '/tmp/proj', transcript_path: tp, todos: [], git: {} }));
+  assert.strictEqual(hook(), '', 'weekly without autopilotWeekly: nothing');
+  cp(now - 600);
+  fs.writeFileSync(cfgFile, JSON.stringify({ autopilot: 'notify' }));
+  assert.strictEqual(hook(), '', 'autopilot notify: nothing');
+  fs.writeFileSync(cfgFile, JSON.stringify({ autopilot: 'resume' }));
+  // the session was already picked back up after the reset: stand down
+  const fresh = new Date(); fs.utimesSync(tp, fresh, fresh);
+  assert.strictEqual(hook(), '', 'resumed by hand: nothing');
+});

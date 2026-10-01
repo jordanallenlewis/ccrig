@@ -36,7 +36,7 @@ jobs:
           git config --global user.email ci@example.invalid
           git config --global user.name ci
       - name: Tests + quality gates
-        run: node --test
+        run: npm test
       - name: Packaged smoke test
         run: node .github/smoke.js
       - name: Self-test render

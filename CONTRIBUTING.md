@@ -13,7 +13,10 @@ that every change lands through a pull request that a maintainer approves.
 3. Test locally before opening the PR (there is no per-push CI; the release workflow runs the
    full suite on macOS, Windows, and Linux at tag time, but the maintainer reviews locally, so
    please run these yourself first):
-   - `node --test` (runs all three suites: `test-unit.js` + `test.js` + `test-gates.js`)
+   - `npm test` (runs all three suites: `test-unit.js` + `test.js` + `test-gates.js`; the file list is
+     pinned because a bare `node --test` on Node 22+ also picks up the mod's `tests/*.test.ts`)
+   - `claude plugin validate .claude-plugin/plugin.json` and `claude plugin test` if you touched the mod
+     (`hooks/`, `.claude-plugin/`, `tests/`); both run offline, with no session or sign-in
    - `node statusline.js --selftest` (quick rendering check on edge inputs)
    - `node statusline.js --demo` (eyeball the result)
    - `shellcheck claude-profiles.sh install.sh` if you touched the shell files
@@ -40,6 +43,13 @@ that every change lands through a pull request that a maintainer approves.
    do (npm pack, global install, upgrade, uninstall; the curl copy), runs the installed commands
    through every shell Claude Code may use, and checks auto-resume and autoUpdate end to end. It uses
    the network (npm and the live registry), so it is not part of `node --test`.
+
+   The mod (`hooks/ccrig.ts` and the pure helpers in `hooks/lib.ts`) has its own suite under `tests/`,
+   run by `claude plugin test` from Claude Code's mod test kit: it raises the events Claude Code would
+   raise, stubs what Claude Code would answer, and presses the buttons the mod draws. The mod never
+   duplicates a CCRig decision: it hands `statusline.js` the status JSON (`CCRIG_HOST=mod` prints the
+   segments as JSON) and forwards the guardian's hooks to `statusline.js --hook`, so a fix to the bar or
+   the guardian lands in `statusline.js` and both installs get it.
 
    **A bug fix must ship with a test:** a unit test in `test-unit.js` if the logic is
    pure, a `REGRESSION:` test in `test.js` if it's behavioral. A new feature ships with
@@ -102,9 +112,12 @@ so always sandbox a benchmark.
 
 Releases are automated by `.github/workflows/release.yml`. To cut one:
 
-1. Bump the version in `package.json` and the `VERSION` constant in `statusline.js` (they must
-   match, and a gate enforces it), and add a `CHANGELOG.md` section for it.
-2. Commit, then `git tag vX.Y.Z && git push origin main --tags`.
+1. Bump the version in `package.json` and the `VERSION` constant in `statusline.js`, the `version` in
+   `.claude-plugin/plugin.json`, and the `ref` in `.claude-plugin/marketplace.json` to the new tag
+   (`vX.Y.Z`). They must all match, and gates enforce it. Add a `CHANGELOG.md` section for it.
+2. Commit, then `git tag vX.Y.Z && git push origin main --tags`. Push the tag before announcing: the
+   marketplace installs the mod from that tag, and `/plugin update ccrig@ccrig` moves users only when it
+   changes.
 
 On the tag, the workflow checks the tag is on main, tests on macOS, Windows, and Linux (Node 18 and
 22, plus the packaged smoke test), then publishes to npm with **provenance**

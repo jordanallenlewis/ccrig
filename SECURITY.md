@@ -30,6 +30,20 @@ CCRig is distributed primarily through npm, as the `ccrig` package. On an npm in
 - **Auto-resume** relaunches the official `claude` CLI (`--resume … -p`). It does not touch your auth, does not proxy the API, and does not bypass any limit. It waits for your real reset and continues. It runs **unattended and capped**: the relaunched run has keep-working disabled (`CCBSL_UNATTENDED`), so it does its reviewable steps and stops rather than looping overnight. Weekly auto-resume is off by default.
 - **Inspect and stop it any time:** `--status` lists armed watchers (they are not hidden daemons, and each writes a PID file), `--disarm` stops them.
 
+## The Claude Code mod
+
+The mod (`hooks/ccrig.ts`, installed with `/plugin install ccrig@ccrig`) runs inside Claude Code with your permissions, like any mod. What it does with them:
+
+- **Starts one program:** Node (the node your wired CCRig status line already names, else `node`, else `node.exe`) running the `statusline.js` that ships in the same plugin directory. It never runs a shell, and text you type after `/ccrig` is checked against each command's exact arguments, so it can never become a flag.
+- **Reads:** your merged Claude Code settings through the mods API, only to find CCRig's own wiring and node path, and `~/.ccrig/statusline.config.json`. It reads `HOME` and `USERPROFILE` only to find that file. It writes no settings.
+- **Writes:** nothing itself. The `statusline.js` it runs writes what the section above lists, plus `~/.ccrig/mod.json` (version, plugin directory, last session id, when it last ran), which `--doctor`, `init` and `--uninstall` read to know the mod is there.
+- **Acts on its own only within your CCRig config:** a `claude -p` or SDK session draws nothing and its renders write nothing. With `"autopilot": "resume"`, an open session past its critical line continues itself at the reset by submitting CCRig's resume prompt (the transcript shows CCRig sent it); close the terminal first and the detached watcher above takes over. Nothing else is automatic.
+- **Network:** none from the mod. The once-a-day update check above is the only network call, and under the mod it points you to `/plugin update ccrig@ccrig` instead of updating any file.
+
+The mods API calls it makes, which `claude plugin validate .claude-plugin/plugin.json` lists from a clone before you install (a test fails the build when this list and the code disagree): `$.clock.after`, `$.clock.every`, `$.clock.now`, `$.command.register`, `$.env.get`, `$.fs.exists`, `$.fs.read`, `$.plugin.root`, `$.process.run`, `$.prompt.submit`, `$.session.cwd`, `$.session.id`, `$.session.model`, `$.session.root`, `$.session.usage`, `$.session.version`, `$.settings.read`, `$.ui.close`, `$.ui.copy`, `$.ui.invalidate`, `$.ui.log`, `$.ui.open`, `$.ui.resolve`, `$.ui.toast`.
+
+The plugin is the whole repository at a release tag (tests and CI files included; only `hooks/ccrig.ts` runs). Remove it with `/plugin uninstall ccrig@ccrig`, or stop every mod for one session with `claude --safe-mode`.
+
 ## Reporting a vulnerability
 
 Please open a confidential issue on the repository, or contact the maintainer at the address on [jordanallenlewis.com](https://jordanallenlewis.com). Please do not disclose publicly until a fix is available.
