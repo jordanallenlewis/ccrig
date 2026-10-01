@@ -11,6 +11,55 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-01
+
+### Added
+- **CCRig as a Claude Code mod.** The repo is now also a plugin marketplace: `/plugin marketplace add
+  jordanallenlewis/ccrig`, then `/plugin install ccrig@ccrig`, in the CLI or the Desktop app (Claude Code
+  2.1.287+). The mod draws the bar in the band above the prompt, shows the usage window to watch beside
+  the spinner, raises a toast when a window crosses the warn or critical line (Claude Code pushes the
+  figures, so nothing polls), and adds `/ccrig`, which answers at once, even mid-turn, with no Claude
+  turn: a summary, a usage pane with the pace forecast, the session board, and the `mode`, `autopilot`,
+  `keep-working`, `status`, `sessions` and `doctor` commands.
+- The mod runs the guardian's hooks itself (checkpoints, resume tickets, keep-working, board lamps), so a
+  plugin install edits no `settings.json`. When `ccrig init` already wired the status line or the hooks,
+  the mod leaves those to it: the band shows only limit alerts and no hook runs twice.
+- Without Node on the PATH, and in the Desktop app, the band falls back to a native line built from
+  Claude Code's own figures (model, context, usage windows, cost).
+- `/config` gains three ccrig rows: the band (`auto`, `always`, `alerts`, `off`), the spinner readout and
+  the toasts. A change applies at once.
+- **Resume in place.** With `"autopilot": "resume"` and the mod drawing the bar, an open session past its
+  critical line continues on its own at the reset, in the same terminal, through CCRig's own resume prompt
+  (`--hook mod-resume` decides, with the watcher's rules). Close the terminal first and `--hook mod-exit`
+  arms the detached watcher as before.
+- `--doctor`, `init` and `--uninstall` know the mod: doctor shows when it last ran (from
+  `~/.ccrig/mod.json`, which its renders write) and stops flagging a missing status line it draws for
+  you; `init` skips the markdown `/ccrig` commands the mod replaces; `--uninstall` names
+  `/plugin uninstall ccrig@ccrig`. The mod hides those markdown `/ccrig:*` commands from the menu.
+
+### Changed
+- A mod-host render acts (checkpoints, tickets, pings) only in an interactive terminal or Desktop session
+  (`CCRIG_INTERACTIVE=1`). A `claude -p` or SDK run, including the guardian's own `--resume -p`
+  relaunch, gets the hooks and nothing else.
+- The mod's copy of `statusline.js` never updates itself: the badge, `--check-update` and `--doctor` point
+  at `/plugin update ccrig@ccrig`, `--update` refuses, `autoUpdate` does nothing there, and `init` refuses
+  to wire a plugin-cache copy into `settings.json`.
+- The marketplace installs the release tag (`ref: vX.Y.Z`), never whatever is on `main`.
+- The mod runs each guardian hook only when `settings.json` does not already run it, by slug, and only
+  when CCRig's config asks for it (`autopilot` off means no checkpoints from Stop or PreCompact).
+- `/ccrig` passes only the arguments each command takes; nothing typed after it can become a CLI flag.
+- The mod follows `/clear`, `/resume` and `/branch` to the new session, runs the board's session-end
+  cleanup before Claude Code exits, renders once a minute between turns, tries the node your wired status
+  line names first, and stops retrying in the Desktop app after one failed start.
+- The mod reads CCRig's decisions (thresholds, autopilot, keep-working, board, forecast, update) from a
+  `state` block statusline.js prints beside the segments, instead of recomputing them.
+- Run under the mod (`CCRIG_HOST=mod`), `statusline.js` prints its segments as JSON for the mod to lay
+  out, and keeps its config in `~/.ccrig/` like an npm install, since `/plugin` replaces the plugin
+  directory on every update. `CCRIG_PURE=1` renders with no side effects, for a band drawn beside a
+  wired status line.
+- `npm test` names its three suites, because a bare `node --test` on Node 22+ also collects the mod's
+  `tests/*.test.ts`, which need Claude Code's test kit (`claude plugin test`). CI runs both.
+
 ## [1.7.0] - 2026-09-25
 
 ### Added

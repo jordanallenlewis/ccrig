@@ -37,6 +37,34 @@ New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\ccrig" | Out-Null;
 
 Then run the `ccrig ...` commands below as `node ~/.claude/ccrig/statusline.js ...` (in PowerShell, `node "$env:USERPROFILE\.claude\ccrig\statusline.js" ...`).
 
+## Or install it as a Claude Code mod
+
+Claude Code can load mods: plugins whose code runs inside Claude Code and draws in its interface. CCRig ships as one. Install it with `/plugin` in the CLI or the Desktop app, with no npm and no `settings.json` edits:
+
+```
+/plugin marketplace add jordanallenlewis/ccrig
+/plugin install ccrig@ccrig
+```
+
+Run `/reload-plugins` (or restart) and you get:
+
+- **The bar above the prompt.** CCRig draws in the band above the prompt input, wrapped to its width. Already wired the status line with `ccrig init`? Then the band stays empty until a usage window passes your warn line, and then shows the alert, the resume command and a Copy button.
+- **Usage on the spinner.** `Thinking · session 63%…` while Claude works.
+- **A toast before the wall.** Claude Code pushes usage to the mod as it moves, so the toast lands when a window crosses warn (90%) or critical (95%), with no polling.
+- **`/ccrig` with no Claude turn.** It answers at once, even mid-turn: `/ccrig` for a one-line summary, `/ccrig usage` for a pane with the bars, reset times and the pace forecast, `/ccrig board` for the session board, and `mode`, `autopilot`, `keep-working`, `status`, `sessions` and `doctor` as in the CLI.
+- **The guardian, from the mod.** Checkpoints, resume tickets, keep-working and the board lamps run from the mod's hooks, so nothing is written to `settings.json`. Each hook `ccrig init` already wired is left to it, so none runs twice.
+- **Resume in place.** With `"autopilot": "resume"` and the terminal still open, the session continues on its own at the reset, in the same window, where you can watch it and answer any prompt. Close the terminal first and the detached watcher takes over as before.
+
+The band (`auto`, `always`, `alerts`, `off`), the spinner readout and the toasts are the ccrig rows in `/config`, and a change there applies at once. Everything else (segments, mode, thresholds, autopilot) lives in the same `~/.ccrig/statusline.config.json` the npm install reads, so `/ccrig mode minimal` changes both.
+
+**Which install?** For the bar under the prompt, the shell CLI and the detached auto-resume watcher, use npm (`ccrig init`); add the mod for the toasts, the spinner readout, the panes and an immediate `/ccrig`. For no npm and no `settings.json` edits, use the mod alone. Both together never double up: `ccrig --doctor` shows whether the mod is active.
+
+**Updates** come through Claude Code: `/plugin update ccrig@ccrig` installs the latest release tag (the marketplace never serves unreleased work from `main`). The mod's copy of `statusline.js` never updates itself.
+
+It needs Claude Code 2.1.287 or newer, and Node 18 or newer on your PATH for the full bar and the guardian. Without Node, and in the Desktop app (where a mod may not start processes), the band draws a native line from Claude Code's own figures: model, context, the usage windows and cost. A `claude -p` or SDK run gets the guardian's hooks and nothing else: no drawing, no toasts, no checkpoint written from a render. Anthropic is turning mods on in stages; if `/plugin` reports that hooks modules are turned off, your account does not have them yet, and the npm install above works as before. A mod runs with your permissions, so `claude plugin validate .claude-plugin/plugin.json` on a clone lists every event it hooks and every call it makes before you install it; [SECURITY.md](SECURITY.md) says what each one is for.
+
+The band is shared, so you can build on it. A mod of your own that lists `ccrig` under `dependencies` runs first, gets CCRig's drawing from `next(e)` in a `ui.render` hook for `AbovePrompt`, and can add a line of its own under it. Or describe the line to Claude in a session ("add my open pull request count under the CCRig bar") and it writes the mod for you.
+
 ## What the status line shows
 
 - **Profile**: the active Claude account, when you run more than one
@@ -62,7 +90,7 @@ ccrig --autopilot notify          # the default: checkpoint + keep it fresh + de
 ccrig --autopilot off             # bar only, no guardian side effects
 ```
 
-Restart Claude Code once so the hooks load. What it honestly can and cannot do: auto-resume needs a Claude.ai Pro/Max plan (Claude Code sends rate-limit data only to subscribers) and a machine that is awake at reset time. It watches the 5-hour and 7-day windows Claude Code reports; a per-model weekly cap (an Opus-only limit, say) is not in that data, so hitting one gets no checkpoint or ping. It cannot reach into your open terminal, so it launches a fresh headless run and reconciles via the git snapshot; nothing is lost, because the transcript is continuous. (If an auto-resume fires while the old terminal is still parked at the limit, close that one rather than typing into it, or the two will fork the same session.) If usage recovers on its own before the reset, because you upgraded your plan or bought extra usage, the guardian notices and stands down. The headless relaunch cannot answer permission prompts; if one blocks it you can set `"autopilotBypassPermissions": true`, off by default because it is a real skip-permission-checks step. It applies only to the guardian's own unattended relaunch, never your interactive session. Nothing runs as a hidden daemon: `ccrig --status` lists armed watchers and `ccrig --disarm` stops them.
+Restart Claude Code once so the hooks load. What it honestly can and cannot do: auto-resume needs a Claude.ai Pro/Max plan (Claude Code sends rate-limit data only to subscribers) and a machine that is awake at reset time. It watches the 5-hour and 7-day windows Claude Code reports; a per-model weekly cap (an Opus-only limit, say) is not in that data, so hitting one gets no checkpoint or ping. From the npm install it cannot reach into your open terminal, so it launches a fresh headless run and reconciles via the git snapshot; nothing is lost, because the transcript is continuous. As a [Claude Code mod](#or-install-it-as-a-claude-code-mod) in an open terminal, the resume happens in that session at the reset (no headless relaunch); close the terminal and the detached watcher takes over as before. (If an auto-resume fires while the old terminal is still parked at the limit, close that one rather than typing into it, or the two will fork the same session.) If usage recovers on its own before the reset, because you upgraded your plan or bought extra usage, the guardian notices and stands down. The headless relaunch cannot answer permission prompts; if one blocks it you can set `"autopilotBypassPermissions": true`, off by default because it is a real skip-permission-checks step. It applies only to the guardian's own unattended relaunch, never your interactive session. Nothing runs as a hidden daemon: `ccrig --status` lists armed watchers and `ccrig --disarm` stops them.
 
 ## The session board (opt-in)
 

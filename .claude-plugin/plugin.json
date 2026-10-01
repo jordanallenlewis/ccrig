@@ -1,0 +1,31 @@
+{
+  "name": "ccrig",
+  "version": "1.8.0",
+  "description": "CCRig as a mod: your plan usage above the prompt and on the spinner, a toast before you hit a limit, /ccrig with no Claude turn, and the usage-limit guardian.",
+  "author": { "name": "Jordan Allen Lewis", "url": "https://jordanallenlewis.com" },
+  "homepage": "https://github.com/jordanallenlewis/ccrig",
+  "repository": "https://github.com/jordanallenlewis/ccrig",
+  "license": "MIT",
+  "keywords": ["statusline", "usage", "rate-limit", "guardian", "mod"],
+  "userConfig": {
+    "band": {
+      "type": "string",
+      "title": "Band above the prompt",
+      "description": "auto: the full bar when no CCRig status line is wired, else only limit alerts. always: the full bar. alerts: only limit alerts. off: nothing.",
+      "options": ["auto", "always", "alerts", "off"],
+      "default": "auto"
+    },
+    "spinner": {
+      "type": "boolean",
+      "title": "Usage on the spinner",
+      "description": "Show the plan usage window to watch beside the spinner while Claude works.",
+      "default": true
+    },
+    "alerts": {
+      "type": "boolean",
+      "title": "Limit toasts",
+      "description": "Show a toast when a usage window crosses your warn or critical line.",
+      "default": true
+    }
+  }
+}

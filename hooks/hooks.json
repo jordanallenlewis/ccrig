@@ -1,0 +1,4 @@
+{
+  "description": "CCRig as a mod: the bar in the band above the prompt, usage on the spinner, limit toasts, /ccrig, and the guardian's hooks",
+  "modules": ["./ccrig.ts"]
+}
