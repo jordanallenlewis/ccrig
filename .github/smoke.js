@@ -25,7 +25,7 @@ const base = fs.mkdtempSync(path.join(os.tmpdir(), 'rig smoke ü-'));
 const tmp = path.join(base, 'tmp'); fs.mkdirSync(tmp);
 function mkHome(tag) { const h = path.join(base, 'home ' + tag); fs.mkdirSync(path.join(h, '.claude'), { recursive: true }); return h; }
 function envFor(home, extra) {
-  const e = { ...process.env, HOME: home, USERPROFILE: home, TMPDIR: tmp, TEMP: tmp, TMP: tmp, CCBSL_NO_NOTIFY: '1', NO_UPDATE_NOTIFIER: '1', COLUMNS: '120', ...(extra || {}) };
+  const e = { ...process.env, HOME: home, USERPROFILE: home, TMPDIR: tmp, TEMP: tmp, TMP: tmp, CCBSL_NO_NOTIFY: '1', NO_UPDATE_NOTIFIER: '1', COLUMNS: '120', CCRIG_HOOK_FORM: 'shell', ...(extra || {}) };
   for (const k of ['CLAUDE_CONFIG_DIR', 'CCBSL_UPDATE_BASE', 'CCRIG_SESSION_NAME']) delete e[k];
   if (!extra || !('CCBSL_NO_ACT' in extra)) e.CCBSL_NO_ACT = '1';
   if (extra && extra.CCBSL_NO_ACT === null) delete e.CCBSL_NO_ACT;
@@ -60,12 +60,14 @@ fs.writeFileSync(path.join(base, 'transcript.jsonl'), '');
 function allCommands(settings) {
   const cmds = [];
   if (settings.statusLine && settings.statusLine.command) cmds.push({ ev: 'statusLine', cmd: settings.statusLine.command });
-  for (const [ev, groups] of Object.entries(settings.hooks || {})) for (const g of groups || []) for (const h of g.hooks || []) if (h && h.command) cmds.push({ ev, cmd: h.command });
+  for (const [ev, groups] of Object.entries(settings.hooks || {})) for (const g of groups || []) for (const h of g.hooks || []) if (h && h.command) cmds.push({ ev, cmd: h.command, args: Array.isArray(h.args) ? h.args : null });
   return cmds;
 }
 function execCommands(tag, settings, env) {
-  for (const { ev, cmd } of allCommands(settings)) {
-    for (const s of shells) {
+  for (const { ev, cmd, args } of allCommands(settings)) {
+    // exec form: Claude Code starts the program itself, with no shell, so run it exactly that way once
+    const runners = args ? [{ name: 'exec form (no shell)', run: (c, o) => spawnSync(c, args, { encoding: 'utf8', timeout: 60000, ...o }) }] : shells;
+    for (const s of runners) {
       const input = ev === 'statusLine' ? renderInput(base)
         : JSON.stringify({ session_id: 'smoke-1', transcript_path: path.join(base, 'transcript.jsonl'), cwd: base, hook_event_name: ev, source: 'startup', prompt: 'hi', notification_type: 'permission_prompt', message: 'Claude needs your permission', reason: 'exit', stop_hook_active: false });
       const r = s.run(cmd, { input, env });
@@ -113,6 +115,29 @@ try {
   const left = allCommands(s).filter((c) => /statusline\.js/.test(c.cmd));
   ((r.status === 0 && left.length === 0) ? PASS : FAIL)('standalone --uninstall removes all our commands', both(r).slice(0, 800) + '\nleft=' + JSON.stringify(left));
 } catch (e) { FAIL('standalone section threw', e.stack); }
+
+// ---------------------------------------------------------------------------
+// 1b. exec-form hooks (what Windows gets with Claude Code 2.1.139+): node started directly, no shell,
+//     from a path with spaces and parens; each hook runs the way Claude Code runs it, then --uninstall
+// ---------------------------------------------------------------------------
+try {
+  const home = mkHome('Exec (x) ü');
+  const app = path.join(base, 'exec app (x86) ü');
+  fs.mkdirSync(app, { recursive: true });
+  for (const f of ['statusline.js', 'CHANGELOG.md']) fs.copyFileSync(path.join(REPO, f), path.join(app, f));
+  const js = path.join(app, 'statusline.js');
+  const env = envFor(home, { CCRIG_HOOK_FORM: 'exec' });
+  let r = node([js, '--install'], { env });
+  (r.status === 0 ? PASS : FAIL)('exec-form --install', both(r).slice(0, 1500));
+  const sp = path.join(home, '.claude', 'settings.json');
+  let s = readJson(sp);
+  const hooks = allCommands(s).filter((c) => c.ev !== 'statusLine');
+  ((hooks.length === 7 && hooks.every((c) => c.args && c.args[0] === js && c.args[1] === '--hook')) ? PASS : FAIL)('exec-form hooks name node and pass the script as args', JSON.stringify(hooks).slice(0, 1500));
+  execCommands('exec-form', { hooks: s.hooks }, env);
+  r = node([js, '--uninstall'], { env });
+  s = readJson(sp);
+  ((r.status === 0 && allCommands(s).length === 0) ? PASS : FAIL)('exec-form --uninstall removes all our hooks', both(r).slice(0, 800));
+} catch (e) { FAIL('exec-form section threw', e.stack); }
 
 // ---------------------------------------------------------------------------
 // 2. npm lifecycle: pack -> global install into a prefix -> postinstall wiring -> bin shim -> init

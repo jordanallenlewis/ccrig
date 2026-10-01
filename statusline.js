@@ -70,7 +70,7 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const VERSION = '1.8.0';
+const VERSION = '1.8.1';
 
 // where updates come from. The npm registry's `latest` decides whether a newer RELEASE exists (a tag push
 // publishes it only after CI passes on all three OSes), and a standalone copy downloads that release's
@@ -2064,6 +2064,8 @@ if (argv.includes('--version') || argv.includes('-v')) {
 // Claude Code invokes --hook with the hook JSON on stdin; the installer wires it.
 // ===========================================================================
 function emitHook(obj) {
+  // a pending Git Bash pause notice rides on the hook's own answer (systemMessage is shown to the user)
+  if (HOOK_NOTE) obj = Object.assign({}, obj || {}, { systemMessage: HOOK_NOTE });
   try { if (obj && Object.keys(obj).length) process.stdout.write(JSON.stringify(obj)); } catch {}
   process.exit(0);
 }
@@ -2242,7 +2244,187 @@ function runHookModExit(input) {
   }
   emitHook({});
 }
+// ---- Git Bash watchdog (Windows) ----
+// Claude Code runs every status line through Git Bash on Windows (the status line has no shell-free form).
+// When Git Bash's runtime is broken, bash.exe hangs on startup, so each refresh leaves another stuck
+// bash.exe behind and they pile up. CCRig's hooks run without a shell (exec form), so they still fire
+// there: when the bar has stopped drawing, they start a background check that tries Git Bash. If it
+// hangs, CCRig takes its status line out of settings.json (kept in ccrig-statusline-paused.json), ends
+// the stuck shells running CCRig, and says so once; when Git Bash starts again, the bar comes back.
+function beatFile() { return path.join(cacheDir(), 'beat-' + strHash(CFG)); }
+function pausedFile(dir = CFG) { return path.join(dir, 'ccrig-statusline-paused.json'); }
+function bashCheckFile() { return path.join(CFG, '.ccrig-bash-check.json'); }
+function readPaused(dir = CFG) {
+  try { const o = parseJsonText(fs.readFileSync(pausedFile(dir), 'utf8')); return isPlainObject(o) && isPlainObject(o.statusLine) ? o : null; } catch { return null; }
+}
+// the render marks that the bar drew (Windows only; throttled to one write per 10s)
+function markRendered() {
+  if (process.platform !== 'win32' || MOD_HOST) return;
+  const f = beatFile();
+  try { if (Date.now() - fs.statSync(f).mtimeMs < 10000) return; } catch {}
+  try { fs.writeFileSync(f, String(Date.now())); } catch {}
+}
+// the bash.exe Claude Code would run: CLAUDE_CODE_GIT_BASH_PATH, else the Git install next to git.exe
+function gitBashPath() {
+  if (process.env.CCRIG_TEST_BASH_ARGV) return 'bash (test)';
+  if (process.platform !== 'win32') return null;
+  const isFile = (p) => { try { return fs.statSync(p).isFile(); } catch { return false; } };
+  const env = process.env.CLAUDE_CODE_GIT_BASH_PATH;
+  if (env && isFile(env)) return env;
+  const git = findBin('git');
+  if (git) {
+    let d = path.dirname(git);
+    for (let i = 0; i < 3; i++) { const b = path.join(d, 'bin', 'bash.exe'); if (isFile(b)) return b; d = path.dirname(d); }
+  }
+  for (const root of [process.env.ProgramFiles, process.env.ProgramW6432, process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs')]) {
+    if (!root) continue;
+    const b = path.join(root, 'Git', 'bin', 'bash.exe');
+    if (isFile(b)) return b;
+  }
+  return null;
+}
+// start Git Bash the way Claude Code does and see whether it finishes
+function gitBashHealth() {
+  const bash = gitBashPath();
+  if (!bash) return { bash: null };
+  let argv = [bash, '-c', 'exit 0'];
+  try { if (process.env.CCRIG_TEST_BASH_ARGV) argv = JSON.parse(process.env.CCRIG_TEST_BASH_ARGV); } catch {}
+  const limit = parseInt(process.env.CCRIG_BASH_PROBE_MS, 10) || 10000;
+  const t0 = Date.now();
+  const r = require('child_process').spawnSync(argv[0], argv.slice(1), { stdio: 'ignore', timeout: limit, windowsHide: true });
+  const ms = Date.now() - t0;
+  if ((r.error && r.error.code === 'ETIMEDOUT') || r.signal) return { bash, ok: false, ms, why: 'did not start within ' + Math.round(limit / 1000) + 's' };
+  if (r.error) return { bash, ok: false, ms, why: 'could not start (' + (r.error.code || r.error.message) + ')' };
+  if (r.status !== 0) return { bash, ok: false, ms, why: 'exited with code ' + r.status };
+  return { bash, ok: true, ms };
+}
+// The exact command strings Claude Code hands Git Bash for CCRig: the status line (wired or paused) and
+// any shell-form hook. Only a bash.exe running one of these is ever ended, never a terminal of the
+// user's own that happens to mention ccrig (say, `ccrig --board --watch` in a Git Bash window).
+function ccrigShellTargets() {
+  const out = [];
+  const raw = readSettingsRaw();
+  if (raw.state === 'ok') {
+    const sl = isPlainObject(raw.value.statusLine) ? raw.value.statusLine.command : null;
+    if (typeof sl === 'string' && isOurCmd(sl)) out.push(sl);
+    const hk = isPlainObject(raw.value.hooks) ? raw.value.hooks : {};
+    for (const groups of Object.values(hk)) for (const g of (Array.isArray(groups) ? groups : [])) for (const h of (g && Array.isArray(g.hooks) ? g.hooks : [])) {
+      if (isGuardianHookCmd(h) && !Array.isArray(h.args)) out.push(h.command);
+    }
+  }
+  const p = readPaused();
+  if (p && typeof p.statusLine.command === 'string') out.push(p.statusLine.command);
+  return [...new Set(out)];
+}
+// a command line as text to compare: no quotes (Windows escapes the inner ones as \"), forward slashes,
+// one case (NTFS ignores it)
+function cmdKey(s) { return foldPath(String(s || '').replace(/\\"/g, '"').replace(/"/g, '').replace(/\\/g, '/')).replace(/\s+/g, ' ').trim(); }
+// stuck Git Bash shells running one of those commands, older than a minute (a healthy refresh finishes in
+// well under a second)
+function stuckCcrigShells() {
+  if (process.platform !== 'win32') return [];
+  const only = process.env.CCRIG_TEST_SHELL_FILTER; // tests: never touch a real session's shells
+  const targets = ccrigShellTargets().map(cmdKey).filter(Boolean);
+  if (!targets.length && !only) return [];
+  const n = parseInt(process.env.CCRIG_STUCK_SECS, 10);
+  const secs = Number.isFinite(n) && n >= 0 ? n : 60;
+  const ps = "Get-CimInstance Win32_Process -Filter \"Name='bash.exe' OR Name='sh.exe'\" | " +
+    "Where-Object { $_.CommandLine -and $_.CommandLine -match 'statusline\\.js' -and $_.CreationDate -lt (Get-Date).AddSeconds(-" + secs + ") } | " +
+    'Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress';
+  let rows = [];
+  try {
+    const out = require('child_process').execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', timeout: 20000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    const j = out.trim() ? JSON.parse(out) : [];
+    rows = Array.isArray(j) ? j : [j];
+  } catch { return []; }
+  return rows.filter((r) => {
+    const cmd = cmdKey(r && r.CommandLine);
+    if (only && !cmd.includes(cmdKey(only))) return false;
+    // Claude Code runs `bash.exe -c "<command>"`, so the command is the whole last argument: a longer
+    // command that merely starts the same way (`... statusline.js --board --watch`) is not a match
+    return targets.length ? targets.some((t) => cmd.endsWith(' ' + t)) : !!only;
+  }).map((r) => r.ProcessId).filter((p) => Number.isInteger(p) && p > 0 && p !== process.pid && p !== process.ppid);
+}
+function endPids(pids) {
+  let n = 0;
+  for (const pid of pids) { try { process.kill(pid); n++; } catch {} }
+  return n;
+}
+function pauseStatusLine(h, ended) {
+  if (readPaused()) return false;
+  const raw = readSettingsRaw();
+  if (raw.state !== 'ok' || !isPlainObject(raw.value.statusLine) || !isOurCmd(raw.value.statusLine.command)) return false;
+  backupSettings();
+  if (!writeJsonAtomic(pausedFile(), { statusLine: raw.value.statusLine, at: Date.now(), bash: h.bash, why: h.why, ended, announced: false })) return false;
+  delete raw.value.statusLine;
+  if (!writeJsonAtomic(settingsPathOf(), raw.value)) { try { fs.unlinkSync(pausedFile()); } catch {} return false; }
+  notify('CCRig paused its status line', 'Git Bash is not starting, so each status line refresh left a stuck bash.exe. The bar comes back by itself once Git Bash works; a reboot usually fixes it. Details: ccrig --doctor');
+  return true;
+}
+function restoreStatusLine(p) {
+  const raw = readSettingsRaw();
+  if (raw.state !== 'ok') return false;
+  let restored = false;
+  // a status line set since the pause (a re-install, or another tool) is left alone
+  if (!raw.value.statusLine) {
+    raw.value.statusLine = p.statusLine;
+    restored = writeJsonAtomic(settingsPathOf(), raw.value);
+    if (!restored) return false;
+  }
+  try { fs.unlinkSync(pausedFile()); } catch {}
+  if (restored) notify('CCRig status line is back', 'Git Bash is starting again, so the status line is on again.');
+  return restored;
+}
+function runGitBashCheck() {
+  const h = gitBashHealth();
+  if (!h.bash) return emitHook({});
+  // the process scan (PowerShell) only runs when there is something to clean up: Git Bash broken, or a
+  // pause to undo. A healthy Git Bash with a quiet bar (the VS Code panel draws no status line) costs one
+  // quick bash start every few minutes and nothing more.
+  const ended = (!h.ok || readPaused()) ? endPids(stuckCcrigShells()) : 0;
+  let action = '';
+  if (!h.ok) action = pauseStatusLine(h, ended) ? 'paused' : (readPaused() ? 'still paused' : '');
+  else { const p = readPaused(); if (p && restoreStatusLine(p)) action = 'restored'; }
+  writeJsonAtomic(bashCheckFile(), { at: Date.now(), ok: !!h.ok, ms: h.ms, why: h.why || '', bash: h.bash, ended, action });
+  emitHook({});
+}
+// From a hook: start the check in the background when the bar has stopped drawing (or, while paused, to
+// see whether Git Bash works again). One check per 3 minutes, per 10 while paused; never in the mod, which
+// starts node without a shell, or in an unattended relaunch.
+function maybeWatchdog() {
+  if ((process.platform !== 'win32' && !process.env.CCRIG_TEST_BASH_ARGV) || MOD_HOST || process.env.CCBSL_UNATTENDED) return;
+  try {
+    const paused = readPaused();
+    const mark = path.join(cacheDir(), 'watchdog-' + strHash(CFG));
+    const every = paused ? 10 * 60 * 1000 : 3 * 60 * 1000;
+    try { if (Date.now() - fs.statSync(mark).mtimeMs < every) return; } catch {}
+    if (!paused) {
+      let age = Infinity; try { age = Date.now() - fs.statSync(beatFile()).mtimeMs; } catch {}
+      if (age < 45000) return;
+      const raw = readSettingsRaw();
+      if (raw.state !== 'ok' || !isPlainObject(raw.value.statusLine) || !isOurCmd(raw.value.statusLine.command)) return;
+      if (!gitBashPath()) return;      // no Git Bash: Claude Code runs the bar through PowerShell
+    }
+    fs.writeFileSync(mark, String(Date.now()));
+    if (actAllowed()) spawnDetached(process.execPath, [__filename, '--hook', 'git-bash-check']);
+  } catch {}
+}
+// once per pause, a line in the session itself (the desktop ping alone is easy to miss)
+let HOOK_NOTE = null;
+function takePauseNote() {
+  const p = readPaused();
+  if (!p || p.announced === true) return null;
+  p.announced = true;
+  writeJsonAtomic(pausedFile(), p);
+  return 'CCRig paused its status line: Git Bash is not starting on this machine (' + (p.why || 'it hangs') + '), and Claude Code runs every status line through it, so each refresh was leaving a stuck bash.exe' +
+    (p.ended ? ' (' + p.ended + ' ended)' : '') + '. The bar comes back by itself once Git Bash works; a reboot usually fixes it, and if not, repair Git for Windows. Details: ccrig --doctor';
+}
 function runHook(event, input) {
+  if (['stop', 'Stop', 'board-stop', 'user-prompt', 'UserPromptSubmit'].includes(event)) maybeWatchdog();
+  // board-stop rides with every bar install; session-start covers a fresh session. (The guardian's own
+  // Stop hook runs beside board-stop on the same event, so it stays out of this to avoid saying it twice.)
+  if (['board-stop', 'session-start', 'SessionStart'].includes(event)) { try { HOOK_NOTE = takePauseNote(); } catch {} }
+  if (event === 'git-bash-check') { try { return runGitBashCheck(); } catch { return emitHook({}); } }
   try {
     if (event === 'stop' || event === 'Stop') return runHookStop(input);
     if (event === 'session-start' || event === 'SessionStart') return runHookSessionStart(input);
@@ -2995,6 +3177,8 @@ function installStatusLineInto(dir, withGuardian) {
     const replacedForeign = (prevSl && !isOurCmd(prevSl)) ? prevSl : null;
     const bak = backupSettings(dir);
     settings.statusLine = { type: 'command', command: ourCommand(''), refreshInterval: 2 };
+    // an install puts the bar back on its own terms; a Git Bash pause saved before it no longer applies
+    try { fs.unlinkSync(pausedFile(dir)); } catch {}
     // The guardian is on by default (SessionStart restore + PreCompact + Stop hooks); --no-guardian
     // installs the bar only. The autopilot MODE (notify vs resume) is config, defaulting to notify.
     // An npm update (postinstall) or a standalone --update runs in REFRESH mode: it re-points a guardian
@@ -3107,18 +3291,88 @@ function guardianHookCommand(slug) { return ourCommand('--hook ' + slug); }
 // program ("Unexpected token"). So on Windows the first token is never quoted: the node path in forward
 // slashes when it has no spaces, else plain `node` from PATH. Everywhere, a node on PATH that is the same
 // binary wins over the versioned real path, so `brew upgrade node` (a new Cellar dir) does not strand it.
-function nodeForCommand() {
+function nodeOnPathOrSelf() {
   const exe = process.execPath;
   let real = exe; try { real = fs.realpathSync(exe); } catch {}
-  let onPath = null;
   for (const dir of (process.env.PATH || '').split(path.delimiter)) {
     if (!dir || !path.isAbsolute(dir)) continue;
     const p = path.join(dir, process.platform === 'win32' ? 'node.exe' : 'node');
-    try { if (fs.realpathSync(p) === real) { onPath = p; break; } } catch {}
+    try { if (fs.realpathSync(p) === real) return p; } catch {}
   }
-  if (process.platform !== 'win32') return '"' + (onPath || exe) + '"';
-  const p = (onPath || exe).replace(/\\/g, '/');
+  return exe;
+}
+function nodeForCommand() {
+  const node = nodeOnPathOrSelf();
+  if (process.platform !== 'win32') return '"' + node + '"';
+  const p = node.replace(/\\/g, '/');
   return /\s/.test(p) ? 'node' : p;
+}
+// ---- hooks without a shell (Windows) ----
+// Claude Code runs a shell-form hook through Git Bash on Windows. When Git Bash's runtime is broken (a
+// bad Git for Windows install, or security software hooking it), bash.exe hangs on startup and every hook
+// stalls until its timeout. Since Claude Code 2.1.139 a hook can name an executable plus an `args` list
+// (exec form), which starts node.exe directly. The status line has no such form, so the Git Bash watchdog
+// below covers it. CCRIG_HOOK_FORM=exec|shell overrides the choice (tests, and an escape hatch).
+const EXEC_HOOKS_SINCE = '2.1.139';
+function ccVersionFile() { return path.join(CFG, '.ccrig-cc-version'); }
+// the Claude Code version the status line last received, so install can tell what the hooks may use
+function rememberCcVersion(v) {
+  if (typeof v !== 'string' || !/^\d+\.\d+\.\d+/.test(v)) return;
+  const want = v.match(/^\d+\.\d+\.\d+/)[0];
+  try { if (fs.readFileSync(ccVersionFile(), 'utf8').trim() === want) return; } catch {}
+  try { fs.writeFileSync(ccVersionFile(), want + '\n'); } catch { return; }
+  CC_VERSION_CACHE = want;
+  // once per Claude Code version: hooks wired the shell way move to exec form when it is now allowed
+  try { migrateHooksToExec(); } catch {}
+}
+// Rewire the CCRig hook groups that are already wired (and only those), the way an npm update's refresh
+// does, when any of them still runs through Git Bash and this Claude Code can start node directly.
+function migrateHooksToExec() {
+  if (process.platform !== 'win32' || !hookExecForm()) return false;
+  const raw = readSettingsRaw();
+  if (raw.state !== 'ok' || !isPlainObject(raw.value.hooks)) return false;
+  const hk = raw.value.hooks;
+  const ours = (ev) => (Array.isArray(hk[ev[0]]) ? hk[ev[0]] : []).flatMap((g) => (g && Array.isArray(g.hooks) ? g.hooks : []))
+    .filter((h) => isGuardianHookCmd(h) && hookSlug(hookText(h)) === ev[1]);
+  const wiredGuard = GUARD_EVENTS.some((ev) => ours(ev).length);
+  const wiredBoard = BOARD_EVENTS.some((ev) => ours(ev).length);
+  if (!HOOK_EVENTS.some((ev) => ours(ev).some((h) => !Array.isArray(h.args)))) return false;
+  backupSettings();
+  if (wiredGuard) addGuardianHooks(raw.value);
+  if (wiredBoard) addBoardHooks(raw.value);
+  return writeJsonAtomic(settingsPathOf(), raw.value);
+}
+let CC_VERSION_CACHE;
+function ccVersion() {
+  if (CC_VERSION_CACHE !== undefined) return CC_VERSION_CACHE;
+  CC_VERSION_CACHE = null;
+  try { const v = fs.readFileSync(ccVersionFile(), 'utf8').trim(); if (/^\d+\.\d+\.\d+$/.test(v)) return (CC_VERSION_CACHE = v); } catch {}
+  // never rendered under this profile yet: ask the CLI itself (no shell; an npm shim runs through node)
+  try {
+    const L = winLaunch(claudeBin());
+    if (L) {
+      const r = require('child_process').spawnSync(L.cmd, L.pre.concat(['--version']), { encoding: 'utf8', timeout: 15000, windowsHide: true });
+      const m = /(\d+\.\d+\.\d+)/.exec(String(r.stdout || ''));
+      if (m) CC_VERSION_CACHE = m[1];
+    }
+  } catch {}
+  return CC_VERSION_CACHE;
+}
+function hookExecForm() {
+  const f = process.env.CCRIG_HOOK_FORM;
+  if (f === 'exec') return true;
+  if (f === 'shell') return false;
+  if (process.platform !== 'win32') return false;
+  const v = ccVersion();
+  return !!v && !semverGt(EXEC_HOOKS_SINCE, v);
+}
+// one text for either hook form, so detection, stripping and path checks read both the same way
+function hookText(h) {
+  if (!h || typeof h.command !== 'string') return '';
+  if (!Array.isArray(h.args)) return h.command;
+  // quote paths (so checkCmdPaths sees every one) and anything with a space; `--hook <slug>` stays bare
+  const q = (t) => ((/\s/.test(String(t)) || path.isAbsolute(String(t))) ? '"' + String(t) + '"' : String(t));
+  return [h.command].concat(h.args).map(q).join(' ');
 }
 // pnpm resolves __filename into its versioned store (node_modules/.pnpm/ccrig@1.2.3/node_modules/ccrig);
 // the global node_modules/ccrig link next to it survives an update, the store dir does not
@@ -3144,9 +3398,12 @@ function ourCommand(args) {
 // identical on every OS.
 function addHooks(settings, events) {
   settings.hooks = stripOurHooks(isPlainObject(settings.hooks) ? settings.hooks : {}, events).hooks || {};
+  const exec = hookExecForm();
   for (const [Event, slug, , matcher, timeout] of events) {
     const kept = Array.isArray(settings.hooks[Event]) ? settings.hooks[Event] : [];
-    const hook = { type: 'command', command: guardianHookCommand(slug) };
+    const hook = exec
+      ? { type: 'command', command: nodeOnPathOrSelf(), args: [stableScriptPath(), '--hook', slug] }
+      : { type: 'command', command: guardianHookCommand(slug) };
     if (timeout) hook.timeout = timeout;
     kept.push(matcher ? { matcher, hooks: [hook] } : { hooks: [hook] });
     settings.hooks[Event] = kept;
@@ -3191,18 +3448,18 @@ function isOurCmd(cmd) {
   return false;
 }
 // a guardian hook of ours: the --hook convention + any statusline.js reference (any install).
-function isGuardianHookCmd(h) { return h && typeof h.command === 'string' && h.command.includes('--hook') && refsStatuslineJs(h.command); }
+function isGuardianHookCmd(h) { const t = hookText(h); return !!t && t.includes('--hook') && refsStatuslineJs(t); }
 // remove ONLY our individual hook entries, per-hook, so a user's hook that shares a
 // group object with ours is never dropped. Empty groups (and events) are pruned.
 // Returns the possibly-emptied hooks object (undefined if now empty) + a removed count.
 // the `--hook <slug>` of one of our commands (Stop carries both a guardian and a board hook)
 function hookSlug(cmd) { const m = /--hook\s+(\S+)/.exec(String(cmd || '')); return m ? m[1] : null; }
-function groupHasSlug(g, slug) { return !!(g && Array.isArray(g.hooks) && g.hooks.some((h) => isGuardianHookCmd(h) && hookSlug(h.command) === slug)); }
+function groupHasSlug(g, slug) { return !!(g && Array.isArray(g.hooks) && g.hooks.some((h) => isGuardianHookCmd(h) && hookSlug(hookText(h)) === slug)); }
 function stripOurHooks(hooks, events) {
   if (!isPlainObject(hooks)) return { hooks, removed: 0 };
   let removed = 0;
   const slugs = new Set(events.map((e) => e[1]));
-  const ours = (h) => isGuardianHookCmd(h) && (hookSlug(h.command) === null || slugs.has(hookSlug(h.command)));
+  const ours = (h) => isGuardianHookCmd(h) && (hookSlug(hookText(h)) === null || slugs.has(hookSlug(hookText(h))));
   for (const [Event] of events) {
     if (!Array.isArray(hooks[Event])) continue;
     const kept = [];
@@ -3233,6 +3490,7 @@ function installGuardianInto(dir) {
     const bak = backupSettings(dir);
     if (!isPlainObject(settings.statusLine) || typeof settings.statusLine.command !== 'string') {
       settings.statusLine = { type: 'command', command: ourCommand(''), refreshInterval: 2 };
+      try { fs.unlinkSync(pausedFile(dir)); } catch {}
     }
     // strip any prior guardian hooks surgically (keeps the user's own), then add fresh
     addGuardianHooks(settings);
@@ -3357,6 +3615,8 @@ function uninstallFrom(dir) {
       try { fs.rmdirSync(path.join(slashCommandDir(dir), 'ccrig')); } catch {} // drop the now-empty /ccrig subdir
     } catch {}
     try { fs.unlinkSync(path.join(dir, '.ccbsl-update.json')); } catch {}
+    // a status line paused for a broken Git Bash must never come back after an uninstall
+    try { fs.unlinkSync(pausedFile(dir)); } catch {}
     if (raw.state === 'unreadable' || raw.state === 'invalid' || raw.state === 'notObject') return { dir, sp, err: 'settings.json ' + (raw.state === 'unreadable' ? 'cannot be read (' + raw.code + ')' : 'does not parse') + ', so the CCRig status line and hooks in it are still there; fix it, then run --uninstall again' };
     if (raw.state !== 'ok' || (!ownsStatusLine && !gres.removed && !bres.removed)) return { dir, sp, removedSL: false, removedHooks: 0, removedBoard: 0, foreign, removedCmd };
     const settings = raw.value;
@@ -3434,6 +3694,7 @@ function runDoctor() {
     if (raw.value.statusLine && !isPlainObject(raw.value.statusLine)) bad('statusLine is not an object', 're-run: node "' + __filename + '" --install');
     else if (sl.command != null && typeof sl.command !== 'string') bad('statusLine.command is not a string', 're-run: node "' + __filename + '" --install');
     else if (!cmd && modOn) info('statusLine not wired: the mod draws the bar in the band above the prompt, so there is nothing to wire');
+    else if (!cmd && readPaused()) info('statusLine paused by CCRig because Git Bash was not starting (see below)');
     else if (!cmd) bad('statusLine is not configured', installKind() === 'mod' ? 'install with npm (npm install -g ccrig && ccrig init), or let the mod draw the bar' : 'run: node "' + __filename + '" --install');
     else {
       ok('statusLine is configured');
@@ -3451,6 +3712,29 @@ function runDoctor() {
     catch (e) { bad('statusline.config.json is invalid JSON (' + e.message + '); defaults are in use', 'fix it or delete it'); }
   } else info('no statusline.config.json: defaults in use (customize with --config)');
   if (findBin('git')) ok('git found'); else info('git not found: the git segment stays hidden');
+  // Windows: Claude Code runs every status line (and every shell-form hook) through Git Bash
+  if (process.platform === 'win32' || process.env.CCRIG_TEST_BASH_ARGV) {
+    const h = gitBashHealth();
+    if (!h.bash) info('no Git Bash: Claude Code runs the status line and hooks through PowerShell');
+    else if (h.ok) {
+      ok('Git Bash starts (' + h.ms + 'ms, ' + h.bash + ')');
+      if (h.ms > 3000) info('Git Bash takes ' + (h.ms / 1000).toFixed(1) + 's to start, and Claude Code pays that on every status line refresh; security software scanning it is the usual cause');
+    } else {
+      bad('Git Bash ' + h.why + ' (' + h.bash + '). Claude Code runs every status line through it, so each refresh would leave a stuck bash.exe; CCRig pauses its bar until Git Bash works again',
+        'reboot; if it persists, repair or reinstall Git for Windows, or ask IT whether security software is blocking it');
+    }
+    const ended = h.bash ? endPids(stuckCcrigShells()) : 0;
+    if (ended) info('ended ' + ended + ' stuck ' + plural(ended, 'shell') + ' (bash.exe) left by earlier refreshes');
+    const p = readPaused();
+    if (p && h.ok) { if (restoreStatusLine(p)) ok('Git Bash works again, so the paused status line is back on'); }
+    else if (p) info('status line paused since ' + new Date(p.at).toLocaleString() + '; it comes back by itself once Git Bash works (or run --install)');
+    if (h.bash && raw.state === 'ok') {
+      const hk = isPlainObject(raw.value.hooks) ? raw.value.hooks : {};
+      const shellForm = HOOK_EVENTS.some(([Ev, slug]) => (Array.isArray(hk[Ev]) ? hk[Ev] : []).some((g) => g && Array.isArray(g.hooks) && g.hooks.some((x) => isGuardianHookCmd(x) && hookSlug(hookText(x)) === slug && !Array.isArray(x.args))));
+      const v = ccVersion();
+      if (shellForm) info('CCRig hooks run through Git Bash; ' + (v && !semverGt(EXEC_HOOKS_SINCE, v) ? 're-run --install so they start node directly' : 'Claude Code ' + EXEC_HOOKS_SINCE + ' or newer can run them without it'));
+    }
+  }
   // subscription-only features: rate_limits is only in stdin for Claude.ai Pro/Max
   if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) info('API key detected: usage bars, forecast, and auto-resume are subscription-only (they need rate_limits, which Claude Code sends only to Pro/Max); you still get context/git/cost/model');
   else info('usage bars/forecast/auto-resume need a Claude.ai Pro/Max subscription (rate_limits in stdin); if they stay blank on a subscription, the stdin schema may have changed');
@@ -3467,7 +3751,7 @@ function runDoctor() {
       // path-check the hook commands too (doctor only checked statusLine before): after a node-version
       // upgrade, --install fixes statusLine but the hooks still point at a dead node path.
       const hookCmds = [];
-      for (const [Event, slug] of GUARD_EVENTS) for (const g of (Array.isArray(hooks[Event]) ? hooks[Event] : [])) for (const h of (g && Array.isArray(g.hooks) ? g.hooks : [])) if (isGuardianHookCmd(h) && hookSlug(h.command) === slug) hookCmds.push(h.command);
+      for (const [Event, slug] of GUARD_EVENTS) for (const g of (Array.isArray(hooks[Event]) ? hooks[Event] : [])) for (const h of (g && Array.isArray(g.hooks) ? g.hooks : [])) if (isGuardianHookCmd(h) && hookSlug(hookText(h)) === slug) hookCmds.push(hookText(h));
       const hookMissing = [];
       for (const hc of hookCmds) for (const m of checkCmdPaths(hc).missing) if (!hookMissing.includes(m)) hookMissing.push(m);
       // --install re-points every wired command at this copy without touching keep-working or autopilot
@@ -3748,6 +4032,9 @@ if (!argv.includes('--config')) {
     // JSON.parse('null')/'42'/'[]' all succeed and overwrite the {} fallback; render() reads
     // input.workspace etc, so coerce anything that is not a plain object back to {}.
     if (!input || typeof input !== 'object' || Array.isArray(input)) input = {};
+    // Windows: the Git Bash watchdog's evidence that the bar is drawing, and the Claude Code version
+    // that decides whether install can wire the hooks without a shell
+    if (process.platform === 'win32' && !MOD_HOST) { rememberCcVersion(input.version); markRendered(); }
     // the mod lays the segments out itself, so it can wrap them to the band and color them natively
     if (MOD_HOST) {
       const segs = collectSegments(input, getWidth() - CONFIG.reserveCols);

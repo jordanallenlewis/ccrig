@@ -11,6 +11,24 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-10-01
+
+### Fixed
+- **Windows: a broken Git Bash no longer piles up stuck `bash.exe` processes.** Claude Code runs every
+  status line through Git Bash on Windows, so when Git Bash's runtime hangs on startup, each refresh left
+  another stuck shell (and the next one started more). CCRig now notices that the bar has stopped
+  drawing, tries Git Bash in the background, and if it hangs, takes its status line out of
+  `settings.json`, ends the stuck shells that were running it, and says so once in the session and with
+  a desktop notification. The bar comes back by itself once Git Bash starts again. It only ever ends a
+  shell whose command line ends with the exact command CCRig wired, and never touches another tool's
+  status line.
+- **Windows: the hooks no longer use Git Bash.** With Claude Code 2.1.139 or newer, the hooks start
+  `node.exe` directly (exec form, `args`), so a broken Git Bash cannot stall every prompt and stop. An
+  install wired the older way moves over the first time the status line sees a new enough Claude Code;
+  older Claude Code keeps the shell form.
+- `ccrig --doctor` on Windows times Git Bash, ends stuck CCRig shells, reports a paused bar and puts it
+  back when Git Bash works again, and says when the hooks still run through Git Bash.
+
 ## [1.8.0] - 2026-10-01
 
 ### Added

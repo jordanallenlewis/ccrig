@@ -16,6 +16,8 @@ that every change lands through a pull request that a maintainer approves.
    - `npm test` (runs all three suites: `test-unit.js` + `test.js` + `test-gates.js`; the file list is
      pinned because a bare `node --test` on Node 22+ also picks up the mod's `tests/*.test.ts`)
    - `claude plugin validate .claude-plugin/plugin.json` and `claude plugin test` if you touched the mod
+     (if `claude plugin test` says the rollout switch is off for your account, run it with
+     `CLAUDE_CONFIG_DIR` pointed at an empty folder; the tests need no sign-in)
      (`hooks/`, `.claude-plugin/`, `tests/`); both run offline, with no session or sign-in
    - `node statusline.js --selftest` (quick rendering check on edge inputs)
    - `node statusline.js --demo` (eyeball the result)
