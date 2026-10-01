@@ -65,7 +65,11 @@ function run(args, { stdin = '', env = {}, script = SCRIPT } = {}) {
   // processes during tests; file side effects (checkpoints, tickets) still run.
   // NO_NOTIFY: no real desktop popup even from a test that re-enables act paths; GIT_TIMEOUT: a slow
   // Windows runner must not fail a git assertion on the product's 700ms render budget
-  const merged = { ...base, COLUMNS: '120', CCBSL_NO_ACT: '1', CCBSL_NO_NOTIFY: '1', CCBSL_GIT_TIMEOUT_MS: '5000', ...env };
+  // CCRIG_HOOK_FORM=shell: hooks are wired the classic way unless a test asks for exec form, so a
+  // contributor's own Claude Code version (read from `claude --version`) never changes the results
+  for (const k of ['CCRIG_TEST_BASH_ARGV', 'CCRIG_BASH_PROBE_MS', 'CCRIG_STUCK_SECS', 'CCRIG_TEST_SHELL_FILTER', 'CLAUDE_CODE_GIT_BASH_PATH']) delete base[k];
+  // CCRIG_TEST_SHELL_FILTER: the Git Bash watchdog may only ever end processes inside this test run's sandbox
+  const merged = { ...base, COLUMNS: '120', CCBSL_NO_ACT: '1', CCBSL_NO_NOTIFY: '1', CCBSL_GIT_TIMEOUT_MS: '5000', CCRIG_HOOK_FORM: 'shell', CCRIG_TEST_SHELL_FILTER: ROOT, ...env };
   // on Windows os.homedir() reads USERPROFILE, not HOME; mirror it so HOME sandboxing works there too
   if (merged.HOME) merged.USERPROFILE = merged.HOME;
   const r = spawnSync(NODE, [script, ...args], {
@@ -2733,7 +2737,7 @@ test('REGRESSION: installed commands put an unquoted program first on Windows (P
   const sb = sandbox();
   const pre = path.join(sb.dir, 'win32.js');
   fs.writeFileSync(pre, "Object.defineProperty(process, 'platform', { value: 'win32' });\n");
-  const r = spawnSync(NODE, ['-r', pre, SCRIPT, '--install'], { encoding: 'utf8', env: { ...process.env, CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, USERPROFILE: sb.home, CCBSL_NO_ACT: '1', TMPDIR: TESTTMP } });
+  const r = spawnSync(NODE, ['-r', pre, SCRIPT, '--install'], { encoding: 'utf8', env: { ...process.env, CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, USERPROFILE: sb.home, CCBSL_NO_ACT: '1', TMPDIR: TESTTMP, CCRIG_HOOK_FORM: 'shell' } });
   assert.strictEqual(r.status, 0, r.stdout + r.stderr);
   const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
   const cmds = [j.statusLine.command];
@@ -3180,4 +3184,197 @@ test('--hook mod-resume hands back the resume prompt only after the reset, once,
   // the session was already picked back up after the reset: stand down
   const fresh = new Date(); fs.utimesSync(tp, fresh, fresh);
   assert.strictEqual(hook(), '', 'resumed by hand: nothing');
+});
+
+// ===========================================================================
+// Windows: hooks without Git Bash, and the Git Bash watchdog
+// ===========================================================================
+const ourHooks = (j) => Object.values(j.hooks || {}).flat().flatMap((g) => (g && g.hooks) || []).filter((h) => /statusline\.js/.test(h.command + ' ' + (h.args || []).join(' ')));
+
+test('exec form: hooks start node directly with args, stay idempotent, and --uninstall removes them', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_HOOK_FORM: 'exec' };
+  assert.strictEqual(run(['--install', '--this-profile'], { env }).code, 0);
+  const sp = path.join(sb.cfg, 'settings.json');
+  let j = JSON.parse(fs.readFileSync(sp, 'utf8'));
+  const hooks = ourHooks(j);
+  assert.strictEqual(hooks.length, 7, 'guardian + board hooks');
+  for (const h of hooks) {
+    assert.ok(Array.isArray(h.args) && h.args.length === 3, 'exec form');
+    assert.ok(path.isAbsolute(h.command) && /node(\.exe)?$/i.test(h.command), 'node itself is the command');
+    assert.ok(cmdHasPath(h.args[0], SCRIPT) && h.args[1] === '--hook');
+  }
+  assert.deepStrictEqual(hooks.map((h) => h.args[2]).sort(), ['board-stop', 'notification', 'pre-compact', 'session-end', 'session-start', 'stop', 'user-prompt']);
+  // the status line itself has no exec form: still a command string
+  assert.strictEqual(typeof j.statusLine.command, 'string');
+  assert.ok(!('args' in j.statusLine));
+  // a re-run replaces, never duplicates; doctor reads exec-form hooks as wired
+  run(['--install', '--this-profile'], { env });
+  j = JSON.parse(fs.readFileSync(sp, 'utf8'));
+  assert.strictEqual(ourHooks(j).length, 7);
+  assert.match(run(['--doctor'], { env }).out, /ok {4}guardian hooks wired/);
+  // switching back to shell form replaces them too
+  run(['--install', '--this-profile'], { env: { ...env, CCRIG_HOOK_FORM: 'shell' } });
+  j = JSON.parse(fs.readFileSync(sp, 'utf8'));
+  assert.strictEqual(ourHooks(j).length, 7);
+  assert.ok(ourHooks(j).every((h) => !h.args), 'back to shell form');
+  run(['--install', '--this-profile'], { env });
+  assert.strictEqual(run(['--uninstall', '--this-profile'], { env }).code, 0);
+  j = JSON.parse(fs.readFileSync(sp, 'utf8'));
+  assert.strictEqual(ourHooks(j).length, 0, 'exec-form hooks are removed');
+  assert.ok(!j.statusLine);
+});
+
+test('Windows: hooks go shell-free only when the status line has seen Claude Code 2.1.139 or newer', { skip: process.platform !== 'win32' && 'Windows only' }, () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_HOOK_FORM: '', PATH: path.dirname(NODE) };
+  render(baseInput({ version: '2.1.100' }), { env });
+  assert.strictEqual(fs.readFileSync(path.join(sb.cfg, '.ccrig-cc-version'), 'utf8').trim(), '2.1.100');
+  run(['--install', '--this-profile'], { env });
+  let j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  assert.ok(ourHooks(j).every((h) => !h.args), 'an older Claude Code gets shell form');
+  render(baseInput({ version: '2.1.287' }), { env });
+  run(['--install', '--this-profile'], { env });
+  j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  assert.ok(ourHooks(j).length === 7 && ourHooks(j).every((h) => Array.isArray(h.args)), '2.1.287 gets exec form');
+});
+
+test('Windows: an install wired the shell way moves to exec form once the bar sees Claude Code 2.1.139+', { skip: process.platform !== 'win32' && 'Windows only' }, () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  run(['--install', '--this-profile'], { env });     // the harness wires shell form
+  const sp = path.join(sb.cfg, 'settings.json');
+  assert.ok(ourHooks(JSON.parse(fs.readFileSync(sp, 'utf8'))).every((h) => !h.args));
+  render(baseInput({ version: '2.1.287' }), { env: { ...env, CCRIG_HOOK_FORM: '' } });
+  const j = JSON.parse(fs.readFileSync(sp, 'utf8'));
+  assert.strictEqual(ourHooks(j).length, 7, 'same hooks, none added or dropped');
+  assert.ok(ourHooks(j).every((h) => Array.isArray(h.args)), 'now exec form');
+  // a bar-only install keeps only its board hooks
+  const sb2 = sandbox();
+  const env2 = { CLAUDE_CONFIG_DIR: sb2.cfg, HOME: sb2.home };
+  run(['--install', '--this-profile', '--no-guardian'], { env: env2 });
+  render(baseInput({ version: '2.1.287' }), { env: { ...env2, CCRIG_HOOK_FORM: '' } });
+  const j2 = JSON.parse(fs.readFileSync(path.join(sb2.cfg, 'settings.json'), 'utf8'));
+  assert.deepStrictEqual(ourHooks(j2).map((h) => h.args[2]).sort(), ['board-stop', 'notification', 'session-end', 'user-prompt']);
+});
+
+const HANG = JSON.stringify([NODE, '-e', 'setTimeout(() => {}, 60000)']);
+const HEALTHY = JSON.stringify([NODE, '-e', 'process.exit(0)']);
+
+test('Git Bash watchdog: a hung Git Bash pauses the bar, says so once, and the bar comes back when it works', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  assert.strictEqual(run(['--install', '--this-profile', '--no-guardian'], { env }).code, 0);
+  const sp = path.join(sb.cfg, 'settings.json');
+  const before = JSON.parse(fs.readFileSync(sp, 'utf8')).statusLine;
+  const check = (argv) => run(['--hook', 'git-bash-check'], { env: { ...env, CCRIG_TEST_BASH_ARGV: argv, CCRIG_BASH_PROBE_MS: '1500' } });
+  assert.strictEqual(check(HANG).code, 0);
+  let j = JSON.parse(fs.readFileSync(sp, 'utf8'));
+  assert.ok(!j.statusLine, 'the status line is out of settings.json while Git Bash hangs');
+  const paused = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'ccrig-statusline-paused.json'), 'utf8'));
+  assert.deepStrictEqual(paused.statusLine, before, 'the exact entry is kept');
+  assert.match(paused.why, /did not start within 2s|did not start within 1s/);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(sb.cfg, '.ccrig-bash-check.json'), 'utf8')).action, 'paused');
+  // the next Stop says it once, in the session; the hooks keep working meanwhile
+  const stop = run(['--hook', 'board-stop'], { env, stdin: JSON.stringify({ session_id: 'gb-1', transcript_path: '' }) });
+  assert.match(JSON.parse(stop.out).systemMessage, /CCRig paused its status line: Git Bash is not starting/);
+  assert.strictEqual(run(['--hook', 'board-stop'], { env, stdin: JSON.stringify({ session_id: 'gb-1' }) }).out, '', 'only once');
+  // the doctor explains it instead of calling the bar missing
+  const doc = run(['--doctor'], { env: { ...env, CCRIG_TEST_BASH_ARGV: HANG, CCRIG_BASH_PROBE_MS: '1500' } }).out;
+  assert.match(doc, /FAIL {2}Git Bash did not start/);
+  assert.match(doc, /statusLine paused by CCRig/);
+  assert.doesNotMatch(doc, /FAIL {2}statusLine is not configured/);
+  // Git Bash works again: the same entry comes back
+  check(HEALTHY);
+  j = JSON.parse(fs.readFileSync(sp, 'utf8'));
+  assert.deepStrictEqual(j.statusLine, before, 'restored as it was');
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'ccrig-statusline-paused.json')));
+});
+
+test('Git Bash watchdog: never touches a foreign status line, and an uninstall drops a pause for good', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const sp = path.join(sb.cfg, 'settings.json');
+  fs.writeFileSync(sp, JSON.stringify({ statusLine: { type: 'command', command: 'my-own-bar.sh' } }));
+  run(['--hook', 'git-bash-check'], { env: { ...env, CCRIG_TEST_BASH_ARGV: HANG, CCRIG_BASH_PROBE_MS: '1500' } });
+  assert.strictEqual(JSON.parse(fs.readFileSync(sp, 'utf8')).statusLine.command, 'my-own-bar.sh');
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'ccrig-statusline-paused.json')));
+  // ours, paused, then uninstalled: a later healthy check must not bring it back
+  fs.writeFileSync(sp, '{}');
+  run(['--install', '--this-profile', '--no-guardian'], { env });
+  run(['--hook', 'git-bash-check'], { env: { ...env, CCRIG_TEST_BASH_ARGV: HANG, CCRIG_BASH_PROBE_MS: '1500' } });
+  assert.ok(fs.existsSync(path.join(sb.cfg, 'ccrig-statusline-paused.json')));
+  run(['--uninstall', '--this-profile'], { env });
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'ccrig-statusline-paused.json')), 'uninstall drops the pause');
+  run(['--hook', 'git-bash-check'], { env: { ...env, CCRIG_TEST_BASH_ARGV: HEALTHY } });
+  assert.ok(!JSON.parse(fs.readFileSync(sp, 'utf8')).statusLine, 'nothing comes back after an uninstall');
+});
+
+test('Git Bash watchdog: a prompt after the bar went quiet starts one check, silently', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  run(['--install', '--this-profile', '--no-guardian'], { env });
+  const marks = () => (fs.existsSync(CACHE) ? fs.readdirSync(CACHE).filter((f) => f.startsWith('watchdog-')) : []);
+  const before = marks().length;
+  // no render has marked the bar as drawn: the prompt hook starts a check (CCBSL_NO_ACT skips the spawn)
+  const r = run(['--hook', 'user-prompt'], { env: { ...env, CCRIG_TEST_BASH_ARGV: HEALTHY }, stdin: JSON.stringify({ session_id: 'wd-1' }) });
+  assert.strictEqual(r.out, '', 'a UserPromptSubmit hook prints nothing: its stdout would become context');
+  assert.strictEqual(marks().length, before + 1, 'one check started');
+  // rate limited: the next prompt does not start another
+  run(['--hook', 'user-prompt'], { env: { ...env, CCRIG_TEST_BASH_ARGV: HEALTHY }, stdin: JSON.stringify({ session_id: 'wd-1' }) });
+  assert.strictEqual(marks().length, before + 1);
+});
+
+test('Windows: a bar that is drawing starts no Git Bash check', { skip: process.platform !== 'win32' && 'Windows only' }, () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  run(['--install', '--this-profile', '--no-guardian'], { env });
+  render(baseInput(), { env });   // marks the bar as drawn
+  const marks = () => (fs.existsSync(CACHE) ? fs.readdirSync(CACHE).filter((f) => f.startsWith('watchdog-')) : []);
+  const before = marks().length;
+  run(['--hook', 'user-prompt'], { env, stdin: JSON.stringify({ session_id: 'wd-2' }) });
+  assert.strictEqual(marks().length, before, 'no check while the bar draws');
+});
+
+test('Windows: the check ends stuck Git Bash shells that were running CCRig', { skip: process.platform !== 'win32' && 'Windows only' }, () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  // a stand-in for a hung bash.exe: node under that name, with a CCRig status line on its command line
+  const fake = path.join(sb.dir, 'ccrig-stuck', 'bash.exe');
+  fs.mkdirSync(path.dirname(fake), { recursive: true });
+  try { fs.linkSync(NODE, fake); } catch { fs.copyFileSync(NODE, fake); }
+  const child = require('child_process').spawn(fake, ['-e', 'setTimeout(() => {}, 120000)', path.join(sb.dir, 'ccrig-stuck', 'statusline.js')], { stdio: 'ignore', windowsHide: true });
+  const alive = () => { try { process.kill(child.pid, 0); return true; } catch { return false; } };
+  try {
+    const t0 = Date.now(); while (Date.now() - t0 < 1500) { /* let it start */ }
+    assert.ok(alive());
+    run(['--hook', 'git-bash-check'], { env: { ...env, CCRIG_TEST_BASH_ARGV: HANG, CCRIG_BASH_PROBE_MS: '1500', CCRIG_STUCK_SECS: '0', CCRIG_TEST_SHELL_FILTER: path.join(sb.dir, 'ccrig-stuck') } });
+    const t1 = Date.now(); while (alive() && Date.now() - t1 < 3000) { /* wait for the end */ }
+    assert.ok(!alive(), 'the stuck shell was ended');
+    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(sb.cfg, '.ccrig-bash-check.json'), 'utf8')).ended, 1);
+  } finally { try { child.kill(); } catch {} }
+});
+
+test('Windows: only shells running the exact status line command are ended, never a user\'s own ccrig shell', { skip: process.platform !== 'win32' && 'Windows only' }, () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  run(['--install', '--this-profile', '--no-guardian'], { env });
+  const slCmd = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8')).statusLine.command;
+  const fake = path.join(sb.dir, 'gitbin', 'bash.exe');
+  fs.mkdirSync(path.dirname(fake), { recursive: true });
+  try { fs.linkSync(NODE, fake); } catch { fs.copyFileSync(NODE, fake); }
+  const hold = 'setTimeout(() => {}, 120000)';
+  // what Claude Code starts for the bar: bash.exe -c "<the statusLine command>" (Windows escapes its inner quotes)
+  const bar = require('child_process').spawn(fake, ['-e', hold, '--', '-c', slCmd], { stdio: 'ignore', windowsHide: true });
+  // a terminal of the user's own that mentions ccrig and statusline.js, but is not the status line
+  const mine = require('child_process').spawn(fake, ['-e', hold, '--', '-c', 'node ' + SCRIPT.replace(/\\/g, '/') + ' --board --watch'], { stdio: 'ignore', windowsHide: true });
+  const alive = (c) => { try { process.kill(c.pid, 0); return true; } catch { return false; } };
+  try {
+    const t0 = Date.now(); while (Date.now() - t0 < 1500) { /* let them start */ }
+    assert.ok(alive(bar) && alive(mine), 'both stand-ins are running before the check');
+    run(['--hook', 'git-bash-check'], { env: { ...env, CCRIG_TEST_BASH_ARGV: HANG, CCRIG_BASH_PROBE_MS: '1500', CCRIG_STUCK_SECS: '0' } });
+    const t1 = Date.now(); while (alive(bar) && Date.now() - t1 < 3000) { /* wait */ }
+    assert.ok(!alive(bar), 'the stuck status line shell was ended');
+    assert.ok(alive(mine), 'the user\'s own shell was left alone');
+  } finally { for (const c of [bar, mine]) { try { c.kill(); } catch {} } }
 });

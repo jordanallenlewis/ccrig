@@ -152,6 +152,18 @@ source "$(npm root -g)/ccrig/claude-profiles.sh"          # bash / zsh / Git Bas
 | `--demo` / `--selftest` / `--version` | sample render, edge-case checks, version |
 | `--purge` | delete local guardian state (checkpoints, tickets, cache) |
 
+## Windows: when Git Bash breaks
+
+On Windows with Git for Windows installed, Claude Code runs every status line through Git Bash, and nothing in `settings.json` can change that. If Git Bash's runtime breaks (a damaged Git for Windows install, or security software hooking it), `bash.exe` hangs on startup. Each status line refresh then leaves one more stuck `bash.exe` behind, `git push` fails too, and ending the processes by hand does not help because the next refresh starts more.
+
+CCRig handles that on its own:
+
+- **Its hooks never use Git Bash.** With Claude Code 2.1.139 or newer, `ccrig init` wires the hooks to start `node.exe` directly. An install wired the older way moves over the first time the bar sees a new enough Claude Code.
+- **The bar steps aside.** When the bar has stopped drawing, the next hook tries Git Bash in the background. If Git Bash hangs, CCRig takes its status line out of `settings.json` (keeping the exact entry), ends the stuck shells that were running it, and says so once in the session and with a desktop notification. Once Git Bash starts again, the bar comes back by itself.
+- **`ccrig --doctor` says what is wrong.** It times Git Bash, ends stuck CCRig shells, and reports a pause.
+
+The fix for Git Bash itself: reboot first. If `bash -c "echo ok"` still hangs, repair or reinstall Git for Windows, or ask IT whether security software is blocking it. The [mod](#or-install-it-as-a-claude-code-mod) never uses a shell, so it is not affected at all.
+
 ## Uninstall
 
 ```bash
