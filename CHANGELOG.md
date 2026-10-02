@@ -11,6 +11,9 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+### Performance
+- **A render does less.** Measured on Windows with Node 24, warm caches, two profiles: about 4ms off every render (p50 60.4ms to 56.1ms), and 21 file system calls instead of 28. A render no longer loads Node's process and terminal modules unless it actually starts git or prints to a terminal (that alone was about 3ms), and it writes its line with one plain write. The running-subagents count is worked out once per render instead of twice, and during a turn it reads only what was appended to the transcript since the last render instead of the last 768KB again (a test pins it under 4KB for a one-line append). The burn-rate samples are read once instead of three times, `settings.json` is read only when a model drop is actually seen, and the profile count behind the profile badge is kept for a minute instead of listing your home folder on every render.
+
 ## [1.9.0] - 2026-10-02
 
 ### Changed
