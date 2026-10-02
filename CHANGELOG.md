@@ -11,6 +11,22 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-10-02
+
+### Changed
+- **A refined default look.** A full-width rule line now sits above the bar, so it reads apart from the conversation above it; it turns amber near a limit and red at critical. Text labels replace the emoji icons, the meters are thin `━──` lines at half-cell resolution, plain values use the terminal's own text color, and color is kept for state (green, amber, red), so the bar is legible on light terminals too. A reset later in the week reads as a weekday (`Tue 6:53a`). The old look is one setting away: `"style": "classic"`, `CCRIG_STYLE=classic` for one terminal, or `y` in `--config`. A saved color that only repeats an old default yields to the new palette; a color you chose is kept.
+- **The bar fits any width.** Segments come in groups (who and where, the meters, the limit alert) and a group stays on one line when it can, so `weekly` is no longer stranded on a line of its own. On a narrow terminal the meters shorten to `5h` / `7d` together (never one full meter beside a shrunken one), then drop their bars; the forecast, the downgrade alert and the limit warning shorten too, and anything still too wide ends in `…` instead of running past the edge.
+
+### Added
+- **Collapse and expand the CCRig section.** `/ccrig:toggle` inside a session (or `ccrig collapse` / `ccrig expand` / `ccrig toggle` in a shell, `c` in `--config`, `/ccrig collapse` in the mod) folds the bar to a single line: `▸ ccrig  my-project · Opus 4.8 · ctx 42% · 5h 63% · 7d 21%`. The rule above the open section reads `▾ ccrig`. Folded, a window near its limit keeps its `▲`, and at critical the limit warning still gets its own line. The choice is saved, like `--mode`.
+
+### Fixed
+- A usage window at 99.6% read "100%" while its bar was not full; it now reads 99% until the window is truly full, and a sliver of use reads `<1%` with a visible sliver instead of an empty bar.
+- A window whose reset had already passed still drew its stale bar (often a red 100%); it now reads `session ↺ reset` until fresh numbers arrive.
+- A usage percentage outside 0 to 100 (or not a number) drew an out-of-range bar such as 250%; it is now clamped or dropped. A reset time sent in milliseconds is read correctly, and a non-numeric cost or line count no longer prints `NaN`.
+- A session name in CJK or emoji is now shortened by terminal cells, not characters.
+- Saving from `--config` while a style override was active no longer froze that style's whole palette into the config file.
+
 ## [1.8.1] - 2026-10-01
 
 ### Fixed

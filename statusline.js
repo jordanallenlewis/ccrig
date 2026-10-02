@@ -70,7 +70,7 @@ const os = require('os');
 const path = require('path');
 const { execSync } = require('child_process');
 
-const VERSION = '1.8.1';
+const VERSION = '1.9.0';
 
 // where updates come from. The npm registry's `latest` decides whether a newer RELEASE exists (a tag push
 // publishes it only after CI passes on all three OSes), and a standalone copy downloads that release's
@@ -185,13 +185,32 @@ const DEFAULTS = {
   // Map a Claude config-dir name to a profile label. Unlisted dirs derive their
   // label from the name (e.g. .claude-work -> "work"). Leave {} for pure auto.
   profileLabels: {},
+  // 'refined' (default): a rule line above the bar, text labels, thin meters, color only where it
+  // means something. 'classic': the pre-1.9 look (emoji icons, block bars, one hue per segment).
+  style: 'refined',
+  // refined only: draw a full-width rule above the bar so it reads apart from the transcript.
+  // It turns amber, then red, as a usage window nears its limit. false = no rule.
+  rule: true,
+  // fold the whole CCRig section down to one summary line (ccrig collapse | expand | toggle, /ccrig:toggle)
+  collapsed: false,
   // 256-color codes: https://www.ditig.com/256-colors-cheat-sheet
+  // Mid-luminance hues, so the bar stays legible on dark AND light terminals. Plain values use the
+  // terminal's own foreground. Omitted keys fall back to the active style's palette.
   color: {
-    dim: 245, folder: 75, model: 111, effort: 179, flag: 45, caveman: 172,
-    green: 78, yellow: 214, red: 203, sky: 75, update: 220, agents: 141, // update badge (gold), agents (purple)
-    profileDefault: 39, profilePersonal: 213, // profile badge hues
+    dim: 245, folder: 74, model: 140, effort: 173, flag: 73, caveman: 172,
+    green: 71, yellow: 178, red: 167, sky: 74, update: 178, agents: 140,
+    profileDefault: 74, profilePersonal: 168, // profile badge hues
+    rule: 240, sep: 240, track: 243,          // refined chrome: the rule, the │ between segments, a meter's empty track
   },
 };
+// the pre-1.9 palette, used when style is 'classic'
+const CLASSIC_COLOR = {
+  dim: 245, folder: 75, model: 111, effort: 179, flag: 45, caveman: 172,
+  green: 78, yellow: 214, red: 203, sky: 75, update: 220, agents: 141,
+  profileDefault: 39, profilePersonal: 213,
+  rule: 240, sep: 245, track: 245,
+};
+const STYLES = ['refined', 'classic'];
 
 // ---- config loading: deep-merge statusline.config.json over DEFAULTS ----
 // npm replaces the whole package directory on every update, so a config saved next to an npm-installed
@@ -226,8 +245,8 @@ function deepMerge(base, over) {
   return out;
 }
 function loadConfig() {
-  let merged;
-  try { merged = deepMerge(DEFAULTS, readConfigFile()); }
+  let merged, user = null;
+  try { user = readConfigFile(); merged = deepMerge(DEFAULTS, user); }
   catch { merged = clone(DEFAULTS); }
   // a hand-edited config can null out a whole section; restore anything critical
   for (const k of ['show', 'thresholds', 'color', 'profileLabels']) {
@@ -239,8 +258,18 @@ function loadConfig() {
       if (typeof merged.thresholds[k][key] !== 'number') merged.thresholds[k][key] = DEFAULTS.thresholds[k][key];
     }
   }
+  if (!STYLES.includes(merged.style)) merged.style = 'refined';
+  // CCRIG_STYLE picks the look for one terminal or one run without touching the shared config
+  if (STYLES.includes(process.env.CCRIG_STYLE)) merged.style = process.env.CCRIG_STYLE;
+  // A key the user never set takes the ACTIVE style's palette. A saved value that only repeats the
+  // classic default (the old example config shipped the whole block) is not a real choice either,
+  // so under 'refined' it yields to the refined palette instead of pinning the old colors.
+  const userColor = (user && user.color && typeof user.color === 'object' && !Array.isArray(user.color)) ? user.color : {};
+  const palette = merged.style === 'classic' ? CLASSIC_COLOR : DEFAULTS.color;
   for (const k of Object.keys(DEFAULTS.color)) {
-    if (typeof merged.color[k] !== 'number') merged.color[k] = DEFAULTS.color[k];
+    const u = userColor[k];
+    const chosen = Number.isInteger(u) && u >= 0 && u <= 255 && !(merged.style === 'refined' && u === CLASSIC_COLOR[k]);
+    merged.color[k] = chosen ? u : palette[k];
   }
   // numeric keys flow straight into width math / cache TTLs; a hand-edited non-numeric or
   // negative value must not disable wrapping (NaN width) or inflate the terminal width.
@@ -277,7 +306,52 @@ const HOME = homeDirSafe();
 const CFG = process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
 const K = CONFIG.color;
 const c = (n, s) => `\x1b[38;5;${n}m${s}\x1b[0m`;
-const SEP = c(K.dim, ' │ ');
+const cBold = (n, s) => `\x1b[1m\x1b[38;5;${n}m${s}\x1b[0m`;
+// the refined look (default) vs the pre-1.9 'classic' one; read live so --config can preview both
+function isRefined() { return CONFIG.style !== 'classic'; }
+// switch the look live (the --config preview): colors still on the old palette move to the new one
+function setStyle(style) {
+  const from = CONFIG.style === 'classic' ? CLASSIC_COLOR : DEFAULTS.color, to = style === 'classic' ? CLASSIC_COLOR : DEFAULTS.color;
+  for (const k of Object.keys(to)) if (K[k] === from[k]) K[k] = to[k];
+  CONFIG.style = style;
+}
+function sepStr() { return isRefined() ? c(K.sep, ' │ ') : c(K.dim, ' │ '); }
+const SEP = sepStr(); // for its width (the mod reads it); layout asks sepStr() so a style change applies
+const lbl = (s) => c(K.dim, s);
+const warnGlyph = () => (isRefined() ? '▲' : '⚠');
+// stdin numbers are untrusted: a percentage outside 0..100 (or NaN, or a string) must not draw a 250% bar
+function normPct(v) { return (typeof v === 'number' && Number.isFinite(v)) ? Math.max(0, Math.min(100, v)) : null; }
+// a reset time in milliseconds (a future Claude Code, or a hand-built input) would read as year 50000
+function normEpoch(v) { if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return null; return v > 1e12 ? Math.floor(v / 1000) : v; }
+// the number beside a meter: never "100%" before the window is truly full, never "0%" once anything is used
+function pctText(p) { const r = Math.round(p); return (r >= 100 && p < 100) ? '99%' : (r === 0 && p > 0) ? '<1%' : r + '%'; }
+function levelColor(pct, t, redAt) { const red = redAt == null ? t.yellow : redAt; return pct <= t.green ? K.green : pct < red ? K.yellow : K.red; }
+// a thin meter at half-cell resolution: heavy ━ for the filled part, a thin ─ track for the rest
+function meter(pct, width, col) {
+  const units = width * 2;
+  let n = Math.round((pct / 100) * units);
+  if (pct > 0 && n < 1) n = 1;                 // anything used shows a sliver
+  if (pct < 100 && n >= units) n = units - 1;  // only a true 100% fills the meter
+  const full = n >> 1, half = n & 1, rest = width - full - half;
+  const fill = '━'.repeat(full) + (half ? '╸' : '');
+  return (fill ? c(col, fill) : '') + (rest ? c(K.track, '─'.repeat(rest)) : '');
+}
+// cut an ANSI-colored string to `w` cells, ending in '…', without splitting an escape or a wide glyph
+function truncAnsi(s, w) {
+  if (dispWidth(s) <= w) return s;
+  if (w <= 0) return '';
+  const esc = /\x1b\[[0-9;]*m/y;
+  let out = '', used = 0, i = 0;
+  while (i < s.length) {
+    esc.lastIndex = i;
+    const m = esc.exec(s);
+    if (m) { out += m[0]; i += m[0].length; continue; }
+    const cp = s.codePointAt(i), ch = String.fromCodePoint(cp), cw = glyphWidth(cp);
+    if (used + cw > w - 1) break;
+    out += ch; used += cw; i += ch.length;
+  }
+  return out + '\x1b[0m…';
+}
 
 function readFileSafe(f) { try { return fs.readFileSync(f, 'utf8'); } catch { return ''; } }
 function settingsVal(key) {
@@ -327,6 +401,61 @@ function wrapSegments(segs, width) {
   }
   if (cur.length) lines.push(cur.join(SEP));
   return lines.join('\n');
+}
+
+// refined layout. Segments come in groups (who/where, meters, the limit alert); a group stays on one
+// line when it can, so "weekly" is never stranded on a line of its own. Each segment carries its
+// narrower variants (full -> compact -> tiny), used only when the full form would not fit, and the
+// last resort is a clean '…' cut: no line ever runs past the terminal edge.
+const SEG_GROUP = { context: 'meter', session: 'meter', weekly: 'meter', forecast: 'meter', resumeHint: 'alert' };
+function groupOf(name) { return SEG_GROUP[name] || 'id'; }
+function layoutItems(items, width) {
+  const SEP = sepStr(), sepW = dispWidth(SEP);
+  const groups = [];
+  for (const g of ['id', 'meter', 'alert']) {
+    const members = items.filter((it) => groupOf(it.name) === g);
+    if (members.length) groups.push({ g, members });
+  }
+  const pick = (it, level) => it.v[Math.min(level, it.v.length - 1)];
+  const rowWidth = (strs) => strs.reduce((n, s, i) => n + dispWidth(s) + (i ? sepW : 0), 0);
+  const lines = [];
+  let cur = [], curW = 0;
+  const flush = () => { if (cur.length) lines.push(cur.join(SEP)); cur = []; curW = 0; };
+  // how many lines a run of segments takes when packed greedily
+  const lineCount = (strs) => { let n = 1, w = 0; strs.forEach((s, i) => { const sw = dispWidth(s); if (i && w + sepW + sw > width) { n++; w = sw; } else w += (i ? sepW : 0) + sw; }); return n; };
+  for (const { g, members } of groups) {
+    const maxLevel = Math.max(...members.map((it) => it.v.length - 1));
+    // one size for the whole group (no full meter beside a shrunken one). Each step down in size
+    // must buy back more than half a line, so a wide terminal keeps its bars and a narrow one gets
+    // the compact forms. A segment wider than the terminal even at its smallest is cut.
+    let strs = null, best = Infinity, bestCost = Infinity;
+    for (let lv = 0; lv <= maxLevel; lv++) {
+      const cand = members.map((it) => pick(it, lv));
+      if (cand.some((s) => dispWidth(s) > width)) continue;
+      const n = lineCount(cand), cost = n + 0.6 * lv;
+      if (cost < bestCost) { bestCost = cost; best = n; strs = cand; }
+    }
+    if (!strs) strs = members.map((it) => it.v.find((v) => dispWidth(v) <= width) || truncAnsi(it.v[it.v.length - 1], width));
+    const together = best === 1;
+    const gw = rowWidth(strs);
+    // the alert always gets its own line; another group joins the current line only if it fits whole
+    if (g === 'alert' || (cur.length && (!together || curW + sepW + gw > width))) flush();
+    for (const s of strs) {
+      const sw = dispWidth(s);
+      if (cur.length && curW + sepW + sw > width) flush();
+      curW += (cur.length ? sepW : 0) + sw; cur.push(s);
+    }
+    if (g === 'alert') flush();
+  }
+  flush();
+  return lines;
+}
+// the rule that sets the bar apart from the transcript above it, tinted by how close a limit is
+function ruleLine(width, level) {
+  const col = level === 'critical' ? K.red : level === 'warn' ? K.yellow : K.rule;
+  const label = '▾ ccrig ';
+  if (width < dispWidth(label) + 4) return c(col, '─'.repeat(Math.max(1, width)));
+  return c(K.dim, label) + c(col, '─'.repeat(width - dispWidth(label)));
 }
 
 // color-coded block bar. `redAt` (default t.yellow) is the % at which the fill turns red;
@@ -406,9 +535,11 @@ function fmtReset(epochSec) {
   let h = d.getHours(); const m = d.getMinutes();
   const ap = h >= 12 ? 'p' : 'a'; h = h % 12 || 12;
   const clock = `${h}:${String(m).padStart(2, '0')}${ap}`;
-  return sameDay ? clock : `${d.getMonth() + 1}/${d.getDate()} ${clock}`;
+  if (sameDay) return clock;
+  // refined: a reset inside the coming week reads as its weekday ("Mon 8:55a"), which is how people think about it
+  if (isRefined() && epochSec - nowSec() < 6 * 86400) return `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()]} ${clock}`;
+  return `${d.getMonth() + 1}/${d.getDate()} ${clock}`;
 }
-const cBold = (n, s) => `\x1b[1m\x1b[38;5;${n}m${s}\x1b[0m`;
 function warnAtOf(t) { return t.warn != null ? t.warn : 90; }
 const usageSeg = (label, pct, reset) => {
   const t = CONFIG.thresholds.usage;
@@ -417,6 +548,19 @@ const usageSeg = (label, pct, reset) => {
   const val = near ? cBold(K.red, Math.round(pct) + '%') : c(K.dim, Math.round(pct) + '%');
   return `${lbl} ${bar(pct, 8, t, warnAtOf(t))} ${val}` + (reset ? c(K.dim, ' ↺' + fmtReset(reset)) : '');
 };
+// refined usage meter, widest first: "session ━━━━╸───── 42% ↺ 3:10p" ... "5h 42%"
+function usageVariants(label, pct, reset) {
+  const t = CONFIG.thresholds.usage, warnAt = warnAtOf(t);
+  const short = label === 'session' ? '5h' : '7d';
+  // the reset already passed: the window refreshed, and the stale number would only alarm
+  if (reset != null && !windowActive(reset)) return [lbl(label + ' ↺ reset'), lbl(short + ' ↺ reset'), lbl(short + ' ↺')];
+  const near = pct >= warnAt;
+  const L = (s) => (near ? cBold(K.red, warnGlyph() + ' ' + s) : lbl(s));
+  const P = near ? cBold(K.red, pctText(pct)) : pctText(pct);
+  const R = reset ? lbl(' ↺ ' + fmtReset(reset)) : '';
+  const col = levelColor(pct, t, warnAt);
+  return [`${L(label)} ${meter(pct, 10, col)} ${P}${R}`, `${L(short)} ${meter(pct, 6, col)} ${P}${R}`, `${L(short)} ${P}${R}`, `${L(short)} ${P}`];
+}
 // At >= thresholds.usage.critical (default 95%), drop a resume ticket: a tiny file
 // with the exact command to reopen THIS session after the limit resets. Claude Code
 // already saves the transcript continuously, so nothing is at risk; the ticket is
@@ -627,7 +771,7 @@ let DEMO_AGENTS = 0; // set by --demo to showcase the segment
 function agentsSeg(input) {
   const n = DEMO_AGENTS || inflightAgents(input.transcript_path).length;
   if (!n) return '';
-  return c(K.agents, '🤖 ' + n + (n === 1 ? ' agent' : ' agents'));
+  return c(K.agents, (isRefined() ? '' : '🤖 ') + n + (n === 1 ? ' agent' : ' agents'));
 }
 // ⬇ segment: Claude Code silently drops Opus → Sonnet when you approach the Opus cap.
 // Track the highest model tier seen this session and shout if the current one is lower.
@@ -635,7 +779,9 @@ function modelTier(name) { const n = String(name == null ? '' : name).toLowerCas
 let DEMO_DOWNGRADE = null; // [fromName, toName] set by --demo
 function downgradeSeg(input, live) {
   if (CONFIG.downgradeAlert === false) return '';
-  if (DEMO_DOWNGRADE) return cBold(K.red, '⬇ ' + DEMO_DOWNGRADE[1]) + c(K.dim, ' (was ' + DEMO_DOWNGRADE[0] + ')');
+  const down = isRefined() ? '↓ ' : '⬇ ';
+  const withWas = (head, was) => (isRefined() ? [head + c(K.dim, ' (was ' + was + ')'), head] : head + c(K.dim, ' (was ' + was + ')'));
+  if (DEMO_DOWNGRADE) return withWas(cBold(K.red, down + DEMO_DOWNGRADE[1]), DEMO_DOWNGRADE[0]);
   const sid = input.session_id;
   // opusplan runs Opus in plan mode and Sonnet otherwise by design: leaving plan mode is no downgrade
   if (/opusplan/i.test(String(settingsVal('model') || '')) || /opusplan/i.test(String((input.model && input.model.id) || ''))) return '';
@@ -656,7 +802,7 @@ function downgradeSeg(input, live) {
   const pctOf = (o) => (o && typeof o.used_percentage === 'number') ? o.used_percentage : 0;
   if (Math.max(pctOf(rl.five_hour), pctOf(rl.seven_day)) < 50) return '';
   const shortName = (s) => s.split(/[\s(]/)[0];
-  return c(K.yellow, '⬇ ' + shortName(cur)) + c(K.dim, ' (was ' + shortName(topName) + ')');
+  return withWas(c(K.yellow, down + shortName(cur)), shortName(topName));
 }
 
 // --- checkpoint: a rich, machine-readable snapshot of exactly where work stands.
@@ -1200,7 +1346,9 @@ function resumeHintSeg(input, sPct, wPct, sReset, wReset, live) {
       ? c(K.dim, ': checkpoint saved, ') + c(K.yellow, 'autopilot armed')
       : c(K.dim, saved ? ': resume ticket saved, pick up with ' : ': resume with ') + c(K.yellow, 'claude --resume');
     const fo = failoverHint();
-    return cBold(K.red, '⚠ limit imminent') + tail + (fo ? c(K.dim, ' · ') + fo : '');
+    const head = cBold(K.red, warnGlyph() + ' limit imminent');
+    const full = head + tail + (fo ? c(K.dim, ' · ') + fo : '');
+    return isRefined() ? [full, head + c(K.dim, ' · ') + c(K.yellow, willResume ? 'autopilot armed' : 'claude --resume'), head] : full;
   }
   // near but not yet critical: keep a fresh-enough checkpoint + ticket so a wall that
   // arrives WITHOUT a >=critical render (a jump straight from 9x% to the wall, or the last
@@ -1217,7 +1365,9 @@ function resumeHintSeg(input, sPct, wPct, sReset, wReset, live) {
   }
   // "auto-saved" only when the guardian really saves here (on, with a session id to key it by)
   const saves = cfgAutopilot() !== 'off' && input.session_id && SID_RE.test(input.session_id);
-  return cBold(K.red, '⚠ near limit') + c(K.dim, saves ? ': auto-saved, resume with ' : ': resume with ') + c(K.yellow, 'claude --continue');
+  const head = cBold(K.red, warnGlyph() + ' near limit');
+  const full = head + c(K.dim, saves ? ': auto-saved, resume with ' : ': resume with ') + c(K.yellow, 'claude --continue');
+  return isRefined() ? [full, head + c(K.dim, ' · ') + c(K.yellow, 'claude --continue'), head] : full;
 }
 
 // Feature 3: predictive burn-rate ETA + pace verdict, from the sample ring buffer.
@@ -1253,8 +1403,12 @@ function forecastInfo(sid, sPct, sReset, wPct, wReset) {
 function forecastSeg(sid, sPct, sReset, wPct, wReset) {
   const f = forecastInfo(sid, sPct, sReset, wPct, wReset);
   if (!f) return '';
-  if (f.safe) return c(K.green, f.text);
-  return c(f.mins <= 15 ? K.red : f.mins <= 45 ? K.yellow : K.green, f.text);
+  if (!isRefined()) { if (f.safe) return c(K.green, f.text); return c(f.mins <= 15 ? K.red : f.mins <= 45 ? K.yellow : K.green, f.text); }
+  const text = f.text.replace(/^⏳ /, ''), short = f.window === 'session' ? '5h' : '7d';
+  if (f.safe) return [c(K.green, text), c(K.green, short + ' safe')];
+  const col = f.mins <= 15 ? K.red : f.mins <= 45 ? K.yellow : K.green;
+  const human = f.mins >= 60 ? Math.floor(f.mins / 60) + 'h' + (f.mins % 60 ? (f.mins % 60) + 'm' : '') : f.mins + 'm';
+  return [c(col, text), c(col, '~' + human + ' to ' + short + ' limit'), c(col, '~' + human + ' left')];
 }
 // What the Claude Code mod needs to decide nothing on its own: the thresholds, the guardian settings, the
 // forecast, the armed resume and the update hint, printed beside the segments under CCRIG_HOST=mod.
@@ -1330,7 +1484,7 @@ function updateSeg(info) {
     const stale = info && (info.lastSuccessAt != null ? info.lastSuccessAt : info.checkedAt);
     if (stale != null && (Date.now() - stale) > 30 * 86400 * 1000) return '';
   }
-  return cBold(K.update, '⬆ v' + latest) + c(K.dim, installKind() === 'mod' ? ' /plugin update' : ' update');
+  return cBold(K.update, (isRefined() ? '↑ v' : '⬆ v') + latest) + c(K.dim, installKind() === 'mod' ? ' /plugin update' : ' update');
 }
 // once-a-day, spawn the detached background check; never blocks the render. Takes the
 // cache already read this render (no second read on the hot path).
@@ -1792,7 +1946,7 @@ function profileSeg() {
   if (mode === 'auto' && base === '.claude' && claudeProfileCount() < 2) return '';
   const label = profileLabelOf(base);
   const col = base === '.claude' ? K.profileDefault : (base === '.claude-personal' ? K.profilePersonal : K.sky);
-  return c(col, '👤 ' + label);
+  return isRefined() ? c(col, '●') + ' ' + c(col, label) : c(col, '👤 ' + label);
 }
 
 // billing path: `rate_limits` is sent ONLY to Claude.ai subscribers (Pro/Max);
@@ -1801,8 +1955,8 @@ function billingSeg(input) {
   const rl = input.rate_limits || {};
   const hasSub = (rl.five_hour && typeof rl.five_hour.used_percentage === 'number') ||
                  (rl.seven_day && typeof rl.seven_day.used_percentage === 'number');
-  if (hasSub) return c(K.green, '💳 sub');
-  if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) return c(K.yellow, '💳 api');
+  if (hasSub) return isRefined() ? c(K.dim, 'sub') : c(K.green, '💳 sub');
+  if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) return isRefined() ? c(K.yellow, 'api') : c(K.yellow, '💳 api');
   return '';
 }
 
@@ -1850,16 +2004,17 @@ function gitSeg(cwd) {
   if (data.dirty > 0) parts.push(c(K.yellow, '●' + data.dirty));
   if (data.ahead > 0) parts.push(c(K.yellow, '↑' + data.ahead));
   if (data.behind > 0) parts.push(c(K.sky, '↓' + data.behind));
-  return `\u{1F33F} ${parts.join(' ')}`;
+  return isRefined() ? c(K.dim, 'git ') + parts.join(' ') : `\u{1F33F} ${parts.join(' ')}`;
 }
 
 // ===========================================================================
 // build the ordered segment list from one input object
 //   `gitOverride` lets --demo / --config / --selftest inject a git string
 // ===========================================================================
-function collectSegments(input, width, gitOverride) {
+function collectItems(input, width, gitOverride) {
   const S = CONFIG.show;
-  const out = {};
+  const R = isRefined();
+  const out = {};   // name -> segment string, or an array of variants (widest first)
 
   out.profile = profileSeg();
   const updateInfo = (CONFIG.updateCheck === false || updateNotifierOff()) ? null : readUpdateInfo(); // read the cache once
@@ -1872,14 +2027,19 @@ function collectSegments(input, width, gitOverride) {
   if (cwd && projectDir && cwd !== projectDir && cwd.startsWith(projectDir) && (cwd[projectDir.length] === '/' || cwd[projectDir.length] === '\\')) folder += cwd.slice(projectDir.length);
   // every string below comes from stdin or the filesystem and is printed to a terminal: a dir name, /rename
   // title or model name holding ESC/OSC or a newline must not reach it (cleanLabel drops C0, DEL and C1)
-  out.folder = `\u{1F4C2} ${c(K.folder, truncFolder(cleanLabel(folder, 500), width - 4))}`;
+  folder = cleanLabel(folder, 500) || '/';
+  out.folder = R
+    ? [cBold(K.folder, truncFolder(folder, width)), cBold(K.folder, truncFolder(folder, Math.min(width, 24)))]
+    : `\u{1F4C2} ${c(K.folder, truncFolder(folder, width - 4))}`;
 
   // String-coerce at the source: a hostile non-string display_name/id (e.g. 123) must not reach .replace()
   let model = String((input.model && input.model.display_name) || (input.model && input.model.id) || 'Claude');
-  model = cleanLabel(model.replace(/\s*\(1M context\)/i, ''), 80);
+  model = cleanLabel(model.replace(/\s*\(1M context\)/i, ''), 80) || 'Claude';
   const cws = input.context_window && Number(input.context_window.context_window_size);
   const oneM = cws > 0 ? cws >= 1000000 : /\[1m\]/i.test((input.model && input.model.id) || '');
-  out.model = `${c(K.dim, '★')} ${c(K.model, model)}${oneM ? c(K.dim, ' [1m]') : ''}`;
+  out.model = R
+    ? [c(K.model, model) + (oneM ? c(K.dim, ' 1M') : ''), c(K.model, model)]
+    : `${c(K.dim, '★')} ${c(K.model, model)}${oneM ? c(K.dim, ' [1m]') : ''}`;
   // CCRIG_PURE: the mod draws the bar while a wired status line already owns the side effects.
   // A mod-host render is live only with CCRIG_INTERACTIVE=1: a claude -p or SDK session (the
   // guardian's own --resume -p relaunch included) must never checkpoint, ping or arm a watcher.
@@ -1887,7 +2047,7 @@ function collectSegments(input, width, gitOverride) {
   out.downgrade = downgradeSeg(input, live);
 
   const effort = cleanLabel(effortLevel(input), 16);
-  out.effort = effort ? c(K.effort, '⚡' + effort) : '';
+  out.effort = !effort ? '' : R ? [c(K.dim, 'effort ') + c(K.effort, effort), c(K.effort, effort)] : c(K.effort, '⚡' + effort);
 
   const flags = [];
   if (input.fast_mode) flags.push(c(K.flag, 'fast'));
@@ -1895,7 +2055,12 @@ function collectSegments(input, width, gitOverride) {
   out.flags = flags.join(' ');
 
   const ctx = contextPct(input);
-  out.context = ctx != null ? `${c(K.dim, 'ctx')} ${bar(ctx, 10, CONFIG.thresholds.context)} ${c(K.dim, ctx + '%')}` : '';
+  if (ctx == null) out.context = '';
+  else if (R) {
+    const t = CONFIG.thresholds.context, col = levelColor(ctx, t);
+    const P = ctx >= t.yellow ? c(col, pctText(ctx)) : pctText(ctx);
+    out.context = [`${lbl('ctx')} ${meter(ctx, 10, col)} ${P}`, `${lbl('ctx')} ${meter(ctx, 6, col)} ${P}`, `${lbl('ctx')} ${P}`];
+  } else out.context = `${c(K.dim, 'ctx')} ${bar(ctx, 10, CONFIG.thresholds.context)} ${c(K.dim, ctx + '%')}`;
 
   out.git = gitOverride != null ? gitOverride : gitSeg(cwd);
   out.agents = agentsSeg(input);
@@ -1903,8 +2068,8 @@ function collectSegments(input, width, gitOverride) {
   out.billing = billingSeg(input);
 
   const rl = input.rate_limits || {};
-  const pctOf = (o) => (o && typeof o.used_percentage === 'number') ? o.used_percentage : null;
-  const resetOf = (o) => (o && typeof o.resets_at === 'number') ? o.resets_at : null;
+  const pctOf = (o) => (o ? normPct(o.used_percentage) : null);
+  const resetOf = (o) => (o ? normEpoch(o.resets_at) : null);
   const sPct = pctOf(rl.five_hour), wPct = pctOf(rl.seven_day);
   const sReset = resetOf(rl.five_hour), wReset = resetOf(rl.seven_day);
   // side effects only on the LIVE render (Claude Code's stdin), never in --demo / --config / --selftest
@@ -1916,35 +2081,94 @@ function collectSegments(input, width, gitOverride) {
       writeLedger(input, sPct, sReset, wPct, wReset); // Feature 4: publish this profile's usage
     }
   }
-  out.session = sPct != null ? usageSeg('session', sPct, sReset) : '';
-  out.weekly = wPct != null ? usageSeg('weekly', wPct, wReset) : '';
+  // a window whose reset already passed has refreshed; its last number is stale, so it never alarms
+  const useSeg = (label, pct, reset) => (pct == null ? '' : R ? usageVariants(label, pct, reset)
+    : (reset != null && !windowActive(reset)) ? c(K.dim, label + ' ↺now') : usageSeg(label, pct, reset));
+  out.session = useSeg('session', sPct, sReset);
+  out.weekly = useSeg('weekly', wPct, wReset);
   out.forecast = forecastSeg(input.session_id, sPct, sReset, wPct, wReset);
   out.resumeHint = resumeHintSeg(input, sPct, wPct, sReset, wReset, live);
 
   const cost = input.cost;
-  if (cost && typeof cost.total_cost_usd === 'number') {
+  if (cost && typeof cost.total_cost_usd === 'number' && Number.isFinite(cost.total_cost_usd)) {
+    const n = (v) => (Number.isFinite(Number(v)) ? Math.max(0, Math.round(Number(v))) : 0);
     let s = c(K.dim, '$' + cost.total_cost_usd.toFixed(2));
-    if (cost.total_lines_added || cost.total_lines_removed) {
-      s += ' ' + c(K.green, '+' + (cost.total_lines_added || 0)) + c(K.dim, '/') + c(K.red, '-' + (cost.total_lines_removed || 0));
+    if (n(cost.total_lines_added) || n(cost.total_lines_removed)) {
+      s += ' ' + c(K.green, '+' + n(cost.total_lines_added)) + c(K.dim, '/') + c(K.red, '-' + n(cost.total_lines_removed));
     }
     out.cost = s;
   } else out.cost = '';
 
   const name = typeof input.session_name === 'string' ? cleanLabel(input.session_name, 200) : '';
-  out.sessionName = name ? c(K.dim, name.length > 28 ? name.slice(0, 27) + '…' : name) : '';
+  out.sessionName = name ? c(K.dim, dispWidth(name) > 28 ? padCell(name, 28).trimEnd() : name) : '';
+
+  // how close the nearest ACTIVE window is to its limit: tints the refined rule line
+  const t = CONFIG.thresholds.usage, critAt = t.critical != null ? t.critical : 98;
+  const hot = Math.max(...[[sPct, sReset], [wPct, wReset]].map(([p, r]) => (p != null && windowActive(r) ? p : 0)));
+  const level = hot >= critAt ? 'critical' : hot >= warnAtOf(t) ? 'warn' : 'ok';
 
   const order = Array.isArray(CONFIG.order) ? CONFIG.order : DEFAULT_ORDER;
   const mode = CONFIG.mode || 'normal';
-  return order.filter((n) => {
-    if (!out[n]) return false;                              // no content -> never show
+  const items = order.filter((n) => {
+    if (!out[n] || (Array.isArray(out[n]) && !out[n].length)) return false; // no content -> never show
     if (mode === 'minimal') return MINIMAL_KEEP.includes(n); // quiet: essentials only (+ the ⚠ hint)
     if (mode === 'expanded') return true;                    // everything with content, incl. cost + name
     return S[n];                                             // normal: honor the per-segment show flags
-  }).map((n) => out[n]);
+  }).map((n) => ({ name: n, v: Array.isArray(out[n]) ? out[n] : [out[n]] }));
+  return { items, level, stats: { folder, model, ctx, sPct, wPct, sReset, wReset } };
+}
+// the segments as plain strings (each at its widest), for the mod and the tests
+function collectSegments(input, width, gitOverride) {
+  return collectItems(input, width, gitOverride).items.map((it) => it.v[0]);
 }
 
+function isCollapsed() { return CONFIG.collapsed === true; }
+// The collapsed section: ONE line, the numbers that matter at a glance, most important kept last to go.
+// A window at warn keeps its ▲; at critical the limit alert still gets a line of its own, because the
+// guardian's warning is the one thing folding the bar must never hide.
+function collapsedSummary(r, width, withFill) {
+  const { items, level, stats } = r;
+  const t = CONFIG.thresholds.usage, warnAt = warnAtOf(t);
+  const pct = (label, p, reset) => {
+    if (p == null) return null;
+    if (reset != null && !windowActive(reset)) return lbl(label + ' ↺');
+    return p >= warnAt ? cBold(K.red, warnGlyph() + ' ' + label + ' ' + pctText(p)) : lbl(label + ' ') + pctText(p);
+  };
+  // lowest priority first: dropped first when the line is too narrow
+  const parts = [
+    cBold(K.folder, stats.folder),
+    c(K.model, stats.model),
+    stats.ctx != null ? lbl('ctx ') + (stats.ctx >= CONFIG.thresholds.context.yellow ? c(K.red, pctText(stats.ctx)) : pctText(stats.ctx)) : null,
+    pct('5h', stats.sPct, stats.sReset),
+    pct('7d', stats.wPct, stats.wReset),
+  ].filter(Boolean);
+  const ruleCol = level === 'critical' ? K.red : level === 'warn' ? K.yellow : K.rule;
+  const head = isRefined() ? c(K.dim, '▸ ccrig') : c(K.dim, '▸');
+  const join = (ps) => head + (ps.length ? '  ' + ps.join(c(K.dim, ' · ')) : '');
+  let keep = parts.slice();
+  while (keep.length > 1 && dispWidth(join(keep)) > width) keep.shift();
+  let line = truncAnsi(join(keep), width);
+  if (withFill && isRefined() && CONFIG.rule !== false) {
+    const room = width - dispWidth(line) - 1;
+    if (room >= 2) line += ' ' + c(ruleCol, '─'.repeat(room));
+  }
+  const out = [line];
+  if (level === 'critical') {
+    const alert = items.find((it) => it.name === 'resumeHint');
+    if (alert) out.push(alert.v.find((v) => dispWidth(v) <= width) || truncAnsi(alert.v[alert.v.length - 1], width));
+  }
+  return out;
+}
 function render(input, width, gitOverride) {
-  return wrapSegments(collectSegments(input, width, gitOverride), width);
+  const r = collectItems(input, width, gitOverride);
+  if (isCollapsed()) return collapsedSummary(r, width, true).join('\n');
+  const { items, level } = r;
+  if (!isRefined()) return wrapSegments(items.map((it) => it.v[0]), width);
+  const lines = layoutItems(items, width);
+  // the rule sets the bar apart from the transcript above it (and tints as a limit nears); its
+  // "▾ ccrig" marks the section as one you can fold (ccrig collapse, or /ccrig:toggle in a session)
+  if (CONFIG.rule !== false && lines.length) lines.unshift(ruleLine(width, level));
+  return lines.join('\n');
 }
 
 // representative sample input for --demo / --config preview
@@ -1965,7 +2189,7 @@ function demoInput() {
     },
   };
 }
-const DEMO_GIT = () => `\u{1F33F} ${c(K.green, 'main')} ${c(K.yellow, '●3')} ${c(K.yellow, '↑1')}`;
+const DEMO_GIT = () => (isRefined() ? c(K.dim, 'git ') : '\u{1F33F} ') + `${c(K.green, 'main')} ${c(K.yellow, '●3')} ${c(K.yellow, '↑1')}`;
 
 // ===========================================================================
 // CLI modes (manual only: Claude Code passes JSON on stdin with no args)
@@ -1996,6 +2220,7 @@ const SUBCOMMANDS = {
   status: '--status', disarm: '--disarm', purge: '--purge', options: '--options', whatsnew: '--whatsnew',
   mode: '--mode', autopilot: '--autopilot', 'keep-working': '--keep-working', 'check-update': '--check-update',
   selftest: '--selftest', name: '--name',
+  collapse: '--collapse', expand: '--expand', toggle: '--toggle',
 };
 if (argv[0] && !argv[0].startsWith('-')) {
   if (!Object.prototype.hasOwnProperty.call(SUBCOMMANDS, argv[0])) { process.stdout.write('unknown command: ' + argv[0] + '\nRun  ccrig --help  for the list.\n'); process.exit(1); }
@@ -2004,7 +2229,7 @@ if (argv[0] && !argv[0].startsWith('-')) {
 // validate every flag BEFORE any mode runs: a typo in a modifier (--this-profle, --no-gaurdian) must stop
 // the command, not silently widen it to every profile or wire the guardian. (Claude Code passes no args.)
 if (argv.some((a) => a.startsWith('--'))) {
-  const KNOWN = new Set(['--install', '--install-guardian', '--no-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--options', '--config', '--demo', '--selftest', '--version', '--help', '--cols', '--this-profile', '--auto', '--force', '--hook', '--watch', '--name']);
+  const KNOWN = new Set(['--install', '--install-guardian', '--no-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--options', '--config', '--demo', '--selftest', '--version', '--help', '--cols', '--this-profile', '--auto', '--force', '--hook', '--watch', '--name', '--collapse', '--expand', '--toggle']);
   const unknown = argv.find((a) => a.startsWith('--') && !KNOWN.has(a));
   if (unknown) { process.stdout.write('unknown flag: ' + unknown + '\nRun  ccrig --help  for the flag list.\n'); process.exit(1); }
   if (argv.includes('--auto') && !argv.includes('--install-guardian')) { process.stdout.write('--auto goes with --install-guardian (ccrig --install-guardian --auto).\n'); process.exit(1); }
@@ -2024,6 +2249,7 @@ function helpText() {
     '  --this-profile       with any install/uninstall command: scope it to the active profile only',
     '  --doctor             diagnose a broken or missing status line + guardian',
     '  --mode <m>           set display density: minimal | normal | expanded',
+    '  --collapse / --expand / --toggle   fold the CCRig section to one summary line, or open it again',
     '  --autopilot <m>      limit behaviour: off | notify | resume',
     '  --keep-working <b>   keep working while todos remain: on | off',
     '  --board [--watch]    traffic-light board of every session (opt-in; --watch redraws in place)',
@@ -2930,7 +3156,7 @@ function runSessions() {
 // one mode at a time: silently ignoring the second flag misleads the user. This gate sits ABOVE
 // the one-shot dispatch so a combined command (e.g. `--purge --install`) is rejected, not half-run.
 // --hook/--watch are installer-wired internals, never user-typed, so they are exempt.
-const EXCLUSIVE = ['--install', '--install-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--config', '--demo', '--selftest', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--options', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--name'];
+const EXCLUSIVE = ['--install', '--install-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--config', '--demo', '--selftest', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--options', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--name', '--collapse', '--expand', '--toggle'];
 const picked = EXCLUSIVE.filter((m) => argv.includes(m));
 if (picked.length > 1) {
   process.stdout.write('pick one of: ' + picked.join(', ') + '\n');
@@ -2982,6 +3208,8 @@ function runOptions() {
   o += 'config file: ' + CONFIG_PATH + (fs.existsSync(CONFIG_PATH) ? '' : '  (not present: using defaults)') + '\n\n';
   o += 'display mode:   ' + CONFIG.mode + '        choices: ' + MODES.join(' | ') + '\n';
   o += 'reset style:    ' + CONFIG.resetStyle + '        choices: clock | clock24 | relative\n';
+  o += 'look:           ' + CONFIG.style + '        choices: ' + STYLES.join(' | ') + '   (rule line: ' + (CONFIG.rule !== false ? 'on' : 'off') + ')\n';
+  o += 'section:        ' + (isCollapsed() ? 'collapsed' : 'expanded') + '        ccrig collapse | expand | toggle  (/ccrig:toggle in a session)\n';
   o += 'resume tickets: ' + (CONFIG.resumeTickets === false ? 'off' : 'on') + '\n';
   o += 'update check:   ' + (CONFIG.updateCheck === false ? 'off' : 'on') + '        once/day background check for a newer version\n';
   o += 'git cache:      ' + (CONFIG.gitCacheMs || 0) + 'ms\n';
@@ -3059,7 +3287,7 @@ function ccrigCommandFiles(dir = CFG) {
   const d = slashCommandDir(dir);
   return ['statusline-config.md', 'ccrig.md', path.join('ccrig', 'config.md'), path.join('ccrig', 'status.md'),
     path.join('ccrig', 'sessions.md'), path.join('ccrig', 'doctor.md'), path.join('ccrig', 'update.md'),
-    path.join('ccrig', 'name.md')].map((f) => path.join(d, f));
+    path.join('ccrig', 'name.md'), path.join('ccrig', 'toggle.md')].map((f) => path.join(d, f));
 }
 // the interactive config menu, shared by /statusline-config and /ccrig:config
 function configMenuDoc(sl) {
@@ -3144,16 +3372,18 @@ function writeSlashCommands(dir = CFG) {
     fs.writeFileSync(path.join(d, 'ccrig', 'update.md'), actionDoc('Check whether a newer CCRig is available', sl, '--check-update',
       'Run the command below and tell me whether a newer CCRig is available and how to get it. Do not update anything without asking me first.'));
     fs.writeFileSync(path.join(d, 'ccrig', 'name.md'), nameDoc(sl));
+    fs.writeFileSync(path.join(d, 'ccrig', 'toggle.md'), actionDoc('Collapse or expand the CCRig section of your status line', sl, '--toggle',
+      'The command below has already folded or unfolded the CCRig status line. Reply with one short line saying which (collapsed or expanded), and nothing else.'));
     fs.writeFileSync(path.join(d, 'ccrig.md'), ['---',
       'description: CCRig, your Claude Code status line and usage-limit guardian',
-      'argument-hint: "[status | sessions | doctor | update | config | name]"',
+      'argument-hint: "[status | sessions | doctor | update | config | name | toggle]"',
       'allowed-tools: Bash(node:*)',
       '---', '',
       "You are helping with CCRig, the user's Claude Code status line and usage-limit guardian.",
-      'If an argument is given below, do that action (status, sessions, doctor, update, config, or name).',
+      'If an argument is given below, do that action (status, sessions, doctor, update, config, name, or toggle, which folds the bar).',
       'Otherwise, run the status check below, tell the user in a line or two what CCRig is doing right',
       'now, and list what they can run next: /ccrig:status, /ccrig:sessions, /ccrig:doctor,',
-      '/ccrig:update, /ccrig:config, and /ccrig:name.', '',
+      '/ccrig:update, /ccrig:config, /ccrig:name, and /ccrig:toggle (collapse or expand the bar).', '',
       '!`node "' + sl + '" --status`', '',
       '$ARGUMENTS', '',
     ].join('\n'));
@@ -3840,6 +4070,16 @@ if (argv.includes('--keep-working')) {
 }
 
 // ---- --mode <minimal|normal|expanded>: one-command display density, saved to config ----
+if (argv.includes('--collapse') || argv.includes('--expand') || argv.includes('--toggle')) {
+  const want = argv.includes('--collapse') ? true : argv.includes('--expand') ? false : !isCollapsed();
+  CONFIG.collapsed = want;
+  if (!saveConfig()) process.exit(1);
+  process.stdout.write(want
+    ? 'ok  CCRig collapsed to one line. It applies on the next redraw. Open it again with: ccrig expand  (or /ccrig:toggle)\n'
+    : 'ok  CCRig expanded. It applies on the next redraw. Fold it with: ccrig collapse  (or /ccrig:toggle)\n');
+  process.exit(0);
+}
+
 if (argv.includes('--mode')) {
   const want = argv[argv.indexOf('--mode') + 1];
   if (!MODES.includes(want)) {
@@ -3955,7 +4195,12 @@ function saveConfig() {
       fs.copyFileSync(CONFIG_PATH, CONFIG_PATH + '.bak');
     }
     // persist only overrides, never a full snapshot, so future default changes still reach the user
-    const sparse = diffFromDefaults(CONFIG, DEFAULTS) || {};
+    // a color that only repeats the active style's palette was never the user's choice: don't freeze it
+    const snap = clone(CONFIG), pal = CONFIG.style === 'classic' ? CLASSIC_COLOR : DEFAULTS.color;
+    for (const k of Object.keys(DEFAULTS.color)) if (snap.color[k] === pal[k]) snap.color[k] = DEFAULTS.color[k];
+    const sparse = diffFromDefaults(snap, DEFAULTS) || {};
+    // a CCRIG_STYLE override is this run's choice, not the saved one: keep whatever the file said
+    if (STYLES.includes(process.env.CCRIG_STYLE)) { let saved; try { saved = parseJsonText(fs.readFileSync(CONFIG_PATH, 'utf8')).style; } catch {} if (STYLES.includes(saved) && saved !== 'refined') sparse.style = saved; else delete sparse.style; }
     if (!writeJsonAtomic(CONFIG_PATH, sparse)) throw new Error('could not save ' + CONFIG_PATH + '; it was left unchanged');
     JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); // validate round-trip
     return true;
@@ -3985,6 +4230,8 @@ async function runConfigEditor() {
       out += `  ${String(i + 1).padStart(2)}) ${box} ${n}${n === 'profile' ? ` (mode: ${v})` : ''}\n`;
     });
     out += `\n   m) mode: ${CONFIG.mode}  (minimal / normal / expanded)\n`;
+    out += `   y) look: ${CONFIG.style}  (refined / classic)\n`;
+    out += `   c) section: ${isCollapsed() ? 'collapsed' : 'expanded'}  (fold the bar to one line)\n`;
     out += `   r) reset-time style: ${CONFIG.resetStyle}\n`;
     out += `   b) session board: ${CONFIG.sessionBoard === true ? 'on' : 'off'}  (lamps in --board)\n`;
     out += `   d) done decay: ${Math.round(boardDecayMs() / 60000)}m  (a finished session goes grey after this)\n`;
@@ -3996,6 +4243,8 @@ async function runConfigEditor() {
     if (a === 'q' || a === '') { process.stdout.write('No changes saved.\n'); break; }
     if (a === 's') { if (saveConfig()) process.stdout.write(`Saved → ${CONFIG_PATH}\n`); break; }
     if (a === 'm') { CONFIG.mode = MODES[(MODES.indexOf(CONFIG.mode) + 1) % MODES.length]; continue; }
+    if (a === 'c') { CONFIG.collapsed = !isCollapsed(); continue; }
+    if (a === 'y') { setStyle(CONFIG.style === 'classic' ? 'refined' : 'classic'); continue; }
     if (a === 'r') { CONFIG.resetStyle = CONFIG.resetStyle === 'clock' ? 'relative' : 'clock'; continue; }
     if (a === 'b') { CONFIG.sessionBoard = CONFIG.sessionBoard !== true; continue; }
     if (a === 'p') { CONFIG.boardNotify = CONFIG.boardNotify === false; continue; }
@@ -4007,7 +4256,7 @@ async function runConfigEditor() {
       else CONFIG.show[n] = !CONFIG.show[n];
       continue;
     }
-    process.stdout.write('Enter a segment number, b, d, m, r, s, or q.\n');
+    process.stdout.write('Enter a segment number, b, c, d, m, p, r, y, s, or q.\n');
   }
   rl.close();
   process.exit(0);
@@ -4037,7 +4286,8 @@ if (!argv.includes('--config')) {
     if (process.platform === 'win32' && !MOD_HOST) { rememberCcVersion(input.version); markRendered(); }
     // the mod lays the segments out itself, so it can wrap them to the band and color them natively
     if (MOD_HOST) {
-      const segs = collectSegments(input, getWidth() - CONFIG.reserveCols);
+      const w = getWidth() - CONFIG.reserveCols;
+      const segs = isCollapsed() ? collapsedSummary(collectItems(input, w), w, false) : collectSegments(input, w);
       writeModMarker(input);
       process.stdout.write(JSON.stringify({ v: VERSION, segments: segs, widths: segs.map(dispWidth), sep: dispWidth(SEP), state: modState(input) }));
     } else process.stdout.write(render(input, getWidth() - CONFIG.reserveCols));
