@@ -24,6 +24,7 @@
   "scripts": {
     "postinstall": "node postinstall.js",
     "test": "node --test test.js test-unit.js test-gates.js",
-    "selftest": "node statusline.js --selftest"
+    "selftest": "node statusline.js --selftest",
+    "release": "node .github/release.js"
   }
 }
