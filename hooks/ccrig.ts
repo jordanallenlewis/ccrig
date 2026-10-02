@@ -50,6 +50,10 @@ let fileState: ModState = configFrom(null)
 
 // the full CCRig line as statusline.js last rendered it; null means draw the native line
 let rig: Seg[] | null = null
+// the same bar already laid out by statusline.js, and the band width it was laid out for
+let rigLines: Span[][] | null = null
+let rigCols = 0
+let renderedCols = 0
 let rendering = false
 let renderAgain = false
 let columns = 120
@@ -186,11 +190,14 @@ async function refreshRig($) {
     do {
       renderAgain = false
       try { model = await $.session.model() } catch {}
+      renderedCols = columns
       const input = statusInput({ sessionId, transcriptPath, cwd, projectDir, model, version, effort, sessionName, usage })
       try {
         const out = await runCcrig($, [], { stdin: JSON.stringify(input), env: modEnv(), timeoutMs: 15000 })
         const parsed = out.exitCode === 0 ? parseRigOutput(out.stdout) : null
         rig = parsed ? parsed.segs : null
+        rigLines = parsed?.lines ?? null
+        rigCols = parsed?.lines ? renderedCols : 0
         if (parsed?.state) rigState = parsed.state
       } catch {
         // no Node on PATH, or an app where a mod cannot start processes: the native line takes over
@@ -501,8 +508,15 @@ export function register(on, options: { band?: string; spinner?: boolean; alerts
     const { Box, Text, Button } = $.ui.resolve(e)
     const children = []
     if (showRig) {
-      const segs = rig ?? nativeSegments(model, usage, cur().thresholds, now)
-      packLines(segs, Math.max(20, columns - 1)).forEach((spans, i) => {
+      // the lines statusline.js laid out, when they were laid out for this width; else pack the segments
+      // here and ask for a render at the new width
+      let lines: Span[][]
+      if (rig && rigLines && rigCols === columns) lines = rigLines
+      else {
+        lines = packLines(rig ?? nativeSegments(model, usage, cur().thresholds, now), Math.max(20, columns - 1))
+        if (rig && rigLines && rigCols !== columns && !rendering) void refreshRig($)
+      }
+      lines.forEach((spans, i) => {
         children.push(Box({ key: 'rig-' + i, flexDirection: 'row', children: spans.map((s) => Text(spanProps(s))) }))
       })
     }

@@ -27,6 +27,7 @@ In-progress work lives under `[Unreleased]` until it's cut.
 - In a terminal set to draw East Asian "ambiguous" characters two cells wide (common with a Japanese, Chinese or Korean locale), the rule, meters and separators now fit: `"ambiguousWidth": "auto"` (the default) counts them as two cells under a ja, zh or ko locale; `"narrow"`/`"wide"` or `CCRIG_AMBIGUOUS` set it by hand.
 
 ### Added
+- **The mod band matches the status line.** statusline.js now hands the mod the bar already laid out for the band width (`lines`), so the band gets the same groups, compact meters, `5h`/`7d` forms and `…` cuts as the terminal bar, and the mod asks for a fresh layout when the width changes. An older mod keeps using `segments`. The fallback line the Desktop app draws (no Node available) uses the refined palette and glyphs too: thin meters, `1M`, `▲`, weekday resets; a gate keeps its colors in step with statusline.js.
 - Reset times follow your locale: `"resetStyle": "auto"` (the new default) shows `14:40` where clocks run to 24 hours and `2:40p` where they do not, with weekday names in your language (`Di 14:40`). `clock`, `clock24` and `relative` still pick one by hand.
 - The session board's usage column reads `5h 96% · 7d 71%`, the same words as the bar.
 - `ccrig board on` / `ccrig board off` (or `b` in `--config`, then save) turns the session board on or off and wires or removes its lamp hooks in every profile CCRig is installed in. Restart Claude Code once afterward.

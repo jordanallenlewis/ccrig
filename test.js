@@ -3580,6 +3580,11 @@ test('refined: the mod host still gets one plain string per segment', () => {
   const j = JSON.parse(r.out);
   assert.ok(j.segments.length > 3 && j.segments.every((s) => typeof s === 'string'));
   assert.strictEqual(j.segments.length, j.widths.length);
+  // the bar laid out for the band width, like the status line (groups, compact forms), and no rule
+  assert.strictEqual(j.width, 119);
+  assert.ok(Array.isArray(j.lines) && j.lines.length >= 2 && j.lines.every((l) => typeof l === 'string'));
+  assert.ok(j.lines.every((l) => require(SCRIPT).dispWidth(l) <= 119));
+  assert.ok(!j.lines.some((l) => /▾ ccrig/.test(strip(l))), 'no rule in the band');
 });
 
 test('refined: the limit alert shrinks to fit a narrow terminal instead of being cut', () => {

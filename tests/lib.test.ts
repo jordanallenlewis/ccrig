@@ -38,7 +38,7 @@ test('packLines wraps whole segments and never starts a line with a separator', 
 
 test('parseRigOutput reads the segments statusline.js prints, and refuses anything else', () => {
   const old = parseRigOutput(JSON.stringify({ v: '1.7.0', segments: ['\x1b[38;5;75mccrig\x1b[0m'], widths: [5] }))
-  expect(old).toEqual({ segs: [{ spans: [{ text: 'ccrig', color: '#5fafff' }], width: 5 }], state: null })
+  expect(old).toEqual({ segs: [{ spans: [{ text: 'ccrig', color: '#5fafff' }], width: 5 }], state: null, lines: null, width: null })
   const state = { thresholds: { green: 50, yellow: 80, warn: 85, critical: 93 }, mode: 'normal', autopilot: 'resume', keepWorking: true, sessionBoard: false, forecast: { window: 'session', etaSec: 2700, safe: false, text: '⏳ ~45m to session limit' }, resume: { armed: false, window: '', resetsAt: null }, update: { latest: null, hint: '' } }
   const withState = parseRigOutput(JSON.stringify({ v: '1.8.0', segments: [], widths: [], state }))
   expect(withState!.state).toEqual(state)
@@ -59,7 +59,9 @@ test('fmtReset reads like the status line', () => {
   expect(fmtReset(AGO, NOW)).toBe('now')
   expect(fmtReset(undefined, NOW)).toBe('')
   expect(fmtReset(IN_2H, NOW)).toMatch(/^\d{1,2}:\d\d[ap]$|^\d{1,2}\/\d{1,2} \d{1,2}:\d\d[ap]$/)
-  expect(fmtReset(IN_3D, NOW)).toMatch(/^\d{1,2}\/\d{1,2} \d{1,2}:\d\d[ap]$/)
+  // inside the coming week a reset reads as its weekday, later as a date, like the refined status line
+  expect(fmtReset(IN_3D, NOW)).toMatch(/^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) \d{1,2}:\d\d[ap]$/)
+  expect(fmtReset(new Date(NOW + 6.5 * 86400 * 1000).toISOString(), NOW)).toMatch(/^\d{1,2}\/\d{1,2} \d{1,2}:\d\d[ap]$/)
 })
 
 test('thresholdsFrom reads thresholds.usage and ignores junk', () => {
@@ -193,9 +195,9 @@ test('the native line and the summary use Claude Code figures', () => {
   }
   const text = nativeSegments('claude-opus-5-5', usage, DEFAULT_THRESHOLDS, NOW)
     .map((s) => s.spans.map((x) => x.text).join(''))
-  expect(text[0]).toBe('★ Opus 5.5 [1m]')
-  expect(text[1]).toBe('ctx ████░░░░░░ 42%')
-  expect(text[2]).toMatch(/^session █████░░░ 63% ↺/)
+  expect(text[0]).toBe('Opus 5.5 1M')
+  expect(text[1]).toBe('ctx ━━━━────── 42%')
+  expect(text[2]).toMatch(/^session ━━━━━━╸─── 63% ↺ /)
   expect(text[3]).toBe('$0.50')
   expect(summaryLine('claude-opus-5-5', usage, NOW)).toMatch(/^Opus 5\.5 · ctx 42% · session 63% \(resets .+\) · \$0\.50$/)
   expect(summaryLine('', null, NOW)).toContain('no plan usage yet')
@@ -207,3 +209,14 @@ test('small helpers', () => {
   expect(splitArgs('  mode   minimal ')).toEqual(['mode', 'minimal'])
   expect(splitArgs('')).toEqual([])
 })
+
+test('parseRigOutput keeps the lines statusline.js laid out, and their width', () => {
+  const out = parseRigOutput(JSON.stringify({ v: '1.9.1', segments: ['a'], widths: [1], lines: ['\x1b[38;5;245mctx\x1b[0m 42%', 'b'], width: 99 }))!
+  expect(out.width).toBe(99)
+  expect(out.lines!.map((l) => l.map((x) => x.text).join(''))).toEqual(['ctx 42%', 'b'])
+  // an older statusline.js sends no lines; junk lines are ignored rather than drawn
+  expect(parseRigOutput(JSON.stringify({ segments: ['a'], widths: [1] }))!.lines).toBe(null)
+  expect(parseRigOutput(JSON.stringify({ segments: ['a'], widths: [1], lines: [1, 2], width: 99 }))!.lines).toBe(null)
+  expect(parseRigOutput(JSON.stringify({ segments: ['a'], widths: [1], lines: ['x'] }))!.lines).toBe(null)
+})
+

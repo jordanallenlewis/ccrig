@@ -168,3 +168,18 @@ test('GATE: the mod calls exactly the mods API methods SECURITY.md lists', () =>
   const missing = MOD_CALLS.filter((c) => !sec.includes('`' + c + '`'));
   assert.deepStrictEqual(missing, [], 'SECURITY.md must list every mods API call the mod makes');
 });
+
+// ---- gate: the mod's fallback line uses the status line's palette ----
+// hooks/lib.ts draws the line the Desktop app (or a machine without Node) sees; its COLOR must match the
+// refined DEFAULTS.color in statusline.js, or the two installs look like two products.
+test('GATE: hooks/lib.ts COLOR matches statusline.js DEFAULTS.color', () => {
+  const lib = fs.readFileSync(path.join(__dirname, 'hooks', 'lib.ts'), 'utf8');
+  const m = /export const COLOR = \{([^}]*)\}/.exec(lib);
+  assert.ok(m, 'COLOR not found in hooks/lib.ts');
+  const { DEFAULTS } = require('./statusline.js');
+  for (const pair of m[1].split(',')) {
+    const [k, v] = pair.split(':').map((x) => x.trim());
+    if (!k) continue;
+    assert.strictEqual(Number(v), DEFAULTS.color[k], 'COLOR.' + k + ' in hooks/lib.ts is ' + v + ', statusline.js has ' + DEFAULTS.color[k]);
+  }
+});
