@@ -76,7 +76,7 @@ function run(args, { stdin = '', env = {}, script = SCRIPT, pre = [] } = {}) {
   // CCRIG_TEST_SHELL_FILTER: the Git Bash watchdog may only ever end processes inside this test run's sandbox
   // CCRIG_STYLE=classic: the long-standing render assertions pin the classic glyphs; the refined
   // default (rule line, meters, variants) has its own tests that pass CCRIG_STYLE: 'refined'
-  const merged = { ...base, COLUMNS: '120', CCBSL_NO_ACT: '1', CCBSL_NO_NOTIFY: '1', CCBSL_GIT_TIMEOUT_MS: '5000', CCRIG_HOOK_FORM: 'shell', CCRIG_TEST_SHELL_FILTER: ROOT, CCRIG_STYLE: 'classic', ...env };
+  const merged = { ...base, COLUMNS: '120', CCBSL_NO_ACT: '1', CCBSL_NO_NOTIFY: '1', CCBSL_GIT_TIMEOUT_MS: '5000', CCRIG_HOOK_FORM: 'shell', CCRIG_TEST_SHELL_FILTER: ROOT, CCRIG_STYLE: 'classic', CCRIG_CC_VERSION: '2.1.50', ...env };
   // on Windows os.homedir() reads USERPROFILE, not HOME; mirror it so HOME sandboxing works there too
   if (merged.HOME) merged.USERPROFILE = merged.HOME;
   const r = spawnSync(NODE, [...pre, script, ...args], {
@@ -3911,4 +3911,84 @@ test('--sessions labels a session from its first request when its tail is only t
   assert.match(out, /migrate the billing tables/, 'the first request labels a long session: ' + out);
   assert.ok(!/no first request found/.test(out));
   assert.match(out, /Fix the login redirect/, "Claude Code's own summary wins");
+});
+
+// ===========================================================================
+// StopFailure: a turn that died on a usage limit the bar never saw coming
+// ===========================================================================
+const SF_NOW = () => Math.floor(Date.now() / 1000);
+const sfInput = (sid, extra = {}) => ({ hook_event_name: 'StopFailure', session_id: sid, transcript_path: '', cwd: '/tmp/proj',
+  error_type: 'rate_limit', error_message: 'Rate limit exceeded', ...extra });
+
+test('StopFailure: wired with the guardian only on a Claude Code that has it (2.1.78+), and removed on uninstall', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_CC_VERSION: '2.1.287' };
+  run(['--install', '--this-profile'], { env });
+  const s = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  assert.ok(Array.isArray(s.hooks.StopFailure) && s.hooks.StopFailure.length === 1, 'one StopFailure group');
+  assert.strictEqual(s.hooks.StopFailure[0].matcher, 'rate_limit');
+  assert.ok(hasSlug(s, 'StopFailure', 'stop-failure'));
+  run(['--uninstall', '--this-profile'], { env });
+  const u = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  assert.ok(!(u.hooks && u.hooks.StopFailure && u.hooks.StopFailure.length), 'uninstall strips it');
+
+  const old = sandbox();
+  run(['--install', '--this-profile'], { env: { CLAUDE_CONFIG_DIR: old.cfg, HOME: old.home, CCRIG_CC_VERSION: '2.1.50' } });
+  const o = JSON.parse(fs.readFileSync(path.join(old.cfg, 'settings.json'), 'utf8'));
+  assert.ok(!(o.hooks && o.hooks.StopFailure), 'an older Claude Code never gets an event it does not know');
+  assert.ok(hasSlug(o, 'Stop', 'stop'), 'the rest of the guardian is still wired');
+});
+
+test('StopFailure: a session that drew the bar is checkpointed and armed at the reset Claude Code reports', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { autopilot: 'resume' });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  // a live render records a usage sample: the session is interactive, and its last reading was far from the wall
+  render(baseInput({ session_id: 'sf1', rate_limits: { five_hour: { used_percentage: 40, resets_at: SF_NOW() + 3000 } } }), { env, script });
+  const r = run(['--hook', 'stop-failure'], { stdin: JSON.stringify(sfInput('sf1', { reset_after_seconds: 3600 })), env, script });
+  assert.strictEqual(r.code, 0);
+  const cp = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'guardian', 'sf1.checkpoint.json'), 'utf8'));
+  assert.match(cp.reason, /limit/);
+  assert.strictEqual(cp.window, 'session');
+  assert.ok(Math.abs(cp.resets_at - (SF_NOW() + 3600)) <= 5, 'reset from reset_after_seconds');
+  assert.ok(fs.existsSync(path.join(sb.cfg, 'resume-tickets', 'sf1.md')), 'resume ticket written');
+  assert.ok(fs.existsSync(path.join(sb.cfg, 'guardian', 'sf1.watch')), 'auto-resume armed (the watcher itself is held back by CCBSL_NO_ACT)');
+});
+
+test('StopFailure: without reset_after_seconds, the reset comes from the message, then from the last render', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { autopilot: 'resume' });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const seen = SF_NOW() + 2 * 3600;
+  render(baseInput({ session_id: 'sf3', rate_limits: { five_hour: { used_percentage: 70, resets_at: seen } } }), { env, script });
+  run(['--hook', 'stop-failure'], { stdin: JSON.stringify(sfInput('sf3', { error_message: 'Rate limit exceeded' })), env, script });
+  const cp = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'guardian', 'sf3.checkpoint.json'), 'utf8'));
+  assert.strictEqual(cp.resets_at, seen, 'fell back to the reset the last render saw');
+  const SL = require(SCRIPT);
+  const now = Math.floor(Date.UTC(2026, 9, 2, 19, 31) / 1000); // 12:31pm in Los Angeles
+  assert.strictEqual(SL.parseResetText("You've hit your session limit · resets 12:30pm (America/Los_Angeles)", now), Math.floor(Date.UTC(2026, 9, 3, 19, 30) / 1000), 'a time just passed means tomorrow');
+  assert.strictEqual(SL.parseResetText('resets 1pm (America/Los_Angeles)', now), Math.floor(Date.UTC(2026, 9, 2, 20, 0) / 1000));
+  assert.strictEqual(SL.parseResetText('resets Oct 9, 3pm (America/New_York)', now), Math.floor(Date.UTC(2026, 9, 9, 19, 0) / 1000));
+  assert.strictEqual(SL.parseResetText('resets in 2h 5m', now), now + 2 * 3600 + 300);
+  assert.strictEqual(SL.parseResetText('Rate limit exceeded', now), null);
+  assert.strictEqual(SL.limitFromFailure({ session_id: 'nope-1', error_message: 'weekly limit reached' }, now).which, 'weekly');
+});
+
+test('StopFailure: a session that never drew the bar (claude -p, SDK) gets the ticket but no relaunch; other errors and autopilot off do nothing', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { autopilot: 'resume' });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  run(['--hook', 'stop-failure'], { stdin: JSON.stringify(sfInput('sf2', { reset_after_seconds: 3600 })), env, script });
+  assert.ok(fs.existsSync(path.join(sb.cfg, 'resume-tickets', 'sf2.md')), 'ticket');
+  assert.match(JSON.parse(fs.readFileSync(path.join(sb.cfg, 'guardian', 'sf2.checkpoint.json'), 'utf8')).reason, /limit hit/);
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'guardian', 'sf2.watch')), 'never an unattended relaunch');
+  // the guardian's own relaunch hitting the wall again stands down too
+  render(baseInput({ session_id: 'sf4', rate_limits: { five_hour: { used_percentage: 40, resets_at: SF_NOW() + 3000 } } }), { env, script });
+  run(['--hook', 'stop-failure'], { stdin: JSON.stringify(sfInput('sf4', { reset_after_seconds: 3600 })), env: { ...env, CCBSL_UNATTENDED: '1' }, script });
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'guardian', 'sf4.watch')), 'no relaunch loop');
+  run(['--hook', 'stop-failure'], { stdin: JSON.stringify(sfInput('sf5', { error_type: 'overloaded' })), env, script });
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'resume-tickets', 'sf5.md')), 'overloaded is not a usage limit');
+  const off = scriptCopy(sandbox().dir, { autopilot: 'off' });
+  run(['--hook', 'stop-failure'], { stdin: JSON.stringify(sfInput('sf6', { reset_after_seconds: 60 })), env, script: off });
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'resume-tickets', 'sf6.md')), 'autopilot off: nothing');
 });
