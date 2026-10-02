@@ -11,6 +11,14 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+### Changed
+- **Fewer processes per prompt and per turn.** A default install now wires three hooks (Stop, SessionStart, PreCompact) instead of seven. The session board's lamp hooks (UserPromptSubmit, Notification, SessionEnd and a second Stop hook) are wired only while the board is on, and the guardian's Stop hook stamps the done lamp itself, so a prompt starts no CCRig process (it started one, about 40ms of Node startup before Claude saw the prompt) and a turn ends with one instead of two. On Windows a bar-only install keeps a single Stop hook, because that is what notices a broken Git Bash. An `npm update` or `ccrig init` takes the idle lamp hooks out of an older install, and `ccrig --doctor` points them out.
+- **The bar redraws every 5 seconds between messages instead of every 2** (`refreshInterval`; Claude Code still redraws it on every message). An idle session starts Node, and on Windows Git Bash, 60% less often. `ccrig init` or an npm update moves an existing install to 5.
+- Near a limit, the checkpoint refreshed every 10 seconds no longer starts git twice: it reads HEAD from the files under `.git` (packed refs and worktrees included) and takes "dirty" from the git segment's cache, which that same render just wrote. Git still runs when those cannot answer (a repository with no commits yet, `GIT_DIR`, a reftable repository).
+
+### Added
+- `ccrig board on` / `ccrig board off` (or `b` in `--config`, then save) turns the session board on or off and wires or removes its lamp hooks in every profile CCRig is installed in. Restart Claude Code once afterward.
+
 ### Performance
 - **A render does less.** Measured on Windows with Node 24, warm caches, two profiles: about 4ms off every render (p50 60.4ms to 56.1ms), and 21 file system calls instead of 28. A render no longer loads Node's process and terminal modules unless it actually starts git or prints to a terminal (that alone was about 3ms), and it writes its line with one plain write. The running-subagents count is worked out once per render instead of twice, and during a turn it reads only what was appended to the transcript since the last render instead of the last 768KB again (a test pins it under 4KB for a one-line append). The burn-rate samples are read once instead of three times, `settings.json` is read only when a model drop is actually seen, and the profile count behind the profile badge is kept for a minute instead of listing your home folder on every render.
 
