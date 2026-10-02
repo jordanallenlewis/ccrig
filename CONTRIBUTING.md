@@ -112,21 +112,33 @@ so always sandbox a benchmark.
 
 ## Releasing
 
-Releases are automated by `.github/workflows/release.yml`. To cut one:
+Releases take one command and no logins:
 
-1. Bump the version in `package.json` and the `VERSION` constant in `statusline.js`, the `version` in
-   `.claude-plugin/plugin.json`, and the `ref` in `.claude-plugin/marketplace.json` to the new tag
-   (`vX.Y.Z`). They must all match, and gates enforce it. Add a `CHANGELOG.md` section for it.
-2. Commit, then `git tag vX.Y.Z && git push origin main --tags`. Push the tag before announcing: the
-   marketplace installs the mod from that tag, and `/plugin update ccrig@ccrig` moves users only when it
-   changes.
+```bash
+npm run release -- patch      # or minor, major, X.Y.Z; add --dry-run to preview
+```
 
-On the tag, the workflow checks the tag is on main, tests on macOS, Windows, and Linux (Node 18 and
-22, plus the packaged smoke test), then publishes to npm with **provenance**
-via **Trusted Publishing** (OIDC, no stored token) and creates a GitHub Release from the changelog, with `statusline.js` attached (the README's standalone
-install downloads it from `releases/latest`).
-No npm token lives in the repo or on a laptop; publish rights come from the npmjs Trusted Publisher
-configured for this repository and workflow.
+It refuses unless you are on `main`, the tree is clean, `main` matches `origin/main`, and
+`CHANGELOG.md` has something under `## [Unreleased]`. Then it bumps every version together
+(`statusline.js`, `package.json`, `.claude-plugin/plugin.json`, and the `marketplace.json` pin),
+turns `[Unreleased]` into the dated section, runs `npm test` and the self-test (a failure undoes the
+bump), commits, tags, and pushes the commit and tag in one atomic push. The marketplace pin on `main`
+therefore never names a tag that does not exist yet.
+
+The tag starts `.github/workflows/release.yml`: tests on macOS, Windows and Linux (Node 18 and 22, plus
+the packaged smoke test), the mod suite, and a check that the tag is on `main` and matches every
+manifest. Then two independent jobs run, each safe to re-run:
+
+- **GitHub Release** from the changelog section, with `statusline.js` attached (the standalone install
+  downloads it from `releases/latest`).
+- **npm publish** with provenance through **Trusted Publishing** (OIDC). It skips a version already on
+  npm. No npm token lives in the repo or on a laptop; publish rights come from the Trusted Publisher
+  set up once on npmjs.com (package `ccrig`, GitHub user `jordanallenlewis`, repository `ccrig`,
+  workflow `release.yml`).
+
+The Claude Code mod needs no step of its own: `/plugin update ccrig@ccrig` follows the tag pinned in
+`marketplace.json`, and the Anthropic plugin directory (once listed) picks up new versions from the
+tracked branch.
 
 ## Maintainers
 

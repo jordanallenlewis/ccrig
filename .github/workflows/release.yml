@@ -3,7 +3,9 @@ name: release
 # Publish on a version tag: test on all three OSes, then publish to npm with provenance
 # via Trusted Publishing (OIDC) — no stored npm token — and cut a GitHub Release.
 #
-# Release flow (maintainer):  bump version + CHANGELOG  ->  git tag vX.Y.Z  ->  git push --tags
+# Release flow (maintainer):  npm run release -- <patch|minor|major>   (bumps every version, cuts the
+# CHANGELOG, runs the gates, pushes the commit + tag together). This workflow does the rest: tests on
+# three OSes + the mod suite, then the GitHub Release and the npm publish, each idempotent.
 #
 # ONE-TIME SETUP on npmjs.com (required before the first tokenless publish):
 #   npmjs.com -> package "ccrig" -> Settings -> Trusted Publishers -> Add GitHub Actions:
@@ -54,17 +56,85 @@ jobs:
           sudo apt-get update && sudo apt-get install -y shellcheck
           shellcheck claude-profiles.sh install.sh
 
-  publish:
-    name: publish to npm
-    needs: test
+  mod:
+    # the Claude Code mod ships from this same tag through the plugin marketplace: check it before anything publishes
+    name: mod (claude plugin validate + test)
     runs-on: ubuntu-latest
-    permissions:
-      contents: write   # create the GitHub Release
-      id-token: write   # OIDC for npm Trusted Publishing + provenance attestation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Validate the marketplace, the plugin and the hooks module
+        run: |
+          npx -y @anthropic-ai/claude-code@2.1.287 plugin validate . --strict
+          npx -y @anthropic-ai/claude-code@2.1.287 plugin validate .claude-plugin/plugin.json --strict
+      - name: Mod tests
+        run: npx -y @anthropic-ai/claude-code@2.1.287 plugin test
+
+  verify:
+    # the tag is a real release: on main, and every manifest (npm, plugin, marketplace pin) names this version
+    name: verify the tag
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0   # the tag-on-main check needs history
+      - name: Tag must be on main
+        shell: bash
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::tag $GITHUB_REF_NAME is not on main"; exit 1; }
+      - name: Tag must match every version
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          PLUGIN="$(node -p "require('./.claude-plugin/plugin.json').version")"
+          REF="$(node -p "require('./.claude-plugin/marketplace.json').plugins[0].source.ref")"
+          SCRIPT="$(node -e "process.stdout.write((/const VERSION = '([^']+)'/.exec(require('fs').readFileSync('statusline.js','utf8'))||[])[1]||'')")"
+          echo "tag=$TAG package.json=$PKG plugin.json=$PLUGIN marketplace ref=$REF statusline.js=$SCRIPT"
+          test "$TAG" = "$PKG" && test "$TAG" = "$PLUGIN" && test "v$TAG" = "$REF" && test "$TAG" = "$SCRIPT" \
+            || { echo "::error::versions disagree with tag $GITHUB_REF_NAME"; exit 1; }
+
+  github-release:
+    # independent of npm: a registry hiccup never leaves a tag without its release (the standalone
+    # install downloads statusline.js from the latest release). Re-running it is safe.
+    name: GitHub Release
+    needs: [test, mod, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Changelog section for this version
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          awk -v v="$VER" '/^## \[/{ if (p) exit } $0 ~ ("^## \\[" v "\\]") { p=1; next } p' CHANGELOG.md > RELEASE_NOTES.md
+          test -s RELEASE_NOTES.md || echo "See CHANGELOG.md" > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
+      - name: Create or update the release
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" statusline.js --clobber
+            gh release edit "$GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md --latest
+          else
+            gh release create "$GITHUB_REF_NAME" statusline.js --title "$GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md --verify-tag --latest
+          fi
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  npm:
+    name: publish to npm
+    needs: [test, mod, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # OIDC for npm Trusted Publishing + provenance attestation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
@@ -72,29 +142,16 @@ jobs:
       - name: Use an npm that supports Trusted Publishing (OIDC)
         # pinned: this job holds publish rights (id-token), so never run whatever npm@latest is today
         run: npm install -g npm@11.20.0
-      - name: Tag must be on main
-        shell: bash
-        run: |
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::tag $GITHUB_REF_NAME is not on main"; exit 1; }
-      - name: Tag must match package.json version
-        shell: bash
-        run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          PKG="$(node -p "require('./package.json').version")"
-          echo "tag=$TAG package.json=$PKG"
-          test "$TAG" = "$PKG" || { echo "::error::tag $TAG does not match package.json $PKG"; exit 1; }
-      - name: Publish (provenance, tokenless via OIDC)
-        run: npm publish --provenance --access public
-      - name: Changelog section for this version
+      - name: Publish (provenance, tokenless via OIDC); skip a version already on npm
         shell: bash
         run: |
           VER="${GITHUB_REF_NAME#v}"
-          awk -v v="$VER" '/^## \[/{ if (p) exit } $0 ~ ("^## \\[" v "\\]") { p=1 } p' CHANGELOG.md > RELEASE_NOTES.md
-          test -s RELEASE_NOTES.md || echo "See CHANGELOG.md" > RELEASE_NOTES.md
-          cat RELEASE_NOTES.md
-      - name: GitHub Release
-        # statusline.js as an asset gives the standalone install a stable latest-release URL
-        run: gh release create "$GITHUB_REF_NAME" statusline.js --title "$GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+          if [ "$(npm view "ccrig@$VER" version 2>/dev/null)" = "$VER" ]; then
+            echo "ccrig@$VER is already on npm; nothing to publish"
+            exit 0
+          fi
+          npm publish --provenance --access public || {
+            echo "::error::npm publish failed. If it is a 404 on PUT, the Trusted Publisher on npmjs.com is missing or does not match: package ccrig, GitHub user jordanallenlewis, repository ccrig, workflow release.yml."
+            exit 1
+          }
+          echo "published ccrig@$VER"
