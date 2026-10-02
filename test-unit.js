@@ -466,3 +466,45 @@ test('latestTodos: reads TaskCreate / TaskUpdate when there is no TodoWrite', ()
     assert.deepStrictEqual(SL.latestTodos(tp, true).map((t) => [t.content, t.status]), [['write parser', 'completed'], ['add tests', 'in_progress']]);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('burnSlope: one usage jump is a step, not a rate; a steady climb over minutes is', () => {
+  const t0 = 1790000000;
+  assert.strictEqual(SL.burnSlope([[t0, 63], [t0 + 12, 63], [t0 + 24, 63], [t0 + 36, 92]]), null, 'under two minutes: no rate');
+  assert.strictEqual(SL.burnSlope([[t0, 50], [t0 + 60, 51], [t0 + 180, 53]]), null, 'three samples: no rate');
+  const step = Array.from({ length: 10 }, (_, i) => [t0 + i * 20, 63]).concat([[t0 + 200, 92]]);
+  assert.ok(Math.abs(SL.burnSlope(step)) < 1e-9, 'a flat run then one jump has a median slope of zero: ' + SL.burnSlope(step));
+  const ramp = Array.from({ length: 13 }, (_, i) => [t0 + i * 15, 50 + i * 0.25]); // 1% a minute for 3 minutes
+  assert.ok(Math.abs(SL.burnSlope(ramp) - 1 / 60) < 1e-9, 'a steady ramp reads as its rate: ' + SL.burnSlope(ramp));
+});
+
+test('resumeShell / resumeCmdLine: Git Bash on Windows gets the POSIX form', () => {
+  assert.strictEqual(SL.resumeShell('win32', {}), 'powershell');
+  assert.strictEqual(SL.resumeShell('win32', { MSYSTEM: 'MINGW64' }), 'posix');
+  assert.strictEqual(SL.resumeShell('win32', { SHELL: '/usr/bin/bash' }), 'posix');
+  assert.strictEqual(SL.resumeShell('win32', { SHELL: 'C:\\Program Files\\Git\\usr\\bin\\bash.exe' }), 'posix');
+  assert.strictEqual(SL.resumeShell('darwin', {}), 'posix');
+  const posix = SL.resumeCmdLine('C:\\Users\\me\\.claude', 'C:\\code\\app', 'abc-1', 'posix');
+  assert.strictEqual(posix, "cd 'C:\\code\\app' && CLAUDE_CONFIG_DIR='C:\\Users\\me\\.claude' claude --resume abc-1");
+  assert.strictEqual(SL.resumeCmdLine("C:\\it's", '', 'abc-1', 'powershell'), "$env:CLAUDE_CONFIG_DIR='C:\\it''s'; claude --resume abc-1");
+});
+
+test('ambiguous width: CJK locales count box-drawing glyphs as two cells', () => {
+  assert.strictEqual(SL.ambiguousMode('auto', { LANG: 'ja_JP.UTF-8' }), 'wide');
+  assert.strictEqual(SL.ambiguousMode('auto', { LC_ALL: 'zh_CN.UTF-8', LANG: 'en_US.UTF-8' }), 'wide');
+  assert.strictEqual(SL.ambiguousMode('auto', { LANG: 'en_US.UTF-8' }), 'narrow');
+  assert.strictEqual(SL.ambiguousMode('auto', { LANG: 'ko_KR.UTF-8', CCRIG_AMBIGUOUS: 'narrow' }), 'narrow', 'the env var wins');
+  assert.strictEqual(SL.ambiguousMode('wide', { LANG: 'en_US.UTF-8' }), 'wide', 'the setting wins over the locale');
+  try {
+    SL._setAmbiguous('wide');
+    assert.strictEqual(SL.dispWidth('━━╸───'), 12);
+    assert.strictEqual(SL.dispWidth('my-project'), 10, 'plain text is unchanged');
+    assert.strictEqual(SL.dispWidth(SL.padCell('a long label here', 8)), 8, 'a padded cell with its … still fits');
+  } finally { SL._setAmbiguous('narrow'); }
+  assert.strictEqual(SL.dispWidth('━━╸───'), 6);
+});
+
+test('localeHour24: which locales write a 24-hour clock', () => {
+  assert.strictEqual(SL.localeHour24('de-DE'), true);
+  assert.strictEqual(SL.localeHour24('en-GB'), true);
+  assert.strictEqual(SL.localeHour24('en-US'), false);
+});

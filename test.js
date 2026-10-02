@@ -61,7 +61,10 @@ function run(args, { stdin = '', env = {}, script = SCRIPT, pre = [] } = {}) {
   const base = { ...process.env };
   for (const k of ['NO_UPDATE_NOTIFIER', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
     'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
-    'CCBSL_UPDATE_BASE', 'CCBSL_UNATTENDED', 'CLAUDE_CONFIG_DIR', 'CCRIG_SESSION_NAME']) delete base[k];
+    'CCBSL_UPDATE_BASE', 'CCBSL_UNATTENDED', 'CLAUDE_CONFIG_DIR', 'CCRIG_SESSION_NAME',
+    // the shell a resume command is written for, and the ambiguous-width and clock guesses, read these
+    'MSYSTEM', 'SHELL', 'CCRIG_AMBIGUOUS', 'LC_ALL', 'LC_CTYPE']) delete base[k];
+  base.LANG = 'en_US.UTF-8'; // a 12-hour English locale wherever Node takes it from the environment
   base.TMPDIR = base.TEMP = base.TMP = TESTTMP;
   // CCBSL_NO_ACT keeps the guardian from spawning real notifications / watcher / relaunch
   // processes during tests; file side effects (checkpoints, tickets) still run.
@@ -1067,7 +1070,7 @@ test('forecast: "safe" when the window resets before it would exhaust', () => {
   const sb = sandbox();
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
   const now = Math.floor(Date.now() / 1000);
-  seedSamples('safe1', [{ t: now - 120, s: 40 }, { t: now - 60, s: 41 }, { t: now, s: 42 }]); // slow burn
+  seedSamples('safe1', [{ t: now - 120, s: 40 }, { t: now - 90, s: 40.5 }, { t: now - 60, s: 41 }, { t: now, s: 42 }]); // slow burn
   const input = baseInput({ session_id: 'safe1', rate_limits: { five_hour: { used_percentage: 42, resets_at: now + 300 } } });
   const out = strip(render(input, { env }).out);
   assert.match(out, /session safe/);
@@ -1077,8 +1080,8 @@ test('REGRESSION: burn-rate stays accurate at a short span (no epoch-cancellatio
   const sb = sandbox();
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
   const now = Math.floor(Date.now() / 1000);
-  // 40s span, a clean 0.25%/s climb -> (100-70)/0.25 = 120s ~ 2m to limit.
-  seedSamples('burn1', [{ t: now - 40, s: 60 }, { t: now - 20, s: 65 }, { t: now, s: 70 }]);
+  // a clean 0.25%/s climb over the 2-minute minimum -> (100-70)/0.25 = 120s ~ 2m to limit.
+  seedSamples('burn1', [{ t: now - 120, s: 40 }, { t: now - 80, s: 50 }, { t: now - 40, s: 60 }, { t: now, s: 70 }]);
   const input = baseInput({ session_id: 'burn1', rate_limits: { five_hour: { used_percentage: 70, resets_at: now + 3 * 3600 } } });
   const out = strip(render(input, { env }).out);
   const m = out.match(/~(\d+)m to session limit/);
@@ -1091,7 +1094,7 @@ test('REGRESSION: no forecast for a window that has usage but no reset time', ()
   const sb = sandbox();
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
   const now = Math.floor(Date.now() / 1000);
-  seedSamples('nores1', [{ t: now - 60, s: 80 }, { t: now - 30, s: 85 }, { t: now, s: 90 }]);
+  seedSamples('nores1', [{ t: now - 120, s: 75 }, { t: now - 80, s: 80 }, { t: now - 40, s: 85 }, { t: now, s: 90 }]);
   const input = baseInput({ session_id: 'nores1', rate_limits: { five_hour: { used_percentage: 90 } } }); // no resets_at
   const out = strip(render(input, { env }).out);
   assert.ok(!out.includes('⏳'), 'no absurd infinite-horizon forecast: ' + out);
@@ -1112,7 +1115,7 @@ test('REGRESSION: a safe soonest window does not mask a real threat in another w
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
   const now = Math.floor(Date.now() / 1000);
   // session climbs fast but resets in 60s (safe); weekly climbs and will exhaust in ~4m
-  seedSamples('mix1', [{ t: now - 120, s: 55, w: 70 }, { t: now - 60, s: 58, w: 75 }, { t: now, s: 60, w: 80 }]);
+  seedSamples('mix1', [{ t: now - 120, s: 55, w: 70 }, { t: now - 90, s: 56.5, w: 72.5 }, { t: now - 60, s: 58, w: 75 }, { t: now, s: 60, w: 80 }]);
   const input = baseInput({ session_id: 'mix1', rate_limits: {
     five_hour: { used_percentage: 60, resets_at: now + 60 },
     seven_day: { used_percentage: 80, resets_at: now + 5 * 86400 },
@@ -2654,7 +2657,7 @@ test('--board is not widened by a record from a machine whose clock is ahead', (
   seedBoard(sb, 'f1', { ts: Date.now() + 365 * 86400000 });
   const out = strip(run(['--board'], { env, script }).out);
   assert.ok(!/-\d+s ago/.test(out), 'no negative age');
-  for (const line of out.split('\n')) assert.ok(line.length <= 89, 'no row exceeds the frame width: ' + JSON.stringify(line));
+  for (const line of out.split('\n')) assert.ok(line.length <= 95, 'no row exceeds the frame width: ' + JSON.stringify(line));
   // clamping the age must not make a skewed record immortal: file mtime is the backstop
   const old = new Date(Date.now() - 2 * 3600000);
   fs.utimesSync(path.join(boardOf(sb), 'f1.json'), old, old);
@@ -2887,7 +2890,7 @@ test('REGRESSION: board label file is found at the project root and decoded from
   hookRun('notification', { session_id: 'lbl1', notification_type: 'elicitation_url_dialog' }, { env, script });
   assert.strictEqual(readLampF(sb, 'lbl1').why, 'url');
   const off = run(['--board'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } }).out;
-  for (const l of strip(off).split('\n')) assert.ok(l.length <= 89, 'the board-off notice fits the in-place width: ' + l);
+  for (const l of strip(off).split('\n')) assert.ok(l.length <= 95, 'the board-off notice fits the in-place width: ' + l);
 });
 
 test('REGRESSION: a standalone --update keeps the exec bit, re-wires new hooks, and --whatsnew shows the new notes', () => {
@@ -2968,9 +2971,11 @@ test('REGRESSION: CLI: a modifier typo stops the command; unknown words fail; ne
   assert.match(run(['status'], { env, script }).out, /guardian status/);
   assert.strictEqual(run(['init', '--auto'], { env, script }).code, 1, '--auto only goes with --install-guardian');
   const proj = path.join(sb.dir, 'proj'); fs.mkdirSync(proj);
-  r = spawnSync(NODE, [script, '--name', 'billing', 'refactor'], { cwd: proj, encoding: 'utf8', env: { ...process.env, ...env, CCBSL_NO_ACT: '1' } });
+  r = spawnSync(NODE, [script, '--name', 'billing', 'refactor'], { cwd: proj, encoding: 'utf8', env: { ...process.env, ...env, USERPROFILE: sb.home, CCBSL_NO_ACT: '1' } });
   assert.strictEqual(r.status, 0, r.stdout);
-  assert.strictEqual(fs.readFileSync(path.join(proj, '.claude', 'ccrig-name'), 'utf8'), 'billing refactor\n');
+  assert.ok(!fs.existsSync(path.join(proj, '.claude')), 'nothing is written inside the project');
+  const saved = fs.readdirSync(path.join(sb.home, '.ccrig', 'names')).map((n) => JSON.parse(fs.readFileSync(path.join(sb.home, '.ccrig', 'names', n), 'utf8')));
+  assert.deepStrictEqual(saved.map((o) => o.label), ['billing refactor']);
 });
 
 test('REGRESSION: install modes: refresh re-points an existing guardian, a typed --no-guardian removes it', () => {
@@ -3822,4 +3827,83 @@ test('perf: a warn-band checkpoint reads HEAD from .git and dirty from the git c
   const r3 = countedRender(warn('gitck-3', plain), env, script);
   assert.strictEqual(JSON.parse(fs.readFileSync(cpOf('gitck-3'), 'utf8')).git, null);
   assert.strictEqual(r3.c.spawns, 0);
+});
+
+// ===========================================================================
+// 1.10 correctness: names outside the repo, shell-aware resume lines, ambiguous width, board vocabulary
+// ===========================================================================
+test('REGRESSION: ccrig --name leaves the repository clean and still labels the board', { skip: !HAS_GIT && 'git is not installed' }, () => {
+  const { sb, script, env } = boardBox();
+  const repo = path.join(sb.dir, 'named'); fs.mkdirSync(repo);
+  const g = (args) => spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
+  g(['init', '-q']); fs.writeFileSync(path.join(repo, 'a.txt'), 'x'); g(['add', '.']);
+  g(['-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'one']);
+  const r = spawnSync(NODE, [script, '--name', 'billing'], { cwd: repo, encoding: 'utf8', env: { ...process.env, ...env, USERPROFILE: sb.home, CCBSL_NO_ACT: '1' } });
+  assert.strictEqual(r.status, 0, r.stdout);
+  assert.strictEqual(g(['status', '--porcelain']).stdout, '', 'the repo stays clean (the bar showed ●1 for its own file)');
+  render(baseInput({ session_id: 'nm1', workspace: { current_dir: path.join(repo), project_dir: repo } }), { env, script });
+  assert.match(strip(run(['--board'], { env, script }).out), /billing/, 'the board shows the saved label');
+  // the saved name outranks a project file an older version wrote
+  fs.mkdirSync(path.join(repo, '.claude')); fs.writeFileSync(path.join(repo, '.claude', 'ccrig-name'), 'old label\n');
+  render(baseInput({ session_id: 'nm1', workspace: { current_dir: repo, project_dir: repo } }), { env, script });
+  assert.match(strip(run(['--board'], { env, script }).out), /billing/);
+});
+
+test('REGRESSION: --sessions writes resume lines for the shell you are in (Git Bash on Windows gets &&)', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const proj = path.join(sb.cfg, 'projects', '-tmp-gb'); fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, 'gb-1.jsonl'), JSON.stringify({ cwd: '/tmp/gb', type: 'user', message: { role: 'user', content: 'hi' } }) + '\n');
+  const bash = run(['--sessions'], { env: { ...env, MSYSTEM: 'MINGW64' } }).out;
+  assert.match(bash, /cd '\/tmp\/gb' && CLAUDE_CONFIG_DIR='.+' claude --resume gb-1/, 'POSIX form: ' + bash);
+  assert.ok(!bash.includes('$env:'), 'no PowerShell syntax in a bash shell');
+});
+
+test('REGRESSION: a resume ticket on Windows carries both the PowerShell and the Git Bash command', { skip: process.platform !== 'win32' && 'Windows only' }, () => {
+  const sb = sandbox();
+  const now = Math.floor(Date.now() / 1000);
+  run([], { stdin: JSON.stringify(baseInput({ session_id: 'tk-2', workspace: { current_dir: 'C:/p/app', project_dir: 'C:/p/app' }, rate_limits: { five_hour: { used_percentage: 99, resets_at: now + 3600 } } })), env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
+  const ticket = fs.readFileSync(path.join(sb.cfg, 'resume-tickets', 'tk-2.md'), 'utf8');
+  assert.match(ticket, /PowerShell: +cd 'C:\/p\/app'; \$env:CLAUDE_CONFIG_DIR=/);
+  assert.match(ticket, /Git Bash: +cd 'C:\/p\/app' && CLAUDE_CONFIG_DIR=/);
+});
+
+test('ambiguous width: in a terminal that draws box glyphs two cells wide, no line runs past the edge', () => {
+  const SL = require(SCRIPT);
+  const sb = sandbox();
+  const input = fullInput({ rate_limits: { five_hour: { used_percentage: 64, resets_at: R_NOW() + 5000 }, seven_day: { used_percentage: 21, resets_at: R_NOW() + 3 * 86400 } } });
+  try {
+    SL._setAmbiguous('wide');
+    for (const cols of [40, 80, 120]) {
+      // classic never cuts a segment wider than the terminal (unchanged), so it is checked where its segments fit
+      for (const extra of cols >= 80 ? [{}, { CCRIG_STYLE: 'classic' }] : [{}]) {
+        const out = render(input, { env: R_ENV(sb, { CCRIG_AMBIGUOUS: 'wide', ...extra }), cols: String(cols) }).out;
+        for (const line of out.split('\n')) assert.ok(SL.dispWidth(line) <= cols - 1, (extra.CCRIG_STYLE || 'refined') + ' @' + cols + ' is ' + SL.dispWidth(line) + ': ' + strip(line));
+      }
+    }
+    const folded = render(input, { env: R_ENV(sb, { CCRIG_AMBIGUOUS: 'wide' }), cols: '80', script: scriptCopy(sb.dir, { collapsed: true }) }).out;
+    assert.ok(SL.dispWidth(folded) <= 79, 'the folded line too: ' + strip(folded));
+  } finally { SL._setAmbiguous('narrow'); }
+  assert.match(run(['--doctor'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, LANG: 'ja_JP.UTF-8' } }).out, /box-drawing glyphs counted 2 cells wide/);
+});
+
+test('--board reads usage the way the bar does (5h / 7d)', () => {
+  const { sb, script, env } = boardBox();
+  seedBoard(sb, 'u1', { session: 96, weekly: 71 });
+  const out = strip(run(['--board'], { env, script }).out);
+  assert.match(out, /5h 96% · 7d 71%/);
+  assert.ok(!/s96% w71%/.test(out));
+});
+
+test('--sessions labels a session from its first request when its tail is only tool results, and prefers a summary', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const proj = path.join(sb.cfg, 'projects', '-w-long'); fs.mkdirSync(proj, { recursive: true });
+  const results = Array.from({ length: 600 }, (_, i) => JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't' + i, content: 'x'.repeat(1000) }] } }));
+  fs.writeFileSync(path.join(proj, 'long-1.jsonl'), [JSON.stringify({ type: 'user', cwd: '/w/long', message: { role: 'user', content: 'migrate the billing tables' } }), ...results].join('\n') + '\n');
+  fs.writeFileSync(path.join(proj, 'sum-1.jsonl'), [JSON.stringify({ type: 'summary', summary: 'Fix the login redirect', leafUuid: 'x' }), JSON.stringify({ type: 'user', cwd: '/w/sum', message: { role: 'user', content: 'look at auth' } })].join('\n') + '\n');
+  const out = run(['--sessions'], { env }).out;
+  assert.match(out, /migrate the billing tables/, 'the first request labels a long session: ' + out);
+  assert.ok(!/no first request found/.test(out));
+  assert.match(out, /Fix the login redirect/, "Claude Code's own summary wins");
 });

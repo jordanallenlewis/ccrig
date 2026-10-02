@@ -115,7 +115,7 @@ with `"boardNotify": false`.
 
 The lamps come from hooks (on each prompt, notification, session end and turn end) that are wired only
 while the board is on, since each one starts Node. `ccrig board off` turns the board off and takes them
-out again; with the board off, nothing is written. Name a session with `/ccrig:name` (or `ccrig --name <label>` in the project folder), which writes `.claude/ccrig-name` there,
+out again; with the board off, nothing is written. Name a session with `/ccrig:name` (or `ccrig --name <label>` in the project folder), which saves the label in `~/.ccrig/names/`, never in the project,
 or set `CCRIG_SESSION_NAME` in a shell to label just that one session.
 
 ## Configure
