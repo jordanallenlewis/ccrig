@@ -26,8 +26,10 @@
     "context": { "green": 50, "yellow": 70 },
     "usage": { "green": 50, "yellow": 80, "warn": 90, "critical": 95 }
   },
-  "_resetStyle": "clock | clock24 (24-hour) | relative",
-  "resetStyle": "clock",
+  "_resetStyle": "auto (the locale's clock: 14:40 where clocks run to 24, else 2:40p) | clock | clock24 (24-hour) | relative",
+  "resetStyle": "auto",
+  "_ambiguousWidth": "How wide the box-drawing glyphs are in your terminal: auto (2 cells under a ja, zh or ko locale) | narrow | wide. CCRIG_AMBIGUOUS overrides it for one terminal.",
+  "ambiguousWidth": "auto",
   "resumeTickets": true,
   "_guardian": "The next block powers the guardian, which is ON by default (autopilot:notify). It checkpoints your work + sends a desktop ping at limits, but never launches anything unattended. Set autopilot:off for a bar-only, side-effect-free install. --auto (or autopilot:resume) adds hands-free relaunch; keepWorking + resume need the hooks wired by --install-guardian.",
   "keepWorking": false,

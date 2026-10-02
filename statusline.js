@@ -125,7 +125,9 @@ const DEFAULTS = {
     context: { green: 50, yellow: 70 }, // % filled → color
     usage: { green: 50, yellow: 80, warn: 90, critical: 95 }, // warn: ⚠ + checkpoint + resume ticket; critical: ping + autopilot
   },
-  resetStyle: 'clock',  // 'clock' (10:40a, dated if not today) | 'relative' (2h14m)
+  resetStyle: 'auto',   // 'auto' (the locale's clock) | 'clock' (10:40a) | 'clock24' (14:40) | 'relative' (2h14m)
+  // East Asian Ambiguous glyphs (─ ━ │ ▲ ●): 'auto' counts them 2 cells wide under a ja/zh/ko locale | 'narrow' | 'wide'
+  ambiguousWidth: 'auto',
   resumeTickets: true,  // at critical usage, save resume-tickets/<session>.md with the exact pick-up command
   // ---- Guardian: keep working through soft stops, and survive the hard limit wall ----
   // Feature 2 (Relentless mode): a Stop hook keeps the session working while todos remain.
@@ -351,7 +353,7 @@ function truncAnsi(s, w) {
     const m = esc.exec(s);
     if (m) { out += m[0]; i += m[0].length; continue; }
     const cp = s.codePointAt(i), ch = String.fromCodePoint(cp), cw = glyphWidth(cp);
-    if (used + cw > w - 1) break;
+    if (used + cw > w - glyphWidth(0x2026)) break; // room for the '…' (2 cells when ambiguous glyphs are wide)
     out += ch; used += cw; i += ch.length;
   }
   return out + '\x1b[0m…';
@@ -396,8 +398,24 @@ function glyphWidth(cp) {
       (cp >= 0x4E00 && cp <= 0x9FFF) || (cp >= 0xAC00 && cp <= 0xD7A3) ||
       (cp >= 0xF900 && cp <= 0xFAFF) || (cp >= 0xFE30 && cp <= 0xFE4F) ||
       (cp >= 0xFF00 && cp <= 0xFF60) || (cp >= 0xFFE0 && cp <= 0xFFE6)) return 2;
+  if (AMBIG_WIDE && AMBIGUOUS.has(cp)) return 2;
   return 1;
 }
+// East Asian Ambiguous glyphs CCRig draws (─ ━ ╸ │ ▾ ▸ ▲ ● ○ ↺ ↑ ↓ · … █ ░): one cell in most terminals,
+// two in one set to "ambiguous = wide", which is common in Japanese, Chinese and Korean setups. Counting
+// them right keeps every line inside the terminal there.
+const AMBIGUOUS = new Set([0x2500, 0x2501, 0x2502, 0x2578, 0x25BE, 0x25B8, 0x25B2, 0x25CF, 0x25CB, 0x21BA, 0x2191, 0x2193, 0x00B7, 0x2026, 0x2588, 0x2591]);
+// CCRIG_AMBIGUOUS (one terminal) > "ambiguousWidth" > auto: wide under a ja, zh or ko locale
+function ambiguousMode(setting, env) {
+  env = env || process.env;
+  const o = String(env.CCRIG_AMBIGUOUS || '').toLowerCase();
+  if (o === 'wide' || o === 'narrow') return o;
+  if (setting === 'wide' || setting === 'narrow') return setting;
+  return /^(ja|zh|ko)([_.@-]|$)/i.test(env.LC_ALL || env.LC_CTYPE || env.LANG || '') ? 'wide' : 'narrow';
+}
+let AMBIG_WIDE = ambiguousMode(CONFIG.ambiguousWidth) === 'wide';
+// `n` cells of a one-glyph fill (a rule), whatever width the glyph takes in this terminal
+function fillCells(ch, n) { return n > 0 ? ch.repeat(Math.floor(n / glyphWidth(ch.codePointAt(0)))) : ''; }
 // display width: strip ANSI, then sum per-codepoint cell widths
 function dispWidth(s) {
   s = s.replace(/\x1b\[[0-9;]*m/g, '');
@@ -481,8 +499,8 @@ function foldMark(level) { return c(levelTint(level, K.dim), '▾') + ' '; }
 function ruleLine(width, level) {
   const col = levelTint(level, K.rule);
   const label = '▾ ccrig ';
-  if (width < dispWidth(label) + 4) return c(col, '─'.repeat(Math.max(1, width)));
-  return c(K.dim, label) + c(col, '─'.repeat(width - dispWidth(label)));
+  if (width < dispWidth(label) + 4) return c(col, fillCells('─', Math.max(1, width)) || '─');
+  return c(K.dim, label) + c(col, fillCells('─', width - dispWidth(label)));
 }
 
 // color-coded block bar. `redAt` (default t.yellow) is the % at which the fill turns red;
@@ -555,17 +573,47 @@ function fmtReset(epochSec) {
   }
   const d = new Date(epochSec * 1000), now = new Date();
   const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
-  if (CONFIG.resetStyle === 'clock24') {   // 24-hour locales: 14:40, dated M/D 14:40 when not today
-    const c24 = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-    return sameDay ? c24 : `${d.getMonth() + 1}/${d.getDate()} ${c24}`;
+  const week = isRefined() && !sameDay && epochSec - nowSec() < 6 * 86400;
+  // 'auto' (the default) follows the locale: 14:40 where clocks run to 24, 2:40p where they do not
+  const h24 = CONFIG.resetStyle === 'clock24' || (CONFIG.resetStyle === 'auto' && localeInfo().h24);
+  let clock;
+  if (h24) clock = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  else {
+    let h = d.getHours(); const m = d.getMinutes();
+    const ap = h >= 12 ? 'p' : 'a'; h = h % 12 || 12;
+    clock = `${h}:${String(m).padStart(2, '0')}${ap}`;
   }
-  let h = d.getHours(); const m = d.getMinutes();
-  const ap = h >= 12 ? 'p' : 'a'; h = h % 12 || 12;
-  const clock = `${h}:${String(m).padStart(2, '0')}${ap}`;
   if (sameDay) return clock;
-  // refined: a reset inside the coming week reads as its weekday ("Mon 8:55a"), which is how people think about it
-  if (isRefined() && epochSec - nowSec() < 6 * 86400) return `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()]} ${clock}`;
+  // refined: a reset inside the coming week reads as its weekday ("Mon 8:55a", "Di 14:40"), which is how people think about it
+  if (week) return localeInfo().days[d.getDay()] + ' ' + clock;
   return `${d.getMonth() + 1}/${d.getDate()} ${clock}`;
+}
+// The locale's clock (24-hour or not) and its short weekday names. The first Intl call in a process costs
+// about 11ms (it loads the locale data), too much for every render, so the answer is kept in the cache dir
+// for a day, keyed by the locale variables (Windows takes the locale from the system, so the day is the key).
+let LOCALE_INFO = null;
+const WEEKDAYS_EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+function localeInfo() {
+  if (LOCALE_INFO) return LOCALE_INFO;
+  const key = ['LC_ALL', 'LC_TIME', 'LANG', 'LANGUAGE'].map((k) => process.env[k] || '').join('|');
+  const f = path.join(cacheDir(), 'ccsl-locale.json'), now = Date.now();
+  try {
+    const o = JSON.parse(fs.readFileSync(f, 'utf8'));
+    if (o && o.key === key && o.at <= now && now - o.at < 86400000 && Array.isArray(o.days) && o.days.length === 7 && o.days.every((x) => typeof x === 'string' && x)) return (LOCALE_INFO = o);
+  } catch {}
+  const o = { key, at: now, h24: false, days: WEEKDAYS_EN.slice() };
+  try {
+    const hc = new Intl.DateTimeFormat(undefined, { hour: 'numeric' }).resolvedOptions().hourCycle;
+    o.h24 = hc === 'h23' || hc === 'h24';
+    const wd = new Intl.DateTimeFormat(undefined, { weekday: 'short' });
+    o.days = o.days.map((en, i) => cleanLabel(wd.format(new Date(2026, 9, 4 + i, 12)), 12) || en); // 2026-10-04 is a Sunday
+  } catch {}
+  try { fs.writeFileSync(f, JSON.stringify(o), { mode: 0o600 }); } catch {}
+  return (LOCALE_INFO = o);
+}
+// pure: does this locale write a 24-hour clock? (for tests and --doctor; the render reads localeInfo)
+function localeHour24(locale) {
+  try { const hc = new Intl.DateTimeFormat(locale, { hour: 'numeric' }).resolvedOptions().hourCycle; return hc === 'h23' || hc === 'h24'; } catch { return false; }
 }
 function warnAtOf(t) { return t.warn != null ? t.warn : 90; }
 const usageSeg = (label, pct, reset) => {
@@ -626,7 +674,10 @@ function writeResumeTicket(input, pct, windowName, resetEpoch, escalate) {
       'Pick up exactly where you left off (this pins the profile the session ran under, so it',
       'resumes on the right account even from a shell set to a different profile):',
       '',
-      '    ' + resumeCmdLine(CFG, cwd, sid),
+      // a ticket is read from whichever shell you open: on Windows give both forms
+      ...(process.platform === 'win32'
+        ? ['    PowerShell:  ' + resumeCmdLine(CFG, cwd, sid, 'powershell'), '    Git Bash:    ' + resumeCmdLine(CFG, cwd, sid, 'posix')]
+        : ['    ' + resumeCmdLine(CFG, cwd, sid, 'posix')]),
       '',
       'Or, from that project directory with this profile active, run `claude --continue`.',
       '',
@@ -736,15 +787,20 @@ function latestTodos(tp, fullScan) {
 // user-role entries Claude Code writes itself: task notifications, slash-command wrappers and their
 // output, reminders, interrupt markers. None of them is the human's request.
 const SYNTHETIC_USER_RE = /^\s*(<(task-notification|command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat|system-reminder|bash-input|bash-stdout|bash-stderr|user-memory-input)\b|\[Request interrupted)/;
+// the text of one transcript entry when it is something the human typed, else ''
+function humanText(o) {
+  if (!o || o.isSidechain || o.isMeta || o.type !== 'user' || !o.message) return '';
+  const cnt = o.message.content;
+  const txt = typeof cnt === 'string' ? cnt.trim()
+    : Array.isArray(cnt) ? cnt.filter((x) => x && x.type === 'text' && typeof x.text === 'string').map((x) => x.text).join(' ').trim() : '';
+  return txt && !SYNTHETIC_USER_RE.test(txt) ? txt.slice(0, 500) : '';
+}
 function latestUserText(tp) {
   const lines = readTranscriptTail(tp, 524288);
   for (let i = lines.length - 1; i >= 0; i--) {
     let o; try { o = JSON.parse(lines[i]); } catch { continue; }
-    if (!o || o.isSidechain || o.isMeta || o.type !== 'user' || !o.message) continue;
-    const cnt = o.message.content;
-    const txt = typeof cnt === 'string' ? cnt.trim()
-      : Array.isArray(cnt) ? cnt.filter((x) => x && x.type === 'text' && typeof x.text === 'string').map((x) => x.text).join(' ').trim() : '';
-    if (txt && !SYNTHETIC_USER_RE.test(txt)) return txt.slice(0, 500);
+    const txt = humanText(o);
+    if (txt) return txt;
   }
   return '';
 }
@@ -1198,19 +1254,33 @@ function padCell(s, n) {
     if (w + cw > n) { cut = true; break; }
     out += ch; w += cw;
   }
-  if (cut && n >= 1) { // make room for the ellipsis, one glyph at a time (a wide glyph frees 2 cells)
-    while (w + 1 > n && out.length) { const chars = [...out]; const last = chars.pop(); w -= glyphWidth(last.codePointAt(0)); out = chars.join(''); }
-    out += '…'; w += 1;
+  const ell = glyphWidth(0x2026); // 2 cells in an ambiguous-wide terminal
+  if (cut && n >= ell) { // make room for the ellipsis, one glyph at a time (a wide glyph frees 2 cells)
+    while (w + ell > n && out.length) { const chars = [...out]; const last = chars.pop(); w -= glyphWidth(last.codePointAt(0)); out = chars.join(''); }
+    out += '…'; w += ell;
   }
   return out + ' '.repeat(Math.max(0, n - w));
 }
-// The board's session label. Precedence: env override (this shell only) > the project's
-// .claude/ccrig-name (what /ccrig:name writes) > Claude Code's own session name > folder name.
-// The env var wins because it is per session, while the file is shared by every session in a project.
+// Project labels (`ccrig --name`, /ccrig:name) live in ~/.ccrig/names/, one small file per project folder,
+// never inside the project: a file there made every named repo read as dirty (`git ●1`).
+function namesDir() { return path.join(HOME, '.ccrig', 'names'); }
+function nameFile(dir) { return path.join(namesDir(), strHash(foldPath(path.resolve(dir))) + '.json'); }
+function savedName(dir) {
+  try {
+    const o = parseJsonText(fs.readFileSync(nameFile(dir), 'utf8'));
+    if (isPlainObject(o) && typeof o.dir === 'string' && foldPath(path.resolve(o.dir)) === foldPath(path.resolve(dir))) return typeof o.label === 'string' ? o.label : '';
+  } catch {}
+  return '';
+}
+// The board's session label. Precedence: env override (this shell only) > the project's saved name
+// (what /ccrig:name saves) > a .claude/ccrig-name in the project (where older versions wrote it) >
+// Claude Code's own session name > folder name. The env var wins because it is per session, while the
+// saved name is shared by every session in a project.
 function sessionLabel(input, cwd) {
-  // /ccrig:name writes the file at the project root; a session started in a subdirectory still finds it
+  // the name is saved for the project root; a session started in a subdirectory still finds it
   const root = input && input.workspace && typeof input.workspace.project_dir === 'string' ? input.workspace.project_dir : '';
   let file = '';
+  for (const d of [root, cwd]) { if (!file && d) file = savedName(d); }
   for (const d of [root, cwd]) { if (!file && d) file = readTextHead(path.join(d, '.claude', 'ccrig-name'), 512).split(/\r?\n/)[0]; }
   for (const cand of [process.env.CCRIG_SESSION_NAME, file,
     (input && typeof input.session_name === 'string') ? input.session_name : '', path.basename(cwd || '')]) {
@@ -1300,8 +1370,11 @@ let CACHE_DIR = null;
 function cacheDir() {
   if (CACHE_DIR) return CACHE_DIR;
   const mine = (d) => {
+    // look before creating: the dir exists on every render but the first, so this is one call, not two
+    const ok = (st) => st.isDirectory() && !st.isSymbolicLink() && (typeof process.getuid !== 'function' || st.uid === process.getuid());
+    try { return ok(fs.lstatSync(d)); } catch {}
     try { fs.mkdirSync(d, { recursive: true, mode: 0o700 }); } catch {}
-    try { const st = fs.lstatSync(d); return st.isDirectory() && !st.isSymbolicLink() && (typeof process.getuid !== 'function' || st.uid === process.getuid()); } catch { return false; }
+    try { return ok(fs.lstatSync(d)); } catch { return false; }
   };
   const t = path.join(os.tmpdir(), 'ccrig-' + (typeof process.getuid === 'function' ? process.getuid() : 'user'));
   CACHE_DIR = mine(t) ? t : path.join(CFG, '.cache');
@@ -1349,24 +1422,27 @@ function recordSample(sid, sPct, wPct) {
   if (lines.length > 40) lines = lines.slice(-40);               // rolling window
   try { fs.writeFileSync(file, lines.join('\n') + '\n', { mode: 0o600 }); SAMPLES = { file, lines }; } catch {}
 }
-// least-squares slope (%/sec) of the chosen field over the samples, or null
+// The burn rate (%/sec) behind the forecast: the Theil-Sen slope, the median of every pairwise slope, so one
+// big turn landing at once (a step) does not read as a rate the way a least-squares line did. It needs at
+// least 4 samples over at least 2 minutes; with less there is no rate to trust. Pure: pts = [[t, pct], ...].
+// (Differences only, so raw epoch seconds cannot cancel each other out the way least-squares sums did.)
+function burnSlope(pts) {
+  if (!Array.isArray(pts) || pts.length < 4) return null;
+  if (pts[pts.length - 1][0] - pts[0][0] < 120) return null;
+  const slopes = [];
+  for (let i = 0; i < pts.length; i++) {
+    for (let j = i + 1; j < pts.length; j++) { const dt = pts[j][0] - pts[i][0]; if (dt > 0) slopes.push((pts[j][1] - pts[i][1]) / dt); }
+  }
+  if (!slopes.length) return null;
+  slopes.sort((a, b) => a - b);
+  const m = slopes.length >> 1;
+  return slopes.length % 2 ? slopes[m] : (slopes[m - 1] + slopes[m]) / 2;
+}
 function burnRate(sid, field) {
-  const lines = sampleLines(sid);
   const pts = [];
-  for (const l of lines) { let o; try { o = JSON.parse(l); } catch { continue; } if (o && typeof o[field] === 'number') pts.push([o.t, o[field]]); }
-  if (pts.length < 3) return null;
-  const t0 = pts[0][0];
-  const span = pts[pts.length - 1][0] - t0;
-  if (span < 30) return null;                                     // too little time to trust a rate
-  // rebase time to t0 before the least-squares sums: raw epoch seconds (~1.78e9)
-  // otherwise blow up n*Σt² and (Σt)² into near-equal ~1e19 values whose difference
-  // loses all precision (catastrophic cancellation), wrecking the slope.
-  const n = pts.length; let st = 0, sv = 0, stv = 0, stt = 0;
-  for (const [tRaw, v] of pts) { const t = tRaw - t0; st += t; sv += v; stv += t * v; stt += t * t; }
-  const denom = n * stt - st * st;
-  if (denom === 0) return null;
-  const slope = (n * stv - st * sv) / denom;                      // %/sec
-  return { slope, last: pts[pts.length - 1][1] };
+  for (const l of sampleLines(sid)) { let o; try { o = JSON.parse(l); } catch { continue; } if (o && typeof o.t === 'number' && typeof o[field] === 'number') pts.push([o.t, o[field]]); }
+  const slope = burnSlope(pts);
+  return slope == null ? null : { slope, last: pts[pts.length - 1][1] };
 }
 
 // spawn the detached, sleep-safe watcher that will relaunch this session at reset
@@ -2340,7 +2416,7 @@ function collapsedSummary(r, width, withFill) {
   let line = truncAnsi(join(keep), width);
   if (withFill && isRefined() && CONFIG.rule !== false) {
     const room = width - dispWidth(line) - 1;
-    if (room >= 2) line += ' ' + c(ruleCol, '─'.repeat(room));
+    if (room >= 2) line += ' ' + c(ruleCol, fillCells('─', room));
   }
   const out = [line];
   if (level === 'critical') {
@@ -2358,7 +2434,7 @@ function render(input, width, gitOverride) {
   // "▾ ccrig" marks the section as one you can fold (ccrig collapse, or /ccrig:toggle in a session).
   // With the rule off, a tinted ▾ at the start of the first line keeps both cues.
   const rule = CONFIG.rule !== false;
-  const lines = layoutItems(items, width, rule ? 0 : 2);
+  const lines = layoutItems(items, width, rule ? 0 : dispWidth(foldMark(level)));
   if (!lines.length) return '';
   if (rule) lines.unshift(ruleLine(width, level));
   else lines[0] = foldMark(level) + lines[0];
@@ -2400,7 +2476,8 @@ if (require.main !== module) {
     fetchText, httpGetText, VERSION,
     DEFAULTS, DEFAULT_ORDER, MODES, helpText, watcherCmdMatches, notifySpec, maybeCheckUpdate,
     cleanLabel, padCell, sessionLabel, lampSupersedes, lampFor, lampPings, winLaunch, parseJsonText, profileLabelOf,
-    NOTIFY_MATCHER,
+    NOTIFY_MATCHER, burnSlope, resumeShell, resumeCmdLine, ambiguousMode, localeHour24, humanText,
+    _setAmbiguous: (m) => { AMBIG_WIDE = m === 'wide'; },
   };
   return;
 }
@@ -2449,7 +2526,7 @@ function helpText() {
     '  --board [--watch]    traffic-light board of every session (opt-in; --watch redraws in place)',
     '  --board on|off       turn the session board on or off, and wire or remove its lamp hooks',
     '  --sessions           list recent sessions with the command to resume each',
-    '  --name <label>       label this project on the board (writes .claude/ccrig-name)',
+    '  --name <label>       label this project on the board (saved in ~/.ccrig/names, not in the project)',
     '  --status             list armed auto-resume watchers (nothing is a hidden daemon)',
     '  --disarm [id]        stop auto-resume watcher(s) and clear their state',
     '  --purge              delete all local guardian state (checkpoints, tickets, cache)',
@@ -3097,7 +3174,7 @@ function runPurge() {
   try { fs.unlinkSync(path.join(CFG, 'statusline-error.log')); } catch {} // pure state, squarely inside purge's contract
   try { fs.unlinkSync(path.join(ledgerDir(), path.basename(CFG) + '.json')); } catch {}
   for (const d of [os.tmpdir(), cacheDir()]) { // os.tmpdir(): caches from versions before the per-user dir
-    try { for (const f of fs.readdirSync(d)) if (f.startsWith('ccbsl-usage-') || f.startsWith('ccbsl-agents-') || f.startsWith('ccsl-git-') || f.startsWith('ccsl-profiles-')) { try { fs.unlinkSync(path.join(d, f)); } catch {} } } catch {}
+    try { for (const f of fs.readdirSync(d)) if (f.startsWith('ccbsl-usage-') || f.startsWith('ccbsl-agents-') || f.startsWith('ccsl-git-') || f.startsWith('ccsl-profiles-') || f === 'ccsl-locale.json') { try { fs.unlinkSync(path.join(d, f)); } catch {} } } catch {}
   }
   rm(boardDir()); // shared session-board files (live sessions republish on their next render)
   process.stdout.write("Cleared the saved state on this machine: checkpoints, resume tickets, watchers, the update cache, this profile's ledger entry, the session board, and temporary samples.\n");
@@ -3107,9 +3184,16 @@ function pad(s, n) { s = String(s == null ? '' : s); return s.length >= n ? s.sl
 function shellQuote(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; } // safe for copy-paste, even with spaces/quotes
 // a copy-pasteable resume command that PINS the owning profile's CLAUDE_CONFIG_DIR, so a session
 // started under one profile (e.g. personal) resumes under THAT profile even if the current shell is
-// pointed at another (e.g. work). Platform-aware: PowerShell (the default Windows shell) vs POSIX.
-function resumeCmdLine(cfgDir, cwd, sid) {
-  if (process.platform === 'win32') {
+// pointed at another (e.g. work). Shell-aware: PowerShell (the default Windows shell) vs POSIX.
+// Which shell the user will paste it into: Windows defaults to PowerShell, but Git Bash (MSYSTEM is set
+// there) and a SHELL that names a POSIX shell get the POSIX form, which is what they run.
+function resumeShell(platform, env) {
+  platform = platform || process.platform; env = env || process.env;
+  if (platform !== 'win32') return 'posix';
+  return (env.MSYSTEM || /(^|[\\/])(ba|z|da|k)?sh(\.exe)?$/i.test(String(env.SHELL || ''))) ? 'posix' : 'powershell';
+}
+function resumeCmdLine(cfgDir, cwd, sid, shell) {
+  if ((shell || resumeShell()) === 'powershell') {
     // Emit PowerShell-native syntax. The old cmd.exe form (`cd /d`, `set`, `&&`) does not paste into
     // PowerShell, where `&&` is not a separator in 5.1 and `set`/`$env:` differ. A single-quoted
     // PowerShell string escapes an inner quote by doubling it.
@@ -3138,7 +3222,8 @@ const LAMPS = {
   ready: { glyph: '○', word: 'ready', color: 'dim', rank: 3 },   // live, not prompted yet
   idle: { glyph: '○', word: 'idle', color: 'dim', rank: 4 },
 };
-const BOARD_COLS = [['state', 14], ['session', 18], ['project', 12], ['profile', 8], ['model', 8], ['usage', 11]];
+// usage reads like the bar and its folded line: 5h 96% · 7d 71%
+const BOARD_COLS = [['state', 14], ['session', 18], ['project', 12], ['profile', 8], ['model', 8], ['usage', 17]];
 // Widest line a frame can produce: lamp gutter + every padded column + the padded age cell. Derived
 // from BOARD_COLS so it cannot drift, and used to decide whether an in-place redraw is safe.
 const BOARD_FRAME_COLS = 4 + BOARD_COLS.reduce((n, [, w]) => n + w, 0) + (BOARD_COLS.length - 1) + 1 + 8;
@@ -3213,7 +3298,7 @@ function boardFrame(rows, now, useColor) {
       cleanLabel(e.project, 32),
       cleanLabel((typeof e.profile === 'string' ? e.profile : '').replace(/^\.?claude-?/, ''), 20) || 'default',
       cleanLabel(String(e.model == null ? '' : e.model).split(/[\s(]/)[0], 20),
-      's' + Math.round(e.session || 0) + '% w' + Math.round(e.weekly || 0) + '%',
+      '5h ' + Math.round(e.session || 0) + '% · 7d ' + Math.round(e.weekly || 0) + '%',
     ];
     const age = Math.round(boardAge(now, e.ts) / 1000);
     // the age cell is padded like every other one, so no record can widen the frame and desync
@@ -3332,13 +3417,18 @@ function runSessions() {
   if (!rows.length) { process.stdout.write('  No recent sessions found.\n'); process.exit(0); }
   const now = Date.now();
   for (const r of rows.slice(0, 15)) {
-    let cwd = '';
+    // the head gives the folder and a label: Claude Code's own summary line when it wrote one, else the
+    // first thing you asked. Only then the tail, whose last turns are often all tool results.
+    let cwd = '', summary = '', first = '';
     for (const line of readHead(r.path, 65536).split('\n')) { // cwd may not be on the very first line; a big first record still yields it
       if (!line) continue; let o; try { o = JSON.parse(line); } catch { continue; }
-      cwd = o.cwd || (o.workspace && o.workspace.current_dir) || '';
-      if (cwd) break;
+      if (!o || typeof o !== 'object') continue;
+      if (!cwd) cwd = o.cwd || (o.workspace && o.workspace.current_dir) || '';
+      if (!summary && o.type === 'summary' && typeof o.summary === 'string') summary = o.summary;
+      if (!first) first = humanText(o);
+      if (cwd && summary) break;
     }
-    const req = (latestUserText(r.path) || '').replace(/\s+/g, ' ').slice(0, 48) || '(no first request found)';
+    const req = cleanLabel(summary || first || latestUserText(r.path) || '', 48) || '(no first request found)';
     const ageM = Math.round((now - r.mtime) / 60000);
     const age = ageM < 60 ? ageM + 'm' : ageM < 1440 ? Math.round(ageM / 60) + 'h' : Math.round(ageM / 1440) + 'd';
     const sz = r.size > 1e6 ? (r.size / 1e6).toFixed(1) + 'MB' : Math.round(r.size / 1e3) + 'KB';
@@ -3369,15 +3459,16 @@ if (argv.includes('--disarm')) {
   runDisarm(v);
 }
 if (argv.includes('--purge')) runPurge();
-// --name <label>: the board label for this project, written by node so /ccrig:name needs no Write into
-// Claude Code's protected .claude/ dir (a Write there always prompts, and dontAsk mode denies it)
+// --name <label>: the board label for this project (the current folder), saved under ~/.ccrig/names/ and
+// never inside the project, so a named repo does not read as dirty. Written by node, so /ccrig:name needs
+// no Write tool call at all.
 if (argv.includes('--name')) {
   const label = cleanLabel(argv.slice(argv.indexOf('--name') + 1).join(' '), 18);
   if (!label) { process.stdout.write('usage: --name <label>   (up to 18 characters; run it in the project folder)\n'); process.exit(1); }
-  const f = path.join(process.cwd(), '.claude', 'ccrig-name');
-  try { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, label + '\n'); }
-  catch (e) { process.stdout.write('could not write ' + f + ': ' + e.message + '\n'); process.exit(1); }
-  process.stdout.write('ok  board label -> ' + label + '  (' + f + ')\n');
+  const dir = process.cwd(), f = nameFile(dir);
+  if (!writeJsonAtomic(f, { dir, label })) { process.stdout.write('could not save the label to ' + f + '\n'); process.exit(1); }
+  process.stdout.write('ok  board label -> ' + label + '  for ' + dir + '\n   (saved in ' + namesDir() + ', not in the project)\n');
+  if (fs.existsSync(path.join(dir, '.claude', 'ccrig-name'))) process.stdout.write('   ' + path.join(dir, '.claude', 'ccrig-name') + ' is from an older version and no longer needed; delete it if you like.\n');
   process.exit(0);
 }
 // `--board on|off` is a setter, handled with the others below (it rewires hooks, which are defined later)
@@ -3404,7 +3495,8 @@ function runOptions() {
   let o = 'CCRig v' + VERSION + ' options\n';
   o += 'config file: ' + CONFIG_PATH + (fs.existsSync(CONFIG_PATH) ? '' : '  (not present: using defaults)') + '\n\n';
   o += 'display mode:   ' + CONFIG.mode + '        choices: ' + MODES.join(' | ') + '\n';
-  o += 'reset style:    ' + CONFIG.resetStyle + '        choices: clock | clock24 | relative\n';
+  o += 'reset style:    ' + CONFIG.resetStyle + '        choices: auto (the locale\'s clock) | clock | clock24 | relative\n';
+  o += 'ambiguous width: ' + CONFIG.ambiguousWidth + '       auto | narrow | wide  (box-drawing glyphs counted as ' + (AMBIG_WIDE ? '2 cells' : '1 cell') + ' now)\n';
   o += 'look:           ' + CONFIG.style + '        choices: ' + STYLES.join(' | ') + '   (rule line: ' + (CONFIG.rule !== false ? 'on' : 'off') + ')\n';
   o += 'section:        ' + (isCollapsed() ? 'collapsed' : 'expanded') + '        ccrig collapse | expand | toggle  (/ccrig:toggle in a session)\n';
   o += 'resume tickets: ' + (CONFIG.resumeTickets === false ? 'off' : 'on') + '\n';
@@ -3508,7 +3600,7 @@ function configMenuDoc(sl) {
     '   options (put the current value in each description):',
     '     - Display mode        (minimal / normal / expanded)',
     '     - Toggle a segment    (turn any segment on or off)',
-    '     - Reset time style    (clock / relative)',
+    '     - Reset time style    (auto / clock / clock24 / relative)',
     '     - Resume tickets      (on / off)',
     '     - Thresholds          (warn %, critical %, color cutoffs)',
     '     - Show current + preview',
@@ -3542,7 +3634,7 @@ function nameDoc(sl) {
     'If a label is given below, use it. Otherwise suggest one from what we are working on and confirm it with me first.',
     'Save it by running, from the project root:  node "' + sl + '" --name "<label>"',
     'Keep it plain text, one line, 18 characters at most (the board column width).',
-    'Then tell me it applies to every session in this project, and that setting CCRIG_SESSION_NAME in a',
+    'Then tell me it applies to every session in this project (it is saved outside the project, so git does not see it), and that setting CCRIG_SESSION_NAME in a',
     'shell overrides it for that one session.', '',
     '$ARGUMENTS', '',
   ].join('\n');
@@ -3655,7 +3747,7 @@ function runInstall() {
   else if (okd.some((r) => r.cmd)) process.stdout.write('Added the /ccrig commands to Claude Code: /ccrig, /ccrig:status, /ccrig:sessions, /ccrig:doctor, /ccrig:update, /ccrig:config, and /ccrig:name.\n');
   for (const r of failed) process.stdout.write('Could not set up the ' + profileLabel(r.dir) + ' profile (' + r.sp + '): ' + r.err + '\n');
   if (!thisOnly) for (const d of markerlessClaudeDirs()) {
-    const how = process.platform === 'win32'
+    const how = resumeShell() === 'powershell'
       ? "$env:CLAUDE_CONFIG_DIR='" + d.replace(/'/g, "''") + "'; node \"" + __filename + "\" --install --this-profile; Remove-Item Env:CLAUDE_CONFIG_DIR"
       : 'CLAUDE_CONFIG_DIR=' + shellQuote(d) + ' node "' + __filename + '" --install --this-profile';
     process.stdout.write('Skipped the ' + profileLabel(d) + ' profile: it has no Claude settings yet (log in to it once first). To set it up, run:  ' + how + '\n');
@@ -4186,6 +4278,7 @@ function runDoctor() {
     catch (e) { bad('statusline.config.json is invalid JSON (' + e.message + '); defaults are in use', 'fix it or delete it'); }
   } else info('no statusline.config.json: defaults in use (customize with --config)');
   if (findBin('git')) ok('git found'); else info('git not found: the git segment stays hidden');
+  info('box-drawing glyphs counted ' + (AMBIG_WIDE ? '2 cells wide' : '1 cell wide') + ' (ambiguousWidth: ' + CONFIG.ambiguousWidth + (process.env.CCRIG_AMBIGUOUS ? ', CCRIG_AMBIGUOUS=' + process.env.CCRIG_AMBIGUOUS : '') + ')' + (AMBIG_WIDE ? '' : '; if lines run past the edge in a Japanese, Chinese or Korean terminal, set it to "wide"'));
   // Windows: Claude Code runs every status line (and every shell-form hook) through Git Bash
   if (process.platform === 'win32' || process.env.CCRIG_TEST_BASH_ARGV) {
     const h = gitBashHealth();
@@ -4378,6 +4471,7 @@ if (argv.includes('--demo')) {
     const now = Math.floor(Date.now() / 1000);
     fs.writeFileSync(sampleFile(demo.session_id), [
       JSON.stringify({ t: now - 150, s: 51, w: 90 }),
+      JSON.stringify({ t: now - 120, s: 54, w: 91 }),
       JSON.stringify({ t: now - 80, s: 58, w: 92 }),
       JSON.stringify({ t: now, s: 63, w: 93 }),
     ].join('\n') + '\n');
@@ -4520,7 +4614,7 @@ async function runConfigEditor() {
     if (a === 'm') { CONFIG.mode = MODES[(MODES.indexOf(CONFIG.mode) + 1) % MODES.length]; continue; }
     if (a === 'c') { CONFIG.collapsed = !isCollapsed(); continue; }
     if (a === 'y') { setStyle(CONFIG.style === 'classic' ? 'refined' : 'classic'); continue; }
-    if (a === 'r') { CONFIG.resetStyle = CONFIG.resetStyle === 'clock' ? 'relative' : 'clock'; continue; }
+    if (a === 'r') { const st = ['auto', 'clock', 'clock24', 'relative']; CONFIG.resetStyle = st[(st.indexOf(CONFIG.resetStyle) + 1) % st.length]; continue; }
     if (a === 'b') { CONFIG.sessionBoard = CONFIG.sessionBoard !== true; continue; }
     if (a === 'p') { CONFIG.boardNotify = CONFIG.boardNotify === false; continue; }
     if (a === 'd') { const steps = [15, 30, 60, 120]; CONFIG.boardDecayMinutes = steps[(steps.indexOf(Math.round(boardDecayMs() / 60000)) + 1) % steps.length]; continue; }
