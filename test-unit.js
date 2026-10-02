@@ -110,6 +110,29 @@ test('inflightAgents: Task tool_use without a tool_result is in-flight', () => {
   assert.deepStrictEqual(SL.inflightAgents('/no/such/file'), [], 'missing transcript -> empty, no throw');
 });
 
+test('inflightAgents: an incremental read after appends matches a full parse', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccbsl-unit-'));
+  const tp = path.join(dir, 't.jsonl');
+  const use = (id, d, name = 'Task') => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input: { description: d } }] } }) + '\n';
+  const res = (id) => JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } }) + '\n';
+  const same = (label) => assert.deepStrictEqual(SL.inflightAgents(tp), SL.computeInflightAgents(tp), label);
+  fs.writeFileSync(tp, use('a', 'alpha') + use('b', 'beta') + res('a'));
+  same('first read (full parse)');
+  fs.appendFileSync(tp, use('c', 'gamma', 'Agent') + JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'x', name: 'Bash', input: {} }] } }) + '\n');
+  same('after an append: a new agent opens, a non-agent tool is ignored');
+  fs.appendFileSync(tp, res('b') + use('d', 'delta'));
+  same('after a second append: one closes, one opens');
+  const half = res('c');
+  fs.appendFileSync(tp, half.slice(0, 20));
+  same('a half-written line is not consumed');
+  fs.appendFileSync(tp, half.slice(20));
+  same('the rest of that line lands and closes the agent');
+  assert.deepStrictEqual(SL.inflightAgents(tp).map((a) => a.desc), ['delta']);
+  fs.writeFileSync(tp, use('z', 'zeta'));
+  same('a transcript that shrank is read again from scratch');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('resumePromptFromCheckpoint: same-account vs cross-account wording', () => {
   const cp = { reason: 'session limit critical', last_request: 'ship it', todos: [
     { content: 'wrote tests', status: 'completed' }, { content: 'ship', status: 'in_progress' },

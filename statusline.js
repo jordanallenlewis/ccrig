@@ -65,10 +65,11 @@
  */
 
 'use strict';
+// fs, os and path only: child_process and tty pull in net and stream (about 3ms of a ~50ms render), so they
+// are required where a spawn or a terminal check actually happens, never at the top.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execSync } = require('child_process');
 
 const VERSION = '1.9.0';
 
@@ -353,6 +354,20 @@ function truncAnsi(s, w) {
   return out + '\x1b[0m…';
 }
 
+// Print the render (or a hook's answer) in one synchronous write. To a pipe, socket or file it goes straight
+// through fs.writeSync, which skips building process.stdout (that loads net and stream) and is finished before
+// any process.exit. A terminal keeps process.stdout, which writes Unicode correctly to a Windows console.
+function writeOut(s) {
+  const buf = Buffer.from(String(s), 'utf8');
+  let off = 0;
+  try {
+    if (!fs.fstatSync(1).isCharacterDevice()) {
+      while (off < buf.length) { const n = fs.writeSync(1, buf, off); if (!(n > 0)) break; off += n; }
+      if (off >= buf.length) return;
+    }
+  } catch (e) { if (e && e.code === 'EPIPE') return; } // the reader is gone: nothing left to tell
+  process.stdout.write(off ? buf.subarray(off) : buf);
+}
 function readFileSafe(f) { try { return fs.readFileSync(f, 'utf8'); } catch { return ''; } }
 function settingsVal(key) {
   try { return parseJsonText(readFileSafe(path.join(CFG, 'settings.json')))[key]; } catch { return undefined; }
@@ -736,17 +751,72 @@ function latestAssistantText(tp) {
 // in-flight orchestration: Task/Agent subagents whose tool_use has no matching tool_result
 // yet = running right now. Foreground Task subagents show live; Workflows ack immediately
 // (background) so they read as done here, which is correct.
-// Cached by transcript SIZE: transcripts are append-only, so an unchanged size means the
-// result is unchanged — this keeps the 768KB read off the hot path on idle refreshes.
-function inflightAgents(tp) {
-  if (!tp) return [];
+// Transcripts are append-only, so the scan is incremental: the cache keeps the open agents and the byte
+// offset it has read to, and a grown transcript costs only the bytes appended since the last render (during
+// a turn the size changes on every tool call). An unchanged size is one stat and one small read. A
+// transcript that shrank, a missing cache, or a jump bigger than the window falls back to the full tail scan.
+const AGENT_WINDOW = 786432;
+function inflightAgents(tp) { return agentScan(tp).list; }
+// { size, list }: the size rides along so the board does not stat the transcript a second time
+function agentScan(tp) {
+  if (!tp) return { size: 0, list: [] };
   let size;
-  try { size = fs.statSync(tp).size; } catch { return []; }
+  try { size = fs.statSync(tp).size; } catch { return { size: 0, list: [] }; }
   const cacheFile = path.join(cacheDir(), 'ccbsl-agents-' + strHash(tp) + '.json');
-  try { const c = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); if (c && c.size === size && Array.isArray(c.list)) return c.list; } catch {}
-  const list = computeInflightAgents(tp);
-  try { fs.writeFileSync(cacheFile, JSON.stringify({ size, list }), { mode: 0o600 }); } catch {}
-  return list;
+  let c = null;
+  try { c = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); } catch {}
+  const usable = !!c && c.v === 2 && Array.isArray(c.open) && Number.isInteger(c.offset) && Number.isInteger(c.size);
+  const listOf = (open) => [...open.entries()].map(([id, a]) => ({ id, desc: a.desc }));
+  if (usable && c.size === size) return { size, list: c.open.map((a) => ({ id: String(a[0]), desc: String(a[1]) })) };
+  let open = new Map(), offset;
+  if (usable && c.size < size && c.offset <= size && size - c.offset <= AGENT_WINDOW) {
+    for (const a of c.open) if (Array.isArray(a)) open.set(String(a[0]), { desc: String(a[1]), at: Number(a[2]) || 0 });
+    offset = c.offset + applyAgentLines(open, readRange(tp, c.offset, size), c.offset);
+  } else {
+    const start = Math.max(0, size - AGENT_WINDOW);
+    offset = start + applyAgentLines(open, readRange(tp, start, size), start);
+  }
+  // keep the same window a full scan would: an agent started more than the window back has scrolled out
+  for (const [id, a] of open) if (a.at < size - AGENT_WINDOW) open.delete(id);
+  try { fs.writeFileSync(cacheFile, JSON.stringify({ v: 2, size, offset, open: [...open.entries()].map(([id, a]) => [id, a.desc, a.at]) }), { mode: 0o600 }); } catch {}
+  return { size, list: listOf(open) };
+}
+function readRange(tp, start, end) {
+  let fd;
+  try {
+    fd = fs.openSync(tp, 'r');
+    const buf = Buffer.alloc(Math.max(0, end - start));
+    return buf.subarray(0, fs.readSync(fd, buf, 0, buf.length, start));
+  } catch { return Buffer.alloc(0); }
+  finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch {} } }
+}
+// Fold transcript lines into `open` (id -> { desc, at }). Returns the bytes through the last newline: a line
+// still being written is parsed if it is already whole JSON, but read again next time, so nothing is lost and
+// an agent seen twice keeps its first entry.
+function applyAgentLines(open, buf, base) {
+  let start = 0, consumed = 0, tool = buf.indexOf('"tool_');
+  while (start < buf.length) {
+    const nl = buf.indexOf(10, start);
+    const end = nl === -1 ? buf.length : nl;
+    // only a line with a tool_use or tool_result in it can open or close an agent; skip parsing the rest
+    if (tool !== -1 && tool < start) tool = buf.indexOf('"tool_', start);
+    if (end > start && tool !== -1 && tool < end) {
+      let o = null; try { o = JSON.parse(buf.toString('utf8', start, end)); } catch {}
+      const cnt = o && o.message && o.message.content;
+      if (Array.isArray(cnt)) {
+        for (const b of cnt) {
+          if (!b || typeof b !== 'object') continue;
+          if (b.type === 'tool_result' && b.tool_use_id) open.delete(String(b.tool_use_id));
+          else if (b.type === 'tool_use' && (b.name === 'Task' || b.name === 'Agent') && b.id && !open.has(String(b.id))) {
+            open.set(String(b.id), { desc: String((b.input && (b.input.description || b.input.subagent_type)) || 'subagent'), at: base + start });
+          }
+        }
+      }
+    }
+    if (nl === -1) break;
+    start = nl + 1; consumed = start;
+  }
+  return consumed;
 }
 function computeInflightAgents(tp) {
   const lines = readTranscriptTail(tp, 786432);
@@ -768,8 +838,8 @@ function computeInflightAgents(tp) {
 }
 // 🤖 segment: how many subagents are running right now
 let DEMO_AGENTS = 0; // set by --demo to showcase the segment
-function agentsSeg(input) {
-  const n = DEMO_AGENTS || inflightAgents(input.transcript_path).length;
+function agentsSeg(list) {
+  const n = DEMO_AGENTS || list.length;
   if (!n) return '';
   return c(K.agents, (isRefined() ? '' : '🤖 ') + n + (n === 1 ? ' agent' : ' agents'));
 }
@@ -784,7 +854,8 @@ function downgradeSeg(input, live) {
   if (DEMO_DOWNGRADE) return withWas(cBold(K.red, down + DEMO_DOWNGRADE[1]), DEMO_DOWNGRADE[0]);
   const sid = input.session_id;
   // opusplan runs Opus in plan mode and Sonnet otherwise by design: leaving plan mode is no downgrade
-  if (/opusplan/i.test(String(settingsVal('model') || '')) || /opusplan/i.test(String((input.model && input.model.id) || ''))) return '';
+  // (the settings.json side of this check waits until a drop is actually seen, so a healthy render never reads it)
+  if (/opusplan/i.test(String((input.model && input.model.id) || ''))) return '';
   const cur = (input.model && (input.model.display_name || input.model.id)) || '';
   const tier = modelTier(cur);
   if (!tier || !sid || !SID_RE.test(sid)) return '';
@@ -801,6 +872,7 @@ function downgradeSeg(input, live) {
   const rl = input.rate_limits || {};
   const pctOf = (o) => (o && typeof o.used_percentage === 'number') ? o.used_percentage : 0;
   if (Math.max(pctOf(rl.five_hour), pctOf(rl.seven_day)) < 50) return '';
+  if (/opusplan/i.test(String(settingsVal('model') || ''))) return '';
   const shortName = (s) => s.split(/[\s(]/)[0];
   return withWas(c(K.yellow, down + shortName(cur)), shortName(topName));
 }
@@ -994,20 +1066,20 @@ function writeLedger(input, sPct, sReset, wPct, wReset) {
 // --- cross-session attention board: each live render publishes THIS session's state to a
 // shared dir so `--board` can show every session across worktrees/profiles. Opt-in.
 function boardDir() { return path.join(HOME, '.claude-rig-sessions'); }
-function writeBoard(input, sPct, sReset, wPct, wReset, ctx, agents) {
+// tsize, the transcript size (the render's agent scan already stat'ed it), lets --board notice that a
+// blocked session moved on, with no hook per tool call
+function writeBoard(input, sPct, sReset, wPct, wReset, ctx, agents, tsize) {
   if (CONFIG.sessionBoard !== true) return;
   const sid = input.session_id;
   if (!sid || !SID_RE.test(sid)) return;
   const cwd = inputCwd(input);
-  // transcript size: lets --board notice that a blocked session moved on, with no hook per tool call
-  let tsize = 0; try { tsize = fs.statSync(input.transcript_path).size; } catch {}
   writeJsonAtomic(path.join(boardDir(), sid + '.json'), {
     sid, cwd, project: path.basename(cwd),
     name: sessionLabel(input, cwd),
     profile: path.basename(CFG),
     model: (input.model && (input.model.display_name || input.model.id)) || '',
     session: sPct, sessionReset: sReset, weekly: wPct, weeklyReset: wReset,
-    ctx: (ctx == null ? null : ctx), agents: agents || 0, tsize, ts: Date.now(),
+    ctx: (ctx == null ? null : ctx), agents: agents || 0, tsize: tsize || 0, ts: Date.now(),
   });
 }
 
@@ -1169,12 +1241,22 @@ function cacheDir() {
   return CACHE_DIR;
 }
 function sampleFile(sid) { return path.join(cacheDir(), 'ccbsl-usage-' + strHash(sid) + '.jsonl'); }
+// the sample lines, read from disk once per process: recording a sample and both burn rates (and the mod's
+// state block) all work from this copy, which recordSample keeps in step with what it writes
+let SAMPLES = null;
+function sampleLines(sid) {
+  const file = sampleFile(sid);
+  if (SAMPLES && SAMPLES.file === file) return SAMPLES.lines;
+  let lines = [];
+  try { lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean); } catch {}
+  SAMPLES = { file, lines };
+  return lines;
+}
 function recordSample(sid, sPct, wPct) {
   if (CONFIG.forecast === false || !sid || !SID_RE.test(sid)) return;
   const now = Math.floor(Date.now() / 1000);
   const file = sampleFile(sid);
-  let lines = [];
-  try { lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean); } catch {}
+  let lines = sampleLines(sid).slice();
   // first sample for this session: sweep stale ccbsl-usage-* files (one per old session
   // accumulates in tmp otherwise). Mirrors the 14-day retention on tickets/checkpoints.
   if (!lines.length) {
@@ -1197,12 +1279,11 @@ function recordSample(sid, sPct, wPct) {
   } catch {}
   lines.push(JSON.stringify({ t: now, s: sPct == null ? null : Math.round(sPct * 10) / 10, w: wPct == null ? null : Math.round(wPct * 10) / 10 }));
   if (lines.length > 40) lines = lines.slice(-40);               // rolling window
-  try { fs.writeFileSync(file, lines.join('\n') + '\n', { mode: 0o600 }); } catch {}
+  try { fs.writeFileSync(file, lines.join('\n') + '\n', { mode: 0o600 }); SAMPLES = { file, lines }; } catch {}
 }
 // least-squares slope (%/sec) of the chosen field over the samples, or null
 function burnRate(sid, field) {
-  let lines = [];
-  try { lines = fs.readFileSync(sampleFile(sid), 'utf8').split('\n').filter(Boolean); } catch { return null; }
+  const lines = sampleLines(sid);
   const pts = [];
   for (const l of lines) { let o; try { o = JSON.parse(l); } catch { continue; } if (o && typeof o[field] === 'number') pts.push([o.t, o[field]]); }
   if (pts.length < 3) return null;
@@ -1932,9 +2013,20 @@ function markerlessClaudeDirs() {
 }
 // a short human label for a profile dir: ~/.claude -> "default", ~/.claude-personal -> "personal"
 function profileLabel(dir) { return profileLabelOf(path.basename(dir)); }
-// how many Claude profiles exist on this machine (for the auto-hide profile badge)
+// how many Claude profiles exist on this machine (for the auto-hide profile badge). Counting reads the
+// whole home dir and stats every ~/.claude* entry, so the render keeps the answer for a minute;
+// init and --uninstall drop it so a profile they touch shows up at once.
+function profileCountFile() { return path.join(cacheDir(), 'ccsl-profiles-' + strHash(HOME + '\n' + CFG) + '.json'); }
 function claudeProfileCount() {
-  try { return detectProfiles().length; } catch { return 1; }
+  const f = profileCountFile(), now = Date.now();
+  try { const c = JSON.parse(fs.readFileSync(f, 'utf8')); if (Number.isInteger(c.n) && c.at <= now && now - c.at < 60000) return c.n; } catch {}
+  let n = 1;
+  try { n = detectProfiles().length; } catch {}
+  try { fs.writeFileSync(f, JSON.stringify({ n, at: now }), { mode: 0o600 }); } catch {}
+  return n;
+}
+function forgetProfileCount() {
+  try { for (const f of fs.readdirSync(cacheDir())) if (f.startsWith('ccsl-profiles-')) { try { fs.unlinkSync(path.join(cacheDir(), f)); } catch {} } } catch {}
 }
 
 // active Claude profile badge: generic for anyone. In 'auto' it stays hidden for
@@ -2063,7 +2155,8 @@ function collectItems(input, width, gitOverride) {
   } else out.context = `${c(K.dim, 'ctx')} ${bar(ctx, 10, CONFIG.thresholds.context)} ${c(K.dim, ctx + '%')}`;
 
   out.git = gitOverride != null ? gitOverride : gitSeg(cwd);
-  out.agents = agentsSeg(input);
+  const agentInfo = DEMO_AGENTS ? { size: 0, list: [] } : agentScan(input.transcript_path); // one scan per render
+  out.agents = agentsSeg(agentInfo.list);
   out.caveman = cavemanBadge();
   out.billing = billingSeg(input);
 
@@ -2075,7 +2168,7 @@ function collectItems(input, width, gitOverride) {
   // side effects only on the LIVE render (Claude Code's stdin), never in --demo / --config / --selftest
   if (live) {
     maybeCheckUpdate(updateInfo);                  // once/day background version check (never blocks)
-    writeBoard(input, sPct, sReset, wPct, wReset, ctx, inflightAgents(input.transcript_path).length); // attention board (opt-in)
+    writeBoard(input, sPct, sReset, wPct, wReset, ctx, agentInfo.list.length, agentInfo.size); // attention board (opt-in)
     if (sPct != null || wPct != null) {
       recordSample(input.session_id, sPct, wPct);   // Feature 3: build the burn-rate history
       writeLedger(input, sPct, sReset, wPct, wReset); // Feature 4: publish this profile's usage
@@ -2292,7 +2385,7 @@ if (argv.includes('--version') || argv.includes('-v')) {
 function emitHook(obj) {
   // a pending Git Bash pause notice rides on the hook's own answer (systemMessage is shown to the user)
   if (HOOK_NOTE) obj = Object.assign({}, obj || {}, { systemMessage: HOOK_NOTE });
-  try { if (obj && Object.keys(obj).length) process.stdout.write(JSON.stringify(obj)); } catch {}
+  try { if (obj && Object.keys(obj).length) writeOut(JSON.stringify(obj)); } catch {}
   process.exit(0);
 }
 function guardVal(sid, tag) {
@@ -2902,7 +2995,7 @@ function runPurge() {
   try { fs.unlinkSync(path.join(CFG, 'statusline-error.log')); } catch {} // pure state, squarely inside purge's contract
   try { fs.unlinkSync(path.join(ledgerDir(), path.basename(CFG) + '.json')); } catch {}
   for (const d of [os.tmpdir(), cacheDir()]) { // os.tmpdir(): caches from versions before the per-user dir
-    try { for (const f of fs.readdirSync(d)) if (f.startsWith('ccbsl-usage-') || f.startsWith('ccbsl-agents-') || f.startsWith('ccsl-git-')) { try { fs.unlinkSync(path.join(d, f)); } catch {} } } catch {}
+    try { for (const f of fs.readdirSync(d)) if (f.startsWith('ccbsl-usage-') || f.startsWith('ccbsl-agents-') || f.startsWith('ccsl-git-') || f.startsWith('ccsl-profiles-')) { try { fs.unlinkSync(path.join(d, f)); } catch {} } } catch {}
   }
   rm(boardDir()); // shared session-board files (live sessions republish on their next render)
   process.stdout.write("Cleared the saved state on this machine: checkpoints, resume tickets, watchers, the update cache, this profile's ledger entry, the session board, and temporary samples.\n");
@@ -3437,6 +3530,7 @@ function runInstall() {
   const thisOnly = argv.includes('--this-profile');
   const withGuardian = !argv.includes('--no-guardian'); // guardian is on by default; --no-guardian = bar only
   const profiles = thisOnly ? [CFG] : detectProfiles();
+  forgetProfileCount(); // the profile badge counts afresh on the next render
   const results = profiles.map((d) => installStatusLineInto(d, withGuardian));
   const okd = results.filter((r) => !r.err);
   const failed = results.filter((r) => r.err);
@@ -3860,6 +3954,7 @@ function uninstallFrom(dir) {
 function runUninstall() {
   const thisOnly = argv.includes('--this-profile');
   const profiles = thisOnly ? [CFG] : detectProfiles();
+  forgetProfileCount();
   const results = profiles.map(uninstallFrom);
   const errs = results.filter((r) => r.err);
   let touched = 0;
@@ -4269,8 +4364,10 @@ async function runConfigEditor() {
 // ===========================================================================
 if (!argv.includes('--config')) {
   // tty.isatty, not process.stdin.isTTY: touching process.stdin opens fd 0 non-blocking, and the blocking
-  // read below then fails with EAGAIN if Claude Code has not written the JSON yet (the bar renders `{}`)
-  if (require('tty').isatty(0)) {
+  // read below then fails with EAGAIN if Claude Code has not written the JSON yet (the bar renders `{}`).
+  // A pipe or a file is never a terminal, so only a character device pays for loading tty.
+  let stdin0 = null; try { stdin0 = fs.fstatSync(0); } catch {}
+  if ((!stdin0 || stdin0.isCharacterDevice()) && require('tty').isatty(0)) {
     // a human ran this bare in a terminal: don't block on stdin, show help
     process.stdout.write(helpText());
     process.exit(0);
@@ -4289,8 +4386,8 @@ if (!argv.includes('--config')) {
       const w = getWidth() - CONFIG.reserveCols;
       const segs = isCollapsed() ? collapsedSummary(collectItems(input, w), w, false) : collectSegments(input, w);
       writeModMarker(input);
-      process.stdout.write(JSON.stringify({ v: VERSION, segments: segs, widths: segs.map(dispWidth), sep: dispWidth(SEP), state: modState(input) }));
-    } else process.stdout.write(render(input, getWidth() - CONFIG.reserveCols));
+      writeOut(JSON.stringify({ v: VERSION, segments: segs, widths: segs.map(dispWidth), sep: dispWidth(SEP), state: modState(input) }));
+    } else writeOut(render(input, getWidth() - CONFIG.reserveCols));
   } catch (e) {
     // the status line must never die silently: leave a trail and a next step
     try { fs.writeFileSync(path.join(CFG, 'statusline-error.log'), new Date().toISOString() + '\n' + (e.stack || e.message) + '\n'); } catch {}

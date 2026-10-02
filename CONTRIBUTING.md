@@ -87,7 +87,14 @@ hot path. Measured on a recent laptop:
 
 The rule that keeps it fast: **no new per-render work above about 1ms without a cache,
 and every cache keyed by something cheap (a file mtime or size).** Do not add network
-calls or un-cached subprocess spawns to the render.
+calls or un-cached subprocess spawns to the render, and do not `require` `child_process`
+or `tty` at the top of the file (they load `net` and `stream`, about 3ms).
+
+The `perf:` tests in `test.js` hold the line: a warm render starts no process, stats the
+transcript once, reads the burn-rate samples once, never reads `settings.json`, and stays
+within 22 file system calls (counted by a preload, Node's own module loading included);
+during a turn it reads only the bytes appended to the transcript. If a change needs more,
+raise the number in the test and say why in the pull request.
 
 To benchmark a change, run the script in a throwaway sandbox so it never touches your
 real `~/.claude` or temp dir (the same isolation the tests use):
