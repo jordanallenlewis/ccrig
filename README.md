@@ -3,7 +3,9 @@
 [![npm version](https://img.shields.io/npm/v/ccrig.svg)](https://www.npmjs.com/package/ccrig)
 [![license: MIT](https://img.shields.io/npm/l/ccrig.svg)](LICENSE)
 
-A status line and usage-limit guardian for [Claude Code](https://claude.com/claude-code). One Node file, zero dependencies. The render makes no network calls: everything comes from the JSON Claude Code already hands the status line. (The only network anywhere is an optional once-a-day update check; set `"updateCheck": false` to turn it off.)
+**See your Claude plan budget while you work, and keep the thread when you hit the wall.**
+
+CCRig is a status line and usage-limit guardian for [Claude Code](https://claude.com/claude-code). It shows your 5-hour and weekly plan usage with reset times, warns before a limit, saves where you were when you reach one, and can pick the session back up at the reset on its own.
 
 ```
 ▾ ccrig ───────────────────────────────────────────────────────────────────────────────────────
@@ -11,7 +13,9 @@ A status line and usage-limit guardian for [Claude Code](https://claude.com/clau
 ctx ━━━━────── 42% │ session ━━━━━━╸─── 63% ↺ 8:53a │ weekly ━━━━━━━━╸─ 88% ↺ Tue 6:53a
 ```
 
-Preview it with sample data before installing: `npx ccrig --demo` (add `--cols 80` to size a screenshot).
+Preview it with sample data before installing: `npx ccrig --demo` (add `--cols 80` to size a screenshot). Fold it to one line any time with `/ccrig:toggle`.
+
+One Node file, zero dependencies, and no network calls while it draws: everything comes from the JSON Claude Code already hands the status line. (The only network anywhere is an optional once-a-day update check; `"updateCheck": false` turns it off.)
 
 ## Install
 
@@ -20,7 +24,15 @@ npm install -g ccrig
 ccrig init
 ```
 
-`ccrig init` wires the status line **and the guardian** into every Claude profile you have, backing up each `settings.json` first. Restart Claude Code once and the bar is live. Update later with `npm install -g ccrig@latest` (or set `"autoUpdate": true` and CCRig installs new releases itself, in the background), and run `ccrig --doctor` if anything looks off. Want just the bar? `ccrig init --no-guardian`.
+`ccrig init` wires the status line **and the guardian** into every Claude profile you have, backing up each `settings.json` first. Restart Claude Code once and the bar is live; the usage meters appear after your first reply (that is when Claude Code first sends them).
+
+| Install | Gets you | Pick it if |
+|---|---|---|
+| npm (`ccrig init`) | the bar under the prompt, the guardian, the CLI, the detached auto-resume watcher | you want the full tool (most people) |
+| [the Claude Code mod](#or-install-it-as-a-claude-code-mod) | toasts before a limit, usage on the spinner, `/ccrig` with no Claude turn, resume in the same window | you also want those, or want no npm and no `settings.json` edits |
+| [the single file](#install) (below) | the same as npm | you do not use npm |
+
+The npm install and the mod work together without doubling anything up. Update later with `npm install -g ccrig@latest` (or set `"autoUpdate": true` and CCRig installs new releases itself, in the background), and run `ccrig --doctor` if anything looks off. Want just the bar? `ccrig init --no-guardian`.
 
 No npm? Grab the single file. It needs Node 18 or newer on your PATH (the native Claude Code installer does not include Node). It goes in its own folder, so it never overwrites a `~/.claude/statusline.js` of your own.
 
@@ -58,7 +70,7 @@ Run `/reload-plugins` (or restart) and you get:
 
 The band (`auto`, `always`, `alerts`, `off`), the spinner readout and the toasts are the ccrig rows in `/config`, and a change there applies at once. Everything else (segments, mode, thresholds, autopilot) lives in the same `~/.ccrig/statusline.config.json` the npm install reads, so `/ccrig mode minimal` changes both.
 
-**Which install?** For the bar under the prompt, the shell CLI and the detached auto-resume watcher, use npm (`ccrig init`); add the mod for the toasts, the spinner readout, the panes and an immediate `/ccrig`. For no npm and no `settings.json` edits, use the mod alone. Both together never double up: `ccrig --doctor` shows whether the mod is active.
+Both installs together never double up: `ccrig --doctor` shows whether the mod is active.
 
 **Updates** come through Claude Code: `/plugin update ccrig@ccrig` installs the latest release tag (the marketplace never serves unreleased work from `main`). The mod's copy of `statusline.js` never updates itself.
 
@@ -95,6 +107,8 @@ ccrig --autopilot off             # bar only, no guardian side effects
 ```
 
 Restart Claude Code once so the hooks load. What it honestly can and cannot do: auto-resume needs a Claude.ai Pro/Max plan (Claude Code sends rate-limit data only to subscribers) and a machine that is awake at reset time. It watches the 5-hour and 7-day windows Claude Code reports; a per-model weekly cap (an Opus-only limit, say) is not in that data, so it gets no warning ahead of time, but hitting it still ends the turn with a usage-limit error, which the `StopFailure` hook catches. Only a session that has drawn the bar is relaunched: a `claude -p` script that hits a limit gets the resume ticket, never an unattended relaunch. From the npm install it cannot reach into your open terminal, so it launches a fresh headless run and reconciles via the git snapshot; nothing is lost, because the transcript is continuous. As a [Claude Code mod](#or-install-it-as-a-claude-code-mod) in an open terminal, the resume happens in that session at the reset (no headless relaunch); close the terminal and the detached watcher takes over as before. (If an auto-resume fires while the old terminal is still parked at the limit, close that one rather than typing into it, or the two will fork the same session.) If usage recovers on its own before the reset, because you upgraded your plan or bought extra usage, the guardian notices and stands down. The headless relaunch cannot answer permission prompts; if one blocks it you can set `"autopilotBypassPermissions": true`, off by default because it is a real skip-permission-checks step. It applies only to the guardian's own unattended relaunch, never your interactive session. Nothing runs as a hidden daemon: `ccrig --status` lists armed watchers and `ccrig --disarm` stops them.
+
+Keep-working applies to every session the hook runs in, including a `claude -p` script: with todos still open, its Stop hook asks for another turn (up to its limit). Turn it off for scripts with `--keep-working off`, or run them under a profile without the guardian. Cross-profile failover is for people who hold two plans of their own (work and personal, say); whether continuing on another account is allowed is between you and your plan's terms, which is why it is off unless you turn it on.
 
 ## The session board (opt-in)
 

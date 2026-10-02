@@ -62,6 +62,8 @@
   "style": "refined",
   "_rule": "refined only: the full-width line above the bar that sets it apart from the transcript; it turns amber, then red, near a limit. false hides it and puts a ▾ at the start of the first line instead.",
   "rule": true,
+  "_glyphs": "unicode (default) | ascii: ASCII stand-ins (= - | ! @ *) for a terminal font without box-drawing glyphs, such as the legacy Windows console. CCRIG_GLYPHS sets it for one terminal.",
+  "glyphs": "unicode",
   "_collapsed": "Fold the CCRig section to one summary line. Toggle it with `ccrig collapse | expand | toggle` or /ccrig:toggle inside a session.",
   "collapsed": false,
   "_color": "Omit a key to keep the active style's palette. These are the refined defaults; classic uses its own.",
