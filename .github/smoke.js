@@ -31,6 +31,8 @@ function envFor(home, extra) {
   if (extra && extra.CCBSL_NO_ACT === null) delete e.CCBSL_NO_ACT;
   return e;
 }
+// one file, however the OS spells it (macOS temp dirs are /var/... and /private/var/...)
+function sameFile(a, b) { try { return fs.realpathSync(a) === fs.realpathSync(b); } catch { return a === b; } }
 function node(args, opts) { return spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 60000, ...opts }); }
 function sh(cmd, opts) { return spawnSync(cmd, { shell: true, encoding: 'utf8', timeout: 180000, ...opts }); }
 const both = (r) => ((r.stdout || '') + (r.stderr || '') + (r.error ? '\n[spawn error] ' + r.error.message : '')).trim();
@@ -132,7 +134,7 @@ try {
   const sp = path.join(home, '.claude', 'settings.json');
   let s = readJson(sp);
   const hooks = allCommands(s).filter((c) => c.ev !== 'statusLine');
-  ((hooks.length === 7 && hooks.every((c) => c.args && c.args[0] === js && c.args[1] === '--hook')) ? PASS : FAIL)('exec-form hooks name node and pass the script as args', JSON.stringify(hooks).slice(0, 1500));
+  ((hooks.length === 7 && hooks.every((c) => c.args && sameFile(c.args[0], js) && c.args[1] === '--hook')) ? PASS : FAIL)('exec-form hooks name node and pass the script as args', JSON.stringify(hooks).slice(0, 1500));
   execCommands('exec-form', { hooks: s.hooks }, env);
   r = node([js, '--uninstall'], { env });
   s = readJson(sp);
