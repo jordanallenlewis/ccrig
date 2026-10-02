@@ -113,7 +113,7 @@ const DEFAULTS = {
     agents: true,       // 🤖 count of subagents/Task running right now (workflow + subagent support)
     git: true,          // 🌿 branch ●uncommitted ↑unpushed ↓unpulled
     caveman: true,      // [CAVEMAN] badge if the caveman plugin is active
-    billing: true,      // 💳 sub (Claude.ai subscription) vs api (pay-per-token)
+    billing: true,      // api when a key bills per token; refined shows sub only with "always" (classic: sub or api)
     session: true,      // 5-hour plan-usage bar + reset time
     weekly: true,       // 7-day plan-usage bar + reset time
     forecast: true,     // ⏳ predictive time-to-limit + pace verdict (Feature 3), shown only when it has something to say
@@ -306,8 +306,11 @@ let CONFIG = loadConfig();
 const HOME = homeDirSafe();
 const CFG = process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
 const K = CONFIG.color;
-const c = (n, s) => `\x1b[38;5;${n}m${s}\x1b[0m`;
-const cBold = (n, s) => `\x1b[1m\x1b[38;5;${n}m${s}\x1b[0m`;
+// NO_COLOR (https://no-color.org): no color at all. Bold stays, it is not a color, and the refined look
+// still reads without color: heavy ━ against a thin ─ track, and the ▲ on a window near its limit.
+const NOCOLOR = !!process.env.NO_COLOR;
+const c = (n, s) => (NOCOLOR ? String(s) : `\x1b[38;5;${n}m${s}\x1b[0m`);
+const cBold = (n, s) => (NOCOLOR ? `\x1b[1m${s}\x1b[0m` : `\x1b[1m\x1b[38;5;${n}m${s}\x1b[0m`);
 // the refined look (default) vs the pre-1.9 'classic' one; read live so --config can preview both
 function isRefined() { return CONFIG.style !== 'classic'; }
 // switch the look live (the --config preview): colors still on the old palette move to the new one
@@ -424,7 +427,8 @@ function wrapSegments(segs, width) {
 // last resort is a clean '…' cut: no line ever runs past the terminal edge.
 const SEG_GROUP = { context: 'meter', session: 'meter', weekly: 'meter', forecast: 'meter', resumeHint: 'alert' };
 function groupOf(name) { return SEG_GROUP[name] || 'id'; }
-function layoutItems(items, width) {
+// `indent`: cells the first line gives up (the fold glyph when there is no rule line above the bar)
+function layoutItems(items, width, indent) {
   const SEP = sepStr(), sepW = dispWidth(SEP);
   const groups = [];
   for (const g of ['id', 'meter', 'alert']) {
@@ -435,6 +439,7 @@ function layoutItems(items, width) {
   const rowWidth = (strs) => strs.reduce((n, s, i) => n + dispWidth(s) + (i ? sepW : 0), 0);
   const lines = [];
   let cur = [], curW = 0;
+  const lim = () => (lines.length ? width : width - (indent || 0));
   const flush = () => { if (cur.length) lines.push(cur.join(SEP)); cur = []; curW = 0; };
   // how many lines a run of segments takes when packed greedily
   const lineCount = (strs) => { let n = 1, w = 0; strs.forEach((s, i) => { const sw = dispWidth(s); if (i && w + sepW + sw > width) { n++; w = sw; } else w += (i ? sepW : 0) + sw; }); return n; };
@@ -442,9 +447,10 @@ function layoutItems(items, width) {
     const maxLevel = Math.max(...members.map((it) => it.v.length - 1));
     // one size for the whole group (no full meter beside a shrunken one). Each step down in size
     // must buy back more than half a line, so a wide terminal keeps its bars and a narrow one gets
-    // the compact forms. A segment wider than the terminal even at its smallest is cut.
+    // the compact forms. A segment wider than the terminal even at its smallest is cut. Below 100
+    // columns the meters start at their compact form, so a narrower terminal never gets longer labels.
     let strs = null, best = Infinity, bestCost = Infinity;
-    for (let lv = 0; lv <= maxLevel; lv++) {
+    for (let lv = (g === 'meter' && width < 100 ? Math.min(1, maxLevel) : 0); lv <= maxLevel; lv++) {
       const cand = members.map((it) => pick(it, lv));
       if (cand.some((s) => dispWidth(s) > width)) continue;
       const n = lineCount(cand), cost = n + 0.6 * lv;
@@ -454,20 +460,26 @@ function layoutItems(items, width) {
     const together = best === 1;
     const gw = rowWidth(strs);
     // the alert always gets its own line; another group joins the current line only if it fits whole
-    if (g === 'alert' || (cur.length && (!together || curW + sepW + gw > width))) flush();
+    if (g === 'alert' || (cur.length && (!together || curW + sepW + gw > lim()))) flush();
     for (const s of strs) {
       const sw = dispWidth(s);
-      if (cur.length && curW + sepW + sw > width) flush();
+      if (cur.length && curW + sepW + sw > lim()) flush();
       curW += (cur.length ? sepW : 0) + sw; cur.push(s);
     }
     if (g === 'alert') flush();
   }
   flush();
+  // a lone segment that fit the full width can still be wider than the indented first line
+  if (indent && lines.length && dispWidth(lines[0]) > width - indent) lines[0] = truncAnsi(lines[0], width - indent);
   return lines;
 }
+// the color for how close a limit is: the rule line, and the fold glyph that stands in for it
+function levelTint(level, quiet) { return level === 'critical' ? K.red : level === 'warn' ? K.yellow : quiet; }
+// with "rule": false the section still shows it can fold: ▾ as the first cell of the first line
+function foldMark(level) { return c(levelTint(level, K.dim), '▾') + ' '; }
 // the rule that sets the bar apart from the transcript above it, tinted by how close a limit is
 function ruleLine(width, level) {
-  const col = level === 'critical' ? K.red : level === 'warn' ? K.yellow : K.rule;
+  const col = levelTint(level, K.rule);
   const label = '▾ ccrig ';
   if (width < dispWidth(label) + 4) return c(col, '─'.repeat(Math.max(1, width)));
   return c(K.dim, label) + c(col, '─'.repeat(width - dispWidth(label)));
@@ -563,8 +575,10 @@ const usageSeg = (label, pct, reset) => {
   const val = near ? cBold(K.red, Math.round(pct) + '%') : c(K.dim, Math.round(pct) + '%');
   return `${lbl} ${bar(pct, 8, t, warnAtOf(t))} ${val}` + (reset ? c(K.dim, ' ↺' + fmtReset(reset)) : '');
 };
-// refined usage meter, widest first: "session ━━━━╸───── 42% ↺ 3:10p" ... "5h 42%"
-function usageVariants(label, pct, reset) {
+// refined usage meter, widest first: "session ━━━━╸───── 42% ↺ 3:10p" ... "5h 42%". `saved`: this is the
+// window the guardian is checkpointing near its limit, which the meter says (" · saved") instead of a
+// separate alert line that would only repeat it.
+function usageVariants(label, pct, reset, saved) {
   const t = CONFIG.thresholds.usage, warnAt = warnAtOf(t);
   const short = label === 'session' ? '5h' : '7d';
   // the reset already passed: the window refreshed, and the stale number would only alarm
@@ -573,8 +587,9 @@ function usageVariants(label, pct, reset) {
   const L = (s) => (near ? cBold(K.red, warnGlyph() + ' ' + s) : lbl(s));
   const P = near ? cBold(K.red, pctText(pct)) : pctText(pct);
   const R = reset ? lbl(' ↺ ' + fmtReset(reset)) : '';
+  const S = near && saved ? lbl(' · saved') : '';
   const col = levelColor(pct, t, warnAt);
-  return [`${L(label)} ${meter(pct, 10, col)} ${P}${R}`, `${L(short)} ${meter(pct, 6, col)} ${P}${R}`, `${L(short)} ${P}${R}`, `${L(short)} ${P}`];
+  return [`${L(label)} ${meter(pct, 10, col)} ${P}${R}${S}`, `${L(short)} ${meter(pct, 6, col)} ${P}${R}${S}`, `${L(short)} ${P}${R}`, `${L(short)} ${P}`];
 }
 // At >= thresholds.usage.critical (default 95%), drop a resume ticket: a tiny file
 // with the exact command to reopen THIS session after the limit resets. Claude Code
@@ -1497,6 +1512,9 @@ function resumeHintSeg(input, sPct, wPct, sReset, wReset, live) {
     if (CONFIG.resumeTickets !== false) writeResumeTicket(input, pct, which, reset);
     maybeNearCheckpoint(input, which, reset);
   }
+  // refined: the meter already says it (the ▲, the number in red, and " · saved"), so no line of its own;
+  // the line comes back at critical, where it names the ticket and the command
+  if (isRefined()) return '';
   // "auto-saved" only when the guardian really saves here (on, with a session id to key it by)
   const saves = cfgAutopilot() !== 'off' && input.session_id && SID_RE.test(input.session_id);
   const head = cBold(K.red, warnGlyph() + ' near limit');
@@ -1618,7 +1636,10 @@ function updateSeg(info) {
     const stale = info && (info.lastSuccessAt != null ? info.lastSuccessAt : info.checkedAt);
     if (stale != null && (Date.now() - stale) > 30 * 86400 * 1000) return '';
   }
-  return cBold(K.update, (isRefined() ? '↑ v' : '⬆ v') + latest) + c(K.dim, installKind() === 'mod' ? ' /plugin update' : ' update');
+  const how = c(K.dim, installKind() === 'mod' ? ' /plugin update' : ' update');
+  // refined: one colored ↑ on a dim line; a new version is news, not an alarm louder than a model drop
+  if (isRefined()) return c(K.update, '↑') + c(K.dim, ' v' + latest) + how;
+  return cBold(K.update, '⬆ v' + latest) + how;
 }
 // once-a-day, spawn the detached background check; never blocks the render. Takes the
 // cache already read this render (no second read on the hot path).
@@ -2007,7 +2028,8 @@ function cavemanBadge() {
   let mode = readFileSafe(flag).slice(0, 64).replace(/[\r\n]/g, '').toLowerCase().replace(/[^a-z0-9-]/g, '');
   const ok = ['off', 'lite', 'full', 'ultra', 'wenyan-lite', 'wenyan', 'wenyan-full', 'wenyan-ultra', 'commit', 'review', 'compress'];
   if (!ok.includes(mode) || mode === 'off') return '';
-  let badge = (mode === 'full') ? '[CAVEMAN]' : `[CAVEMAN:${mode.toUpperCase()}]`;
+  // refined: lowercase and dim like every other label on the bar; classic keeps the bracketed caps
+  let badge = isRefined() ? (mode === 'full' ? 'caveman' : 'caveman:' + mode) : (mode === 'full') ? '[CAVEMAN]' : `[CAVEMAN:${mode.toUpperCase()}]`;
   const sfile = path.join(CFG, '.caveman-statusline-suffix');
   try {
     if (fs.existsSync(sfile) && !fs.lstatSync(sfile).isSymbolicLink()) {
@@ -2015,7 +2037,7 @@ function cavemanBadge() {
       if (sfx) badge += ' ' + sfx;
     }
   } catch {}
-  return c(K.caveman, badge);
+  return c(isRefined() ? K.dim : K.caveman, badge);
 }
 
 // dirs that MATCH the ~/.claude-* profile shape but are OUR OWN state, never profiles.
@@ -2096,12 +2118,19 @@ function profileSeg() {
 
 // billing path: `rate_limits` is sent ONLY to Claude.ai subscribers (Pro/Max);
 // an API key means pay-per-token. Unknown (e.g. before the first response) → hide.
+// Refined: the segment's job is to say when a key is billing you per token, so it shows `api` in the
+// plain text color (a key is not a hazard), and `sub` only with "billing": "always" (on every render it
+// would just tell a subscriber they are one). Classic keeps both, as it always has.
 function billingSeg(input) {
   const rl = input.rate_limits || {};
   const hasSub = (rl.five_hour && typeof rl.five_hour.used_percentage === 'number') ||
                  (rl.seven_day && typeof rl.seven_day.used_percentage === 'number');
-  if (hasSub) return isRefined() ? c(K.dim, 'sub') : c(K.green, '💳 sub');
-  if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) return isRefined() ? c(K.yellow, 'api') : c(K.yellow, '💳 api');
+  if (!isRefined()) {
+    if (hasSub) return c(K.green, '💳 sub');
+    return (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) ? c(K.yellow, '💳 api') : '';
+  }
+  if (hasSub) return CONFIG.show.billing === 'always' ? [lbl('billing ') + 'sub', 'sub'] : '';
+  if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) return [lbl('billing ') + 'api', 'api'];
   return '';
 }
 
@@ -2197,7 +2226,8 @@ function collectItems(input, width, gitOverride) {
 
   const flags = [];
   if (input.fast_mode) flags.push(c(K.flag, 'fast'));
-  if (input.thinking && input.thinking.enabled === false) flags.push(c(K.yellow, 'no-think'));
+  // thinking off is a choice the user made, not a caution: dim in refined
+  if (input.thinking && input.thinking.enabled === false) flags.push(c(R ? K.dim : K.yellow, 'no-think'));
   out.flags = flags.join(' ');
 
   const ctx = contextPct(input);
@@ -2228,8 +2258,15 @@ function collectItems(input, width, gitOverride) {
       writeLedger(input, sPct, sReset, wPct, wReset); // Feature 4: publish this profile's usage
     }
   }
+  // the window the guardian checkpoints in the warn band (session first), named on its meter; at critical
+  // the alert line says it instead
+  const tu = CONFIG.thresholds.usage, warnAt = warnAtOf(tu), critAt = tu.critical != null ? tu.critical : 98;
+  const inBand = (p, r) => p != null && p >= Math.min(warnAt, critAt) && windowActive(r);
+  const anyCrit = (inBand(sPct, sReset) && sPct >= critAt) || (inBand(wPct, wReset) && wPct >= critAt);
+  const saves = cfgAutopilot() !== 'off' && typeof input.session_id === 'string' && SID_RE.test(input.session_id);
+  const savedWin = saves && !anyCrit ? (inBand(sPct, sReset) ? 'session' : inBand(wPct, wReset) ? 'weekly' : '') : '';
   // a window whose reset already passed has refreshed; its last number is stale, so it never alarms
-  const useSeg = (label, pct, reset) => (pct == null ? '' : R ? usageVariants(label, pct, reset)
+  const useSeg = (label, pct, reset) => (pct == null ? '' : R ? usageVariants(label, pct, reset, savedWin === label)
     : (reset != null && !windowActive(reset)) ? c(K.dim, label + ' ↺now') : usageSeg(label, pct, reset));
   out.session = useSeg('session', sPct, sReset);
   out.weekly = useSeg('weekly', wPct, wReset);
@@ -2250,18 +2287,24 @@ function collectItems(input, width, gitOverride) {
   out.sessionName = name ? c(K.dim, dispWidth(name) > 28 ? padCell(name, 28).trimEnd() : name) : '';
 
   // how close the nearest ACTIVE window is to its limit: tints the refined rule line
-  const t = CONFIG.thresholds.usage, critAt = t.critical != null ? t.critical : 98;
   const hot = Math.max(...[[sPct, sReset], [wPct, wReset]].map(([p, r]) => (p != null && windowActive(r) ? p : 0)));
-  const level = hot >= critAt ? 'critical' : hot >= warnAtOf(t) ? 'warn' : 'ok';
+  const level = hot >= critAt ? 'critical' : hot >= warnAt ? 'warn' : 'ok';
 
   const order = Array.isArray(CONFIG.order) ? CONFIG.order : DEFAULT_ORDER;
   const mode = CONFIG.mode || 'normal';
+  // refined minimal keeps the plan budget (the reason to install) and drops its bars instead: every
+  // segment at its smallest form, so it is "5h 63% · 7d 21%", not no usage at all
+  const keep = mode === 'minimal' && R ? MINIMAL_KEEP.concat(['session', 'weekly']) : MINIMAL_KEEP;
   const items = order.filter((n) => {
     if (!out[n] || (Array.isArray(out[n]) && !out[n].length)) return false; // no content -> never show
-    if (mode === 'minimal') return MINIMAL_KEEP.includes(n); // quiet: essentials only (+ the ⚠ hint)
+    if (mode === 'minimal') return keep.includes(n);         // quiet: essentials only (+ the ⚠ hint)
     if (mode === 'expanded') return true;                    // everything with content, incl. cost + name
     return S[n];                                             // normal: honor the per-segment show flags
-  }).map((n) => ({ name: n, v: Array.isArray(out[n]) ? out[n] : [out[n]] }));
+  }).map((n) => {
+    const v = Array.isArray(out[n]) ? out[n] : [out[n]];
+    // the limit alert keeps every form: it is the one line minimal must never cut down to a bare head
+    return { name: n, v: mode === 'minimal' && R && groupOf(n) !== 'alert' ? [v[v.length - 1]] : v };
+  });
   return { items, level, stats: { folder, model, ctx, sPct, wPct, sReset, wReset } };
 }
 // the segments as plain strings (each at its widest), for the mod and the tests
@@ -2289,7 +2332,7 @@ function collapsedSummary(r, width, withFill) {
     pct('5h', stats.sPct, stats.sReset),
     pct('7d', stats.wPct, stats.wReset),
   ].filter(Boolean);
-  const ruleCol = level === 'critical' ? K.red : level === 'warn' ? K.yellow : K.rule;
+  const ruleCol = levelTint(level, K.rule);
   const head = isRefined() ? c(K.dim, '▸ ccrig') : c(K.dim, '▸');
   const join = (ps) => head + (ps.length ? '  ' + ps.join(c(K.dim, ' · ')) : '');
   let keep = parts.slice();
@@ -2311,10 +2354,14 @@ function render(input, width, gitOverride) {
   if (isCollapsed()) return collapsedSummary(r, width, true).join('\n');
   const { items, level } = r;
   if (!isRefined()) return wrapSegments(items.map((it) => it.v[0]), width);
-  const lines = layoutItems(items, width);
   // the rule sets the bar apart from the transcript above it (and tints as a limit nears); its
-  // "▾ ccrig" marks the section as one you can fold (ccrig collapse, or /ccrig:toggle in a session)
-  if (CONFIG.rule !== false && lines.length) lines.unshift(ruleLine(width, level));
+  // "▾ ccrig" marks the section as one you can fold (ccrig collapse, or /ccrig:toggle in a session).
+  // With the rule off, a tinted ▾ at the start of the first line keeps both cues.
+  const rule = CONFIG.rule !== false;
+  const lines = layoutItems(items, width, rule ? 0 : 2);
+  if (!lines.length) return '';
+  if (rule) lines.unshift(ruleLine(width, level));
+  else lines[0] = foldMark(level) + lines[0];
   return lines.join('\n');
 }
 

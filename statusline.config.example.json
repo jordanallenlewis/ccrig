@@ -58,7 +58,7 @@
   "profileLabels": {},
   "_style": "refined (default): a rule line above the bar, text labels, thin meters, color only where it means something | classic: the pre-1.9 look (emoji icons, block bars). CCRIG_STYLE=classic overrides it for one terminal.",
   "style": "refined",
-  "_rule": "refined only: the full-width line above the bar that sets it apart from the transcript; it turns amber, then red, near a limit. false hides it.",
+  "_rule": "refined only: the full-width line above the bar that sets it apart from the transcript; it turns amber, then red, near a limit. false hides it and puts a ▾ at the start of the first line instead.",
   "rule": true,
   "_collapsed": "Fold the CCRig section to one summary line. Toggle it with `ccrig collapse | expand | toggle` or /ccrig:toggle inside a session.",
   "collapsed": false,

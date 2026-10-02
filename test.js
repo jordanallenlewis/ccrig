@@ -3531,15 +3531,26 @@ test('refined: a reset later this week reads as a weekday', () => {
   assert.match(out, /weekly \S+ 10% ↺ (Sun|Mon|Tue|Wed|Thu|Fri|Sat) \d{1,2}:\d\d[ap]/);
 });
 
-test('refined: text labels, no emoji; the limit alert gets its own line', () => {
+test('refined: text labels, no emoji; the limit alert gets its own line at critical', () => {
   const sb = sandbox();
-  const input = fullInput({ rate_limits: { five_hour: { used_percentage: 92, resets_at: R_NOW() + 900 } } });
+  const input = fullInput({ rate_limits: { five_hour: { used_percentage: 96, resets_at: R_NOW() + 900 } } });
   const out = strip(render(input, { env: R_ENV(sb), cols: '200' }).out);
   assert.ok(!/[\u{1F300}-\u{1FAFF}]|⚡|★/u.test(out), 'no emoji icons: ' + out);
   assert.match(out, /effort high/);
   assert.match(out, /Opus 4\.8 1M/);
   const lines = out.split('\n');
-  assert.match(lines[lines.length - 1], /^▲ near limit/, 'alert on its own last line');
+  assert.match(lines[lines.length - 1], /^▲ limit imminent/, 'alert on its own last line');
+});
+
+test('refined: at warn the meter says it all, with no alert line repeating it', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir); // its own config: earlier tests save autopilot off beside the shared script
+  const out = strip(render(fullInput({ rate_limits: { five_hour: { used_percentage: 92, resets_at: R_NOW() + 900 } } }), { env: R_ENV(sb), cols: '200', script }).out);
+  const lines = out.split('\n');
+  assert.ok(!/near limit/.test(out), 'no "near limit" line: ' + out);
+  assert.match(lines[lines.length - 1], /▲ session \S+ 92% ↺ \S+ · saved/, 'the last line is the meter line, and it says the guardian saved: ' + out);
+  const off = strip(render(fullInput({ rate_limits: { five_hour: { used_percentage: 92, resets_at: R_NOW() + 900 } } }), { env: R_ENV(sb), cols: '200', script: scriptCopy(sb.dir, { autopilot: 'off' }) }).out);
+  assert.ok(!/saved/.test(off), 'autopilot off saves nothing, so the meter does not claim it');
 });
 
 test('style: classic via config or CCRIG_STYLE restores the old look; a saved classic color yields to refined', () => {
@@ -3568,13 +3579,84 @@ test('refined: the mod host still gets one plain string per segment', () => {
 
 test('refined: the limit alert shrinks to fit a narrow terminal instead of being cut', () => {
   const sb = sandbox();
-  const input = fullInput({ rate_limits: { five_hour: { used_percentage: 92, resets_at: R_NOW() + 900 } } });
+  const input = fullInput({ rate_limits: { five_hour: { used_percentage: 96, resets_at: R_NOW() + 900 } } });
   for (const cols of ['40', '36']) {
     const lines = strip(render(input, { env: R_ENV(sb), cols }).out).split('\n');
-    assert.strictEqual(lines[lines.length - 1], '▲ near limit · claude --continue', `@${cols}: ` + lines.join(' / '));
+    assert.strictEqual(lines[lines.length - 1], '▲ limit imminent · claude --resume', `@${cols}: ` + lines.join(' / '));
   }
   const tiny = strip(render(input, { env: R_ENV(sb), cols: '20' }).out).split('\n');
-  assert.strictEqual(tiny[tiny.length - 1], '▲ near limit', 'the head alone at 20 cols');
+  assert.strictEqual(tiny[tiny.length - 1], '▲ limit imminent', 'the head alone at 20 cols');
+});
+
+test('refined: rule:false puts a fold glyph on the first line, tinted by the nearest limit', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { rule: false });
+  const at = (pct) => render(fullInput({ rate_limits: { five_hour: { used_percentage: pct, resets_at: R_NOW() + 900 } } }), { env: R_ENV(sb), script }).out.split('\n')[0];
+  assert.match(strip(at(30)), /^▾ a-long-project-name/, 'the glyph leads the first bar line');
+  assert.ok(at(30).startsWith('\x1b[38;5;245m▾'), 'dim when healthy');
+  assert.ok(at(92).startsWith('\x1b[38;5;178m▾'), 'amber at warn');
+  assert.ok(at(97).startsWith('\x1b[38;5;167m▾'), 'red at critical');
+  const SL = require(SCRIPT);
+  for (const cols of [16, 24, 40, 80]) {
+    for (const line of render(fullInput(), { env: R_ENV(sb), cols: String(cols), script }).out.split('\n')) assert.ok(SL.dispWidth(line) <= cols - 1, `@${cols}: ${strip(line)}`);
+  }
+  // the default keeps its rule line, unchanged
+  assert.match(strip(render(fullInput(), { env: R_ENV(sb) }).out).split('\n')[0], /^▾ ccrig ─+$/);
+});
+
+test('refined: NO_COLOR draws no color at all, in either style', () => {
+  const sb = sandbox();
+  const input = fullInput({ rate_limits: { five_hour: { used_percentage: 92, resets_at: R_NOW() + 900 } } });
+  for (const style of ['refined', 'classic']) {
+    const out = render(input, { env: R_ENV(sb, { NO_COLOR: '1', CCRIG_STYLE: style }) }).out;
+    assert.ok(!out.includes('\x1b[38'), style + ' printed a color: ' + JSON.stringify(out.slice(0, 120)));
+    assert.match(strip(out), /92%/);
+  }
+  assert.ok(render(input, { env: R_ENV(sb) }).out.includes('\x1b[38;5;'), 'colors are back without it');
+});
+
+test('refined: billing shows api (not as a warning), and sub only with "always"', () => {
+  const sb = sandbox();
+  const sub = strip(render(baseInput({ rate_limits: { five_hour: { used_percentage: 5, resets_at: R_NOW() + 900 } } }), { env: R_ENV(sb) }).out);
+  assert.ok(!/\bsub\b/.test(sub), 'a subscriber is not told so on every render: ' + sub);
+  const raw = render(baseInput(), { env: R_ENV(sb, { ANTHROPIC_API_KEY: 'sk-x' }) }).out;
+  assert.match(strip(raw), /billing api/);
+  assert.ok(!raw.includes('38;5;178m'), 'api is plain text, not amber');
+  const always = strip(render(baseInput({ rate_limits: { five_hour: { used_percentage: 5, resets_at: R_NOW() + 900 } } }), { env: R_ENV(sb), script: scriptCopy(sb.dir, { show: { billing: 'always' } }) }).out);
+  assert.match(always, /billing sub/);
+});
+
+test('refined: minimal keeps the plan budget as numbers, on one line', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { mode: 'minimal' });
+  const lines = strip(render(fullInput(), { env: R_ENV(sb), script }).out).split('\n');
+  assert.match(lines[0], /^▾ ccrig ─+$/);
+  assert.strictEqual(lines.length, 2, 'the rule and one line: ' + lines.join(' / '));
+  assert.match(lines[1], /5h 64%/); assert.match(lines[1], /7d 21%/); assert.match(lines[1], /ctx 42%/);
+  assert.ok(!/━|effort|fast/.test(lines[1]), 'no bars, no effort or flags: ' + lines[1]);
+  const crit = strip(render(fullInput({ rate_limits: { five_hour: { used_percentage: 99, resets_at: R_NOW() + 900 } } }), { env: R_ENV(sb), script }).out);
+  assert.match(crit, /▲ limit imminent: /, 'the critical alert keeps its full form in minimal');
+});
+
+test('refined: quieter labels: caveman lowercase, the update badge and no-think dim', () => {
+  const sb = sandbox();
+  fs.writeFileSync(path.join(sb.cfg, '.caveman-active'), 'ultra');
+  fs.writeFileSync(path.join(sb.cfg, '.ccbsl-update.json'), JSON.stringify({ latest: '99.0.0', checkedAt: Date.now(), lastSuccessAt: Date.now() }));
+  const raw = render(baseInput({ thinking: { enabled: false } }), { env: R_ENV(sb) }).out;
+  const out = strip(raw);
+  assert.match(out, /caveman:ultra/); assert.ok(!/CAVEMAN/.test(out));
+  assert.ok(raw.includes('\x1b[38;5;178m↑\x1b[0m'), 'one colored arrow');
+  assert.ok(!raw.includes('\x1b[1m\x1b[38;5;178m↑'), 'the update badge is not bold');
+  assert.ok(raw.includes('\x1b[38;5;245mno-think'), 'no-think is dim');
+  const classic = strip(render(baseInput(), { env: R_ENV(sb, { CCRIG_STYLE: 'classic' }) }).out);
+  assert.match(classic, /\[CAVEMAN:ULTRA\]/, 'classic keeps its badge');
+});
+
+test('refined: below 100 columns the meters start compact, so a narrower terminal never shows longer labels', () => {
+  const sb = sandbox();
+  const at = (cols) => strip(render(fullInput(), { env: R_ENV(sb), cols: String(cols) }).out);
+  for (const cols of [99, 80, 70, 60]) assert.ok(!/\bsession\b|\bweekly\b/.test(at(cols)), `@${cols}: ` + at(cols));
+  assert.match(at(160), /session \S+ 64%/, 'a wide terminal keeps the full labels');
 });
 
 // ===========================================================================
