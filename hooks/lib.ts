@@ -26,8 +26,9 @@ export type ModState = {
 
 const BOM = String.fromCharCode(0xfeff)
 
-// CCRig's default 256-color palette, so the fallback line matches the full one
-export const COLOR = { dim: 245, model: 111, green: 78, yellow: 214, red: 203 }
+// CCRig's default (refined) 256-color palette, so the fallback line matches the full one. A test reads
+// statusline.js's DEFAULTS.color and fails when these drift.
+export const COLOR = { dim: 245, model: 140, green: 71, yellow: 178, red: 167, sep: 240, track: 243 }
 export const DEFAULT_THRESHOLDS: Thresholds = { green: 50, yellow: 80, warn: 90, critical: 95 }
 const CONTEXT_THRESHOLDS = { green: 50, yellow: 70 }
 
@@ -102,7 +103,7 @@ export function plainText(s: string): string {
 // Pack segments into lines no wider than `width`, joined by a dim separator, the way the status line
 // wraps (a segment never splits, and a line never starts with a separator).
 export function packLines(segs: readonly Seg[], width: number, sepWidth = 3): Span[][] {
-  const sep: Span = { text: ' │ ', color: xterm256(COLOR.dim) }
+  const sep: Span = { text: ' │ ', color: xterm256(COLOR.sep) }
   const lines: Span[][] = []
   let cur: Span[] = []
   let curW = 0
@@ -126,17 +127,21 @@ export function packLines(segs: readonly Seg[], width: number, sepWidth = 3): Sp
 // What `node statusline.js` prints under CCRIG_HOST=mod: { v, segments, widths, state }. Null when the
 // output is not that, so the caller falls back to the native line instead of drawing garbage. `state`
 // is null from a statusline.js older than the contract.
-export function parseRigOutput(stdout: string): { segs: Seg[]; state: ModState | null } | null {
+// `lines` (1.9.1+) is the bar already laid out for `width` columns, so the band shows the same groups,
+// compact forms and cuts as the status line; it is null from an older statusline.js.
+export function parseRigOutput(stdout: string): { segs: Seg[]; state: ModState | null; lines: Span[][] | null; width: number | null } | null {
   let o: unknown
   try { o = JSON.parse(stdout) } catch { return null }
   if (!o || typeof o !== 'object') return null
-  const { segments, widths, state } = o as { segments?: unknown; widths?: unknown; state?: unknown }
+  const { segments, widths, state, lines, width } = o as { segments?: unknown; widths?: unknown; state?: unknown; lines?: unknown; width?: unknown }
   if (!Array.isArray(segments) || !segments.every((x) => typeof x === 'string')) return null
   const segs = segments.map((s: string, i: number) => {
     const w = Array.isArray(widths) && typeof widths[i] === 'number' ? widths[i] : plainText(s).length
     return { spans: ansiToSpans(s), width: w }
   })
-  return { segs, state: validState(state) }
+  const laid = Array.isArray(lines) && lines.length && lines.every((x) => typeof x === 'string') && typeof width === 'number'
+    ? (lines as string[]).map(ansiToSpans) : null
+  return { segs, state: validState(state), lines: laid, width: laid ? (width as number) : null }
 }
 
 function validState(x: unknown): ModState | null {
@@ -178,7 +183,10 @@ export function fmtReset(resetsAt: string | undefined, nowMs: number): string {
   const ap = h >= 12 ? 'p' : 'a'
   h = h % 12 || 12
   const clock = h + ':' + String(d.getMinutes()).padStart(2, '0') + ap
-  return sameDay ? clock : (d.getMonth() + 1) + '/' + d.getDate() + ' ' + clock
+  if (sameDay) return clock
+  // a reset inside the coming week reads as its weekday, the way the status line writes it
+  if (t - nowMs < 6 * 86400000) return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()] + ' ' + clock
+  return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + clock
 }
 
 // "claude-opus-5-5[1m]" reads as "Opus 5.5"; anything else is shown as given, minus the window tag
@@ -188,15 +196,25 @@ export function displayModel(model: string): string {
   return String(model || '').replace(/\s*\[1m\]/i, '').replace(/\s*\(1M context\)/i, '').trim()
 }
 
+// the status line's thin meter: heavy ━ filled, a thin ─ track, half-cell resolution (╸); any use shows a
+// sliver and only a true 100% fills it
 function barSpans(pct: number, width: number, t: { green: number; yellow: number }, redAt: number): Span[] {
   const p = Math.max(0, Math.min(100, pct))
-  // the last block is reserved for a true 100%, so a limit bar does not read full at 94%
-  const filled = p >= 100 ? width : Math.min(width - 1, Math.floor((p / 100) * width))
+  const units = width * 2
+  let n = Math.round((p / 100) * units)
+  if (p > 0 && n < 1) n = 1
+  if (p < 100 && n >= units) n = units - 1
+  const full = n >> 1, half = n & 1, rest = width - full - half
   const col = p <= t.green ? COLOR.green : p < redAt ? COLOR.yellow : COLOR.red
   const out: Span[] = []
-  if (filled) out.push({ text: '█'.repeat(filled), color: xterm256(col) })
-  if (width - filled) out.push({ text: '░'.repeat(width - filled), color: xterm256(COLOR.dim) })
+  if (full + half) out.push({ text: '━'.repeat(full) + (half ? '╸' : ''), color: xterm256(col) })
+  if (rest) out.push({ text: '─'.repeat(rest), color: xterm256(COLOR.track) })
   return out
+}
+// the number beside a meter: never 100% before the window is full, never 0% once anything is used
+export function pctText(p: number): string {
+  const r = Math.round(p)
+  return r >= 100 && p < 100 ? '99%' : r === 0 && p > 0 ? '<1%' : r + '%'
 }
 
 const dim = (text: string): Span => ({ text, color: xterm256(COLOR.dim) })
@@ -210,19 +228,19 @@ export function liveLimits(usage: Usage | null, nowMs: number): RateLimit[] {
   })
 }
 
-export function usageSeg(r: RateLimit, t: Thresholds, nowMs: number, barWidth = 8): Seg {
-  const pct = Math.round(r.percentUsed)
+export function usageSeg(r: RateLimit, t: Thresholds, nowMs: number, barWidth = 10): Seg {
+  const pct = pctText(Math.max(0, Math.min(100, r.percentUsed)))
   const near = r.percentUsed >= t.warn
   const label = windowLabel(r.kind)
   const red = xterm256(COLOR.red)
   const spans: Span[] = [
-    near ? { text: '⚠ ' + label, color: red, bold: true } : dim(label),
+    near ? { text: '▲ ' + label, color: red, bold: true } : dim(label),
     { text: ' ' },
     ...barSpans(r.percentUsed, barWidth, t, t.warn),
-    near ? { text: ' ' + pct + '%', color: red, bold: true } : dim(' ' + pct + '%'),
+    near ? { text: ' ' + pct, color: red, bold: true } : { text: ' ' + pct },
   ]
   const reset = fmtReset(r.resetsAt, nowMs)
-  if (reset) spans.push(dim(' ↺' + reset))
+  if (reset) spans.push(dim(' ↺ ' + reset))
   return { spans, width: spans.reduce((n, s) => n + s.text.length, 0) }
 }
 
@@ -234,13 +252,13 @@ export function nativeSegments(model: string, usage: Usage | null, t: Thresholds
   const name = displayModel(model)
   if (name) {
     const oneM = (usage?.context?.window ?? 0) >= 1000000
-    const spans: Span[] = [dim('★ '), { text: name, color: xterm256(COLOR.model) }]
-    if (oneM) spans.push(dim(' [1m]'))
+    const spans: Span[] = [{ text: name, color: xterm256(COLOR.model) }]
+    if (oneM) spans.push(dim(' 1M'))
     segs.push({ spans, width: spans.reduce((n, s) => n + s.text.length, 0) })
   }
   const pct = usage?.context?.percent
   if (typeof pct === 'number') {
-    const spans = [dim('ctx '), ...barSpans(pct, 10, CONTEXT_THRESHOLDS, CONTEXT_THRESHOLDS.yellow), dim(' ' + Math.round(pct) + '%')]
+    const spans = [dim('ctx '), ...barSpans(pct, 10, CONTEXT_THRESHOLDS, CONTEXT_THRESHOLDS.yellow), { text: ' ' + pctText(Math.max(0, Math.min(100, pct))) }]
     segs.push({ spans, width: spans.reduce((n, s) => n + s.text.length, 0) })
   }
   for (const r of liveLimits(usage, nowMs)) segs.push(usageSeg(r, t, nowMs))

@@ -4658,9 +4658,14 @@ if (!argv.includes('--config')) {
     // the mod lays the segments out itself, so it can wrap them to the band and color them natively
     if (MOD_HOST) {
       const w = getWidth() - CONFIG.reserveCols;
-      const segs = isCollapsed() ? collapsedSummary(collectItems(input, w), w, false) : collectSegments(input, w);
+      const r = collectItems(input, w);
+      const segs = isCollapsed() ? collapsedSummary(r, w, false) : r.items.map((it) => it.v[0]);
+      // `lines`: the bar already laid out for this width (groups, compact forms, '…' cuts), so the band
+      // matches the status line; `segments` stays for a mod older than `lines`. No rule: the band is
+      // its own region above the prompt.
+      const lines = isCollapsed() ? segs : isRefined() ? layoutItems(r.items, w) : wrapSegments(segs, w).split('\n').filter(Boolean);
       writeModMarker(input);
-      writeOut(JSON.stringify({ v: VERSION, segments: segs, widths: segs.map(dispWidth), sep: dispWidth(SEP), state: modState(input) }));
+      writeOut(JSON.stringify({ v: VERSION, segments: segs, widths: segs.map(dispWidth), sep: dispWidth(SEP), lines, width: w, state: modState(input) }));
     } else writeOut(render(input, getWidth() - CONFIG.reserveCols));
   } catch (e) {
     // the status line must never die silently: leave a trail and a next step
