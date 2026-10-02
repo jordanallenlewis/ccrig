@@ -181,7 +181,7 @@ const DEFAULTS = {
   // carries a matching statusline.js.sig signature (see the header for the openssl commands). Empty =
   // TLS-only (the default): the download is still validated + backed up, just not signature-checked.
   updatePubkey: '',
-  gitCacheMs: 10000,    // cache git state this long so big repos don't re-shell each ~2s render (0 = off)
+  gitCacheMs: 10000,    // cache git state this long so big repos don't re-shell on every render (0 = off)
   reserveCols: 1,       // safety margin subtracted from terminal width
   // Map a Claude config-dir name to a profile label. Unlisted dirs derive their
   // label from the name (e.g. .claude-work -> "work"). Leave {} for pure auto.
@@ -902,12 +902,65 @@ function git(cwd, args) {
   const timeout = parseInt(process.env.CCBSL_GIT_TIMEOUT_MS, 10) || 700;
   return require('child_process').execFileSync(bin, args, { cwd, stdio: ['ignore', 'pipe', 'ignore'], timeout, encoding: 'utf8', windowsHide: true });
 }
+// The checkpoint's git fingerprint, refreshed every ~10s near a limit, so it avoids starting git: HEAD comes
+// from the files under .git, and "dirty" from the git segment's cache, which this same render just wrote.
+// git runs only for what that cannot answer (an unborn branch, a reftable repo, GIT_DIR, no fresh cache).
 function gitSnapshot(cwd) {
+  const head = gitHeadNoSpawn(cwd);
+  if (head === '') return null;                   // no repository here at all
+  let dirty = null;
   try {
-    const head = git(cwd, ['rev-parse', 'HEAD']).trim();
-    const status = git(cwd, ['--no-optional-locks', 'status', '--porcelain']);
-    return { head, dirty: status.trim().length > 0 };
+    const f = gitCacheFile(cwd), fresh = Math.max(CONFIG.gitCacheMs || 0, 10000);
+    if (Date.now() - fs.statSync(f).mtimeMs <= fresh) { const d = JSON.parse(fs.readFileSync(f, 'utf8')); if (d && d.branch && typeof d.dirty === 'number') dirty = d.dirty > 0; }
+  } catch {}
+  try {
+    return {
+      head: head || git(cwd, ['rev-parse', 'HEAD']).trim(),
+      dirty: dirty !== null ? dirty : git(cwd, ['--no-optional-locks', 'status', '--porcelain']).trim().length > 0,
+    };
   } catch { return null; }
+}
+// HEAD's commit without a process: find .git above cwd (a directory, or a worktree's .git file naming its
+// gitdir), read HEAD, and follow a branch ref through its loose file or packed-refs. '' when there is no
+// repository; null when it cannot tell, and the caller asks git.
+const SHA_RE = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+function gitHeadNoSpawn(cwd) {
+  if (process.env.GIT_DIR || process.env.GIT_WORK_TREE) return null;
+  let dir = path.resolve(cwd), gitDir = null;
+  for (let i = 0; i < 64; i++) {
+    const g = path.join(dir, '.git');
+    let st = null; try { st = fs.statSync(g); } catch {}
+    if (st && st.isDirectory()) { gitDir = g; break; }
+    if (st && st.isFile()) {
+      const m = /^gitdir:\s*(.+?)\s*$/m.exec(readTextHead(g, 4096));
+      if (!m) return null;
+      gitDir = path.resolve(dir, m[1]);
+      break;
+    }
+    const up = path.dirname(dir);
+    if (up === dir) return '';
+    dir = up;
+  }
+  if (!gitDir) return null;
+  const cd = readFileSafe(path.join(gitDir, 'commondir')).trim();
+  const common = cd ? path.resolve(gitDir, cd) : gitDir;
+  let ref = readFileSafe(path.join(gitDir, 'HEAD')).trim();
+  for (let hops = 0; hops < 5; hops++) {
+    if (SHA_RE.test(ref)) return ref;
+    const m = /^ref:\s*(refs\/[^\s]+)$/.exec(ref);
+    if (!m || m[1].split('/').includes('..')) return null;
+    let next = '';
+    for (const d of [gitDir, common]) { next = readFileSafe(path.join(d, ...m[1].split('/'))).trim(); if (next) break; }
+    if (!next) {
+      for (const line of readFileSafe(path.join(common, 'packed-refs')).split('\n')) {
+        const p = line.trim().split(' ');
+        if (p[1] === m[1] && SHA_RE.test(p[0])) { next = p[0]; break; }
+      }
+    }
+    if (!next) return null;
+    ref = next;
+  }
+  return null;
 }
 function writeCheckpoint(input, meta) {
   const sid = input.session_id;
@@ -1324,7 +1377,7 @@ function armAutopilot(input, which, pct, resetEpoch) {
   // subprocesses inside writeCheckpoint stay off the per-render hot path.
   let needsCritCheckpoint = windowChanged || !/critical/.test((ex && ex.reason) || '');
   // continuous-refresh: also re-snapshot every ~10s while critical, so the checkpoint tracks the
-  // latest completed step through the danger band (the render loop drives this, ~every 2s).
+  // latest completed step through the danger band (the render loop drives this: every message, and every few seconds between them).
   if (!needsCritCheckpoint && CONFIG.continuousCheckpoint !== false) {
     try { needsCritCheckpoint = Date.now() - fs.statSync(checkpointPath(sid)).mtimeMs >= 10000; } catch { needsCritCheckpoint = true; }
   }
@@ -1574,7 +1627,7 @@ function maybeCheckUpdate(info) {
   const day = 24 * 3600 * 1000;
   if (info && info.checkedAt && (Date.now() - info.checkedAt) < day) return false; // throttled
   // stamp the attempt NOW (atomically) so a blocked network can't respawn a checker every render.
-  // If the stamp can't persist (unwritable CFG), do NOT spawn — else every ~2s render would launch a
+  // If the stamp can't persist (unwritable CFG), do NOT spawn — else every render would launch a
   // network-touching child (a C2 violation + a process leak). Fail closed on the throttle.
   if (!writeJsonAtomic(updateCacheFile(), Object.assign({ current: VERSION }, info || {}, { checkedAt: Date.now() }))) return false;
   // NODE_USE_SYSTEM_CA lets the child trust a corporate root CA (no-op on older Node)
@@ -2073,9 +2126,10 @@ function gitProbe(cwd) {
   if (branch === '(detached)') branch = 'detached';
   return { branch, ahead, behind, dirty };
 }
+function gitCacheFile(cwd) { return path.join(cacheDir(), 'ccsl-git-' + strHash(cwd) + '.json'); }
 function gitSeg(cwd) {
   const ttl = CONFIG.gitCacheMs || 0;
-  const cacheFile = path.join(cacheDir(), 'ccsl-git-' + strHash(cwd) + '.json');
+  const cacheFile = gitCacheFile(cwd);
   let data;
   if (ttl > 0) {
     try { if (Date.now() - fs.statSync(cacheFile).mtimeMs < ttl) data = JSON.parse(fs.readFileSync(cacheFile, 'utf8')); } catch {}
@@ -2346,6 +2400,7 @@ function helpText() {
     '  --autopilot <m>      limit behaviour: off | notify | resume',
     '  --keep-working <b>   keep working while todos remain: on | off',
     '  --board [--watch]    traffic-light board of every session (opt-in; --watch redraws in place)',
+    '  --board on|off       turn the session board on or off, and wire or remove its lamp hooks',
     '  --sessions           list recent sessions with the command to resume each',
     '  --name <label>       label this project on the board (writes .claude/ccrig-name)',
     '  --status             list armed auto-resume watchers (nothing is a hidden daemon)',
@@ -3077,7 +3132,7 @@ function boardRows(now) {
     const sid = f.slice(0, -5);
     const p = path.join(dir, f);
     let e = null; try { e = JSON.parse(fs.readFileSync(p, 'utf8')); } catch {}
-    // File mtime is the backstop: a live session rewrites its record every couple of seconds, so a
+    // File mtime is the backstop: a live session rewrites its record every few seconds, so a
     // stale mtime is decisive even when the record's own `ts` is unusable (a clock ahead of ours).
     let mt = 0; try { mt = fs.statSync(p).mtimeMs; } catch {}
     if (!e || !e.ts || boardAge(now, e.ts) >= BOARD_STALE_MS || (mt && now - mt >= BOARD_STALE_MS)) { try { fs.unlinkSync(p); } catch {} continue; } // prune >1h stale
@@ -3098,7 +3153,7 @@ function rowLabel(r) { return cleanLabel(r.e.name, 32) || cleanLabel(r.e.project
 function boardFrame(rows, now, useColor) {
   const dim = (s) => (useColor ? c(K.dim, s) : s);
   const L = ['CCRig v' + VERSION + ' session board'];
-  if (CONFIG.sessionBoard !== true) L.push('  (The session board is off. Turn on "sessionBoard" in your config', '   so your sessions show up here.)');
+  if (CONFIG.sessionBoard !== true) L.push('  (The session board is off. Turn it on with  ccrig board on', '   so your sessions show up here.)');
   L.push('');
   if (!rows.length) { L.push('  No sessions are active right now.'); return L.join('\n') + '\n'; }
   L.push(dim('    ' + BOARD_COLS.map(([n, w]) => padCell(n, w)).join(' ') + ' updated'));
@@ -3278,7 +3333,9 @@ if (argv.includes('--name')) {
   process.stdout.write('ok  board label -> ' + label + '  (' + f + ')\n');
   process.exit(0);
 }
-if (argv.includes('--board')) { runBoard(argv.includes('--watch')); return; } // watch mode returns to its timer loop
+// `--board on|off` is a setter, handled with the others below (it rewires hooks, which are defined later)
+const BOARD_SET = argv.includes('--board') && ['on', 'off'].includes(argv[argv.indexOf('--board') + 1]);
+if (argv.includes('--board') && !BOARD_SET) { runBoard(argv.includes('--watch')); return; } // watch mode returns to its timer loop
 if (argv.includes('--sessions')) runSessions();
 // a corporate root CA often lives only in the OS store; the background check already trusts it, so a
 // typed --update / --check-update re-runs itself the same way (Node 22.15+ reads NODE_USE_SYSTEM_CA)
@@ -3306,7 +3363,7 @@ function runOptions() {
   o += 'resume tickets: ' + (CONFIG.resumeTickets === false ? 'off' : 'on') + '\n';
   o += 'update check:   ' + (CONFIG.updateCheck === false ? 'off' : 'on') + '        once/day background check for a newer version\n';
   o += 'git cache:      ' + (CONFIG.gitCacheMs || 0) + 'ms\n';
-  o += 'session board:  ' + (CONFIG.sessionBoard === true ? 'on' : 'off') + '        --board lists every session with a blocked/working/done/idle lamp\n';
+  o += 'session board:  ' + (CONFIG.sessionBoard === true ? 'on' : 'off') + '        --board lists every session with a blocked/working/done/idle lamp (ccrig board on|off)\n';
   o += '  done decay:    ' + Math.round(boardDecayMs() / 60000) + 'm       how long a finished session stays green before it goes grey\n';
   o += '  blocked ping:  ' + (CONFIG.boardNotify === false ? 'off' : 'on') + '        desktop ping when a session watched by --board --watch starts waiting on you\n';
   o += '\nguardian (needs --install-guardian to wire the hooks):\n';
@@ -3486,6 +3543,9 @@ function writeSlashCommands(dir = CFG) {
 // wire ONE profile. Returns a result the caller reports; never exits, never throws for a
 // bad settings.json (so one broken profile can't block the others).
 const REFRESH = !!process.env.CCBSL_REFRESH;
+// seconds between status line redraws while nothing happens. 5 keeps the clock and git current; 2 cost an
+// idle session a Node start (and on Windows a Git Bash start) every 2 seconds for no visible change.
+const STATUS_REFRESH_SECS = 5;
 function installStatusLineInto(dir, withGuardian) {
   try {
     fs.mkdirSync(dir, { recursive: true });
@@ -3499,7 +3559,9 @@ function installStatusLineInto(dir, withGuardian) {
     const prevSl = isPlainObject(settings.statusLine) && typeof settings.statusLine.command === 'string' ? settings.statusLine.command : '';
     const replacedForeign = (prevSl && !isOurCmd(prevSl)) ? prevSl : null;
     const bak = backupSettings(dir);
-    settings.statusLine = { type: 'command', command: ourCommand(''), refreshInterval: 2 };
+    // Claude Code redraws the bar on every message anyway; the interval only covers the clock and git
+    // between messages, and each tick is a Node start (on Windows a Git Bash start too)
+    settings.statusLine = { type: 'command', command: ourCommand(''), refreshInterval: STATUS_REFRESH_SECS };
     // an install puts the bar back on its own terms; a Git Bash pause saved before it no longer applies
     try { fs.unlinkSync(pausedFile(dir)); } catch {}
     // The guardian is on by default (SessionStart restore + PreCompact + Stop hooks); --no-guardian
@@ -3511,7 +3573,7 @@ function installStatusLineInto(dir, withGuardian) {
     let strippedGuardian = false;
     if (withGuardian || (REFRESH && hadGuardian)) addGuardianHooks(settings);
     else if (hadGuardian) { settings.hooks = stripGuardianHooks(settings.hooks).hooks || {}; strippedGuardian = true; }
-    addBoardHooks(settings); // the board lamps ride with the bar, so --no-guardian keeps them
+    addBoardHooks(settings); // the board lamps follow sessionBoard, with or without the guardian
     if (!writeJsonAtomic(sp, settings)) throw new Error('could not save ' + sp + '; it was left unchanged');
     JSON.parse(fs.readFileSync(sp, 'utf8')); // round-trip validate
     const cmd = writeSlashCommands(dir);
@@ -3592,8 +3654,8 @@ function runInstall() {
 }
 
 // ---- hook wiring. 'guardian' hooks power Relentless mode + resume (Features 1, 2, 5); 'board'
-// hooks only stamp the session-board lamp, so they ride with the status line instead, which keeps
-// them for a --no-guardian install and gets them wired by an ordinary npm update.
+// hooks only stamp the session-board lamp, so they are wired while "sessionBoard" is on (with or without
+// the guardian) and taken out when it is off: see wantedBoardEvents.
 // [ClaudeCodeEvent, cliSlug, group, matcher, timeoutSeconds]
 const HOOK_EVENTS = [
   ['Stop', 'stop', 'guardian', '', 0],
@@ -3734,7 +3796,42 @@ function addHooks(settings, events) {
   }
 }
 function addGuardianHooks(settings) { addHooks(settings, GUARD_EVENTS); }
-function addBoardHooks(settings) { addHooks(settings, BOARD_EVENTS); }
+// The board hooks a settings object should carry. Each one is a Node start on its event, so they are
+// wired only while the board is on: with it off they would only exit. The guardian's own Stop hook
+// already stamps the done lamp, so board-stop rides only when the guardian is not wired. On Windows a
+// bar-only install keeps board-stop either way: it is the hook that notices a broken Git Bash.
+function wantedBoardEvents(settings) {
+  const hooks = settings && isPlainObject(settings.hooks) ? settings.hooks : {};
+  const guardStop = Array.isArray(hooks.Stop) && hooks.Stop.some((g) => groupHasSlug(g, 'stop'));
+  const board = CONFIG.sessionBoard === true;
+  return BOARD_EVENTS.filter(([, slug]) => (slug === 'board-stop' ? !guardStop && (board || process.platform === 'win32') : board));
+}
+// make the board hooks match wantedBoardEvents: add what is missing, take out what no longer applies
+function addBoardHooks(settings) {
+  settings.hooks = stripOurHooks(isPlainObject(settings.hooks) ? settings.hooks : {}, BOARD_EVENTS).hooks || {};
+  addHooks(settings, wantedBoardEvents(settings));
+}
+// `ccrig board on|off` and a --config save: re-apply the board hooks in every profile CCRig is wired into
+// (the status line, a paused one, or any of its hooks), so the lamps follow the setting. Returns how many
+// settings.json files changed.
+function rewireBoard() {
+  let n = 0;
+  for (const dir of detectProfiles()) {
+    const raw = readSettingsRaw(dir);
+    if (raw.state !== 'ok') continue;
+    const s = raw.value;
+    const wired = (isPlainObject(s.statusLine) && isOurCmd(s.statusLine.command)) || !!readPaused(dir) ||
+      HOOK_EVENTS.some(([Ev, slug]) => isPlainObject(s.hooks) && Array.isArray(s.hooks[Ev]) && s.hooks[Ev].some((g) => groupHasSlug(g, slug)));
+    if (!wired) continue;
+    const before = JSON.stringify(isPlainObject(s.hooks) ? s.hooks : null);
+    addBoardHooks(s);
+    if (!Object.keys(s.hooks).length) delete s.hooks;
+    if (JSON.stringify(isPlainObject(s.hooks) ? s.hooks : null) === before) continue;
+    backupSettings(dir);
+    if (writeJsonAtomic(settingsPathOf(dir), s)) n++;
+  }
+  return n;
+}
 // paths a settings command references (quoted tokens first, then whitespace-split bare tokens)
 function cmdPaths(cmd) {
   const quoted = [...String(cmd).matchAll(/"([^"]+)"/g)].map((m) => m[1]);
@@ -3813,12 +3910,12 @@ function installGuardianInto(dir) {
     const settings = raw.value || {};
     const bak = backupSettings(dir);
     if (!isPlainObject(settings.statusLine) || typeof settings.statusLine.command !== 'string') {
-      settings.statusLine = { type: 'command', command: ourCommand(''), refreshInterval: 2 };
+      settings.statusLine = { type: 'command', command: ourCommand(''), refreshInterval: STATUS_REFRESH_SECS };
       try { fs.unlinkSync(pausedFile(dir)); } catch {}
     }
     // strip any prior guardian hooks surgically (keeps the user's own), then add fresh
     addGuardianHooks(settings);
-    addBoardHooks(settings); // keep the board lamps wired for anyone who only ever runs this command
+    addBoardHooks(settings); // the guardian's Stop now stamps the done lamp, so a board-stop beside it goes
     if (!writeJsonAtomic(sp, settings)) throw new Error('could not save ' + sp + '; it was left unchanged');
     JSON.parse(fs.readFileSync(sp, 'utf8')); // round-trip validate
     writeSlashCommands(dir);
@@ -3833,7 +3930,8 @@ function runInstallGuardian() {
   const okd = results.filter((r) => !r.err);
   const failed = results.filter((r) => r.err);
   for (const r of okd) {
-    process.stdout.write('Set up the guardian for the ' + profileLabel(r.dir) + ' profile (Stop, SessionStart, and PreCompact hooks), plus the session-board lamp hooks.  (' + r.sp + ')'
+    process.stdout.write('Set up the guardian for the ' + profileLabel(r.dir) + ' profile (Stop, SessionStart, and PreCompact hooks)'
+      + (CONFIG.sessionBoard === true ? ', plus the session-board lamp hooks' : '') + '.  (' + r.sp + ')'
       + (r.bak ? '  A backup was saved first.' : '') + '\n');
   }
   for (const r of failed) process.stdout.write('Could not set up the ' + profileLabel(r.dir) + ' profile (' + r.sp + '): ' + r.err + '\n');
@@ -3884,6 +3982,10 @@ function uninstallGuardianFrom(dir) {
     if (!res.removed) return { dir, sp, removed: 0 };
     const bak = backupSettings(dir);
     if (res.hooks === undefined) delete settings.hooks; else settings.hooks = res.hooks;
+    // the guardian's Stop hook was also the board's done lamp (and on Windows the Git Bash check): put
+    // board-stop back where the board or the watchdog still needs it
+    addBoardHooks(settings);
+    if (!Object.keys(settings.hooks).length) delete settings.hooks;
     if (!writeJsonAtomic(sp, settings)) throw new Error('could not save ' + sp + '; it was left unchanged');
     return { dir, sp, removed: res.removed, bak };
   } catch (e) { return { dir, sp: settingsPathOf(dir), removed: 0, err: e.message }; }
@@ -4089,16 +4191,23 @@ function runDoctor() {
       else bad('autopilot is "resume" but "' + claudeBin() + '" was not found' + (process.platform === 'win32' ? ' as claude.exe or an npm shim' : ' on PATH'), 'set "claudeBin" in config to the full path of claude' + (process.platform === 'win32' ? '.exe' : ''));
     }
   }
-  // session board: the lamp hooks, and the shared dir the rows are read from
-  if (CONFIG.sessionBoard !== true) info('session board: off (turn on "sessionBoard" to use --board)');
-  else {
-    const bh = raw.state === 'ok' && isPlainObject(raw.value.hooks) ? raw.value.hooks : {};
-    const bw = BOARD_EVENTS.filter(([Event, slug]) => Array.isArray(bh[Event]) && bh[Event].some((g) => groupHasSlug(g, slug))).map(([Event]) => Event);
-    if (bw.length === BOARD_EVENTS.length) ok('session board lamps wired (' + bw.join(', ') + ')');
+  // session board: the lamp hooks, and the shared dir the rows are read from. The lamps need four events;
+  // the guardian's own Stop hook stamps the done lamp, so it counts for Stop.
+  const bh = raw.state === 'ok' && isPlainObject(raw.value.hooks) ? raw.value.hooks : {};
+  const hasSlug = (Ev, slug) => Array.isArray(bh[Ev]) && bh[Ev].some((g) => groupHasSlug(g, slug));
+  const lampEvents = [['UserPromptSubmit', 'user-prompt'], ['Notification', 'notification'], ['SessionEnd', 'session-end'], ['Stop', 'board-stop']];
+  if (CONFIG.sessionBoard !== true) {
+    // an install from before the lamps followed the setting: hooks that start Node only to exit
+    const idle = lampEvents.filter(([Ev, slug]) => Ev !== 'Stop' && hasSlug(Ev, slug)).length;
+    info('session board: off (ccrig board on turns it on)' + (idle ? '; ' + idle + ' of its lamp hooks are still wired and only start Node to exit, so run  ccrig board off  to take them out' : ''));
+  } else {
+    const bw = lampEvents.filter(([Ev, slug]) => hasSlug(Ev, slug) || (Ev === 'Stop' && hasSlug('Stop', 'stop'))).map(([Ev]) => Ev);
+    if (bw.length === lampEvents.length) ok('session board lamps wired (' + bw.join(', ') + ')');
+    else if (!bw.length && modOn) ok('session board lamps stamped by the mod');
     // name the events that ARE wired the same way the guardian block does, so the list never reads
     // as if it were naming the missing ones
-    else if (bw.length) info('session board lamps partly wired (' + bw.join(', ') + '); re-run --install to wire them all');
-    else info('session board is on but its lamp hooks are not wired; re-run --install so blocked and done rows light up');
+    else if (bw.length) info('session board lamps partly wired (' + bw.join(', ') + '); run  ccrig board on  to wire them all');
+    else info('session board is on but its lamp hooks are not wired; run  ccrig board on  so blocked and done rows light up');
     const bdir = boardDir();
     let bst = null; try { bst = fs.lstatSync(bdir); } catch {}
     if (bst && bst.isSymbolicLink()) bad('the session board dir is a symlink (' + bdir + ')', 'delete it: the board expects plain files there');
@@ -4139,6 +4248,21 @@ function runDoctor() {
   process.exit(fails ? 1 : 0);
 }
 
+// what turning the board on or off did to the wired hooks, for the setter and the --config save
+function boardRewireNote(on, changed) {
+  if (installKind() === 'mod') return 'The mod stamps the lamps itself, so no settings.json changed.\n';
+  if (!changed) return on ? 'Its lamp hooks were already wired.\n' : '';
+  return (on ? 'Wired its lamp hooks in ' : 'Took its lamp hooks out of ') + changed + ' ' + plural(changed, 'profile') + '. Restart Claude Code once so ' + (on ? 'they load' : 'the change applies') + '.\n';
+}
+// ---- --board on|off: the session board, saved to config, with its lamp hooks wired to match ----
+if (BOARD_SET) {
+  const on = argv[argv.indexOf('--board') + 1] === 'on';
+  CONFIG.sessionBoard = on;
+  if (!saveConfig()) process.exit(1);
+  const changed = installKind() === 'mod' ? 0 : rewireBoard();
+  process.stdout.write('ok  session board -> ' + (on ? 'on' : 'off') + '  (' + CONFIG_PATH + ')\n' + boardRewireNote(on, changed));
+  process.exit(0);
+}
 // ---- --autopilot / --keep-working: one-command toggles for the guardian, saved to config ----
 if (argv.includes('--autopilot')) {
   const want = argv[argv.indexOf('--autopilot') + 1];
@@ -4316,6 +4440,7 @@ async function runConfigEditor() {
     waiters.push(res);
   });
   const order = Array.isArray(CONFIG.order) ? CONFIG.order : DEFAULT_ORDER;
+  const boardWas = CONFIG.sessionBoard === true;
   while (true) {
     let out = '\n\x1b[1mstatusline config\x1b[0m   (edits go to statusline.config.json)\n\n';
     out += 'Preview:\n  ' + render(demoInput(), 96, DEMO_GIT()).split('\n').join('\n  ') + '\n\nSegments:\n';
@@ -4336,7 +4461,15 @@ async function runConfigEditor() {
     process.stdout.write(out);
     const a = (await ask('\n> ')).trim().toLowerCase();
     if (a === 'q' || a === '') { process.stdout.write('No changes saved.\n'); break; }
-    if (a === 's') { if (saveConfig()) process.stdout.write(`Saved → ${CONFIG_PATH}\n`); break; }
+    if (a === 's') {
+      if (saveConfig()) {
+        process.stdout.write(`Saved → ${CONFIG_PATH}\n`);
+        // the board's lamp hooks follow the setting, so a toggle here rewires them like `ccrig board on|off`
+        const on = CONFIG.sessionBoard === true;
+        if (on !== boardWas) process.stdout.write('Session board ' + (on ? 'on' : 'off') + '. ' + boardRewireNote(on, installKind() === 'mod' ? 0 : rewireBoard()));
+      }
+      break;
+    }
     if (a === 'm') { CONFIG.mode = MODES[(MODES.indexOf(CONFIG.mode) + 1) % MODES.length]; continue; }
     if (a === 'c') { CONFIG.collapsed = !isCollapsed(); continue; }
     if (a === 'y') { setStyle(CONFIG.style === 'classic' ? 'refined' : 'classic'); continue; }
