@@ -1,6 +1,6 @@
 {
   "name": "ccrig",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "description": "CCRig as a mod: your plan usage above the prompt and on the spinner, a toast before you hit a limit, /ccrig with no Claude turn, and the usage-limit guardian.",
   "author": { "name": "Jordan Allen Lewis", "url": "https://jordanallenlewis.com" },
   "homepage": "https://github.com/jordanallenlewis/ccrig",

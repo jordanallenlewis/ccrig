@@ -56,9 +56,17 @@
   "reserveCols": 1,
   "_profileLabels": "Map a config-dir name to a label, e.g. {\".claude\":\"work\",\".claude-personal\":\"personal\"}. Default {} derives labels from the dir name.",
   "profileLabels": {},
+  "_style": "refined (default): a rule line above the bar, text labels, thin meters, color only where it means something | classic: the pre-1.9 look (emoji icons, block bars). CCRIG_STYLE=classic overrides it for one terminal.",
+  "style": "refined",
+  "_rule": "refined only: the full-width line above the bar that sets it apart from the transcript; it turns amber, then red, near a limit. false hides it.",
+  "rule": true,
+  "_collapsed": "Fold the CCRig section to one summary line. Toggle it with `ccrig collapse | expand | toggle` or /ccrig:toggle inside a session.",
+  "collapsed": false,
+  "_color": "Omit a key to keep the active style's palette. These are the refined defaults; classic uses its own.",
   "color": {
-    "dim": 245, "folder": 75, "model": 111, "effort": 179, "flag": 45, "caveman": 172,
-    "green": 78, "yellow": 214, "red": 203, "sky": 75, "update": 220, "agents": 141,
-    "profileDefault": 39, "profilePersonal": 213
+    "dim": 245, "folder": 74, "model": 140, "effort": 173, "flag": 73, "caveman": 172,
+    "green": 71, "yellow": 178, "red": 167, "sky": 74, "update": 178, "agents": 140,
+    "profileDefault": 74, "profilePersonal": 168,
+    "rule": 240, "sep": 240, "track": 243
   }
 }

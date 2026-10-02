@@ -6,8 +6,9 @@
 A status line and usage-limit guardian for [Claude Code](https://claude.com/claude-code). One Node file, zero dependencies. The render makes no network calls: everything comes from the JSON Claude Code already hands the status line. (The only network anywhere is an optional once-a-day update check; set `"updateCheck": false` to turn it off.)
 
 ```
-👤 work │ 📂 my-project │ ★ Opus 4.8 [1m] │ ⚡high │ ctx ████░░░░░░ 42% │ 🌿 main ●3 ↑1 │ 💳 sub
-session █████░░░ 63% ↺8:53a │ weekly ███████░ 88% ↺7/22 6:53a
+▾ ccrig ───────────────────────────────────────────────────────────────────────────────────────
+● work │ my-project │ Opus 4.8 1M │ effort high │ git main ●3 ↑1 │ sub
+ctx ━━━━────── 42% │ session ━━━━━━╸─── 63% ↺ 8:53a │ weekly ━━━━━━━━╸─ 88% ↺ Tue 6:53a
 ```
 
 Preview it with sample data before installing: `npx ccrig --demo` (add `--cols 80` to size a screenshot).
@@ -68,8 +69,9 @@ The band is shared, so you can build on it. A mod of your own that lists `ccrig`
 ## What the status line shows
 
 - **Profile**: the active Claude account, when you run more than one
-- **Folder, model, effort**: with a `[1m]` tag on 1M-context models, plus `fast` / `no-think` flags
-- **Context window**: a color-coded bar (green, yellow, red)
+- **A rule line** above the bar, so it reads apart from the conversation above it. It turns amber, then red, as a usage window nears its limit
+- **Folder, model, effort**: with a `1M` tag on 1M-context models, plus `fast` / `no-think` flags
+- **Context window**: a color-coded meter (green, yellow, red)
 - **Git**: branch, uncommitted count, unpushed/unpulled vs upstream
 - **Billing**: `sub` (Claude.ai subscription) or `api` (pay-per-token)
 - **Session / weekly usage**: your plan's 5-hour and 7-day windows, each with its reset time
@@ -77,6 +79,8 @@ The band is shared, so you can build on it. A mod of your own that lists `ccrig`
 - **Near-limit warning**: as usage climbs the bar turns red and names the resume command; approaching the wall it saves a resume ticket with the exact `claude --resume <session-id>` line
 
 Running subagents and an update badge appear when relevant; cost and the session name show in `expanded` mode or when you turn them on.
+
+The bar fits the terminal it is in. Related items stay on one line when they can, the meters shorten to `5h` / `7d` and then drop their bars on a narrow terminal, and the limit warning shortens instead of being cut off. Color is reserved for state (green, amber, red), so it reads on light and dark terminals alike. Prefer the pre-1.9 look with emoji icons and block bars? Set `"style": "classic"` (or `CCRIG_STYLE=classic` for one terminal); `"rule": false` hides the rule line.
 
 ## The Guardian (on by default)
 
@@ -120,6 +124,16 @@ ccrig --config          # interactive editor with live preview
 ccrig --mode minimal    # display density: minimal | normal | expanded
 ```
 
+In the editor, `y` switches between the `refined` and `classic` looks with a live preview.
+
+Want the room back? Fold the section to one line with `/ccrig:toggle` inside a session (or `ccrig collapse` in a shell), and open it again the same way (`ccrig expand`):
+
+```
+▸ ccrig  my-project · Opus 4.8 · ctx 42% · 5h 63% · 7d 21% ──────────────────────────────────
+```
+
+A window near its limit keeps its `▲` in the folded line, and at the critical threshold the limit warning still gets a line of its own.
+
 Or copy `statusline.config.example.json` to `statusline.config.json` and edit by hand: for an npm install it lives in `~/.ccrig/`, for a standalone copy next to the script (`ccrig --options` prints the exact path and every setting). Config is a separate file, so updates never touch it. Inside a Claude Code session, `/ccrig:config` opens the same menu, and `--autopilot` (off | notify | resume) and `--keep-working` (on | off) set the guardian's behavior.
 
 Running several accounts or many parallel sessions? `ccrig --sessions` lists recent sessions across every profile with the command to resume each, `ccrig --board` shows every session as a traffic light (opt-in), and the `claude-profile` switcher that ships in the npm package works in bash, zsh and PowerShell:
@@ -145,6 +159,7 @@ source "$(npm root -g)/ccrig/claude-profiles.sh"          # bash / zsh / Git Bas
 | `--uninstall` / `--uninstall-guardian` | remove the status line and guardian, or only the guardian |
 | `--doctor` | diagnose a broken or missing setup |
 | `--mode` / `--config` / `--options` | display density, interactive editor, list every setting |
+| `ccrig collapse` / `expand` / `toggle` (`--collapse` / `--expand` / `--toggle`) | fold the CCRig section to one summary line, or open it again; `/ccrig:toggle` does it from inside a session |
 | `--autopilot` / `--keep-working` | limit behavior and keep-working, from the shell |
 | `--sessions` / `--board` / `--status` / `--disarm` | list sessions, watch every session as a traffic light (`--board --watch`), list or stop armed watchers (every profile) |
 | `--name <label>` | label this project on the board (what `/ccrig:name` runs) |
