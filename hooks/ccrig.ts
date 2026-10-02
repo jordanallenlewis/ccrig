@@ -410,7 +410,7 @@ export function register(on, options: { band?: string; spinner?: boolean; alerts
       await $.command.register({
         name: 'ccrig',
         description: 'CCRig: plan usage, the usage and board panes, and status line settings',
-        argumentHint: '[usage | board | mode <m> | autopilot <m> | status | doctor | help]',
+        argumentHint: '[usage | board | mode <m> | autopilot <m> | collapse | expand | toggle | status | doctor | help]',
         immediate: true,
       })
     } catch (err) {

@@ -458,7 +458,7 @@ export function classicResult(stdout: string, base: Record<string, unknown> = {}
 // Install, update and the interactive editor are left out: /plugin installs and updates the mod, and a
 // mod cannot drive a TTY menu. No token starting with "-" ever reaches the CLI, so text typed after
 // /ccrig can never become a flag such as --watch or --hook.
-const BARE = new Set(['status', 'doctor', 'sessions', 'version', 'whatsnew', 'options', 'check-update', 'disarm'])
+const BARE = new Set(['status', 'doctor', 'sessions', 'version', 'whatsnew', 'options', 'check-update', 'disarm', 'collapse', 'expand', 'toggle'])
 const CHOICES: Record<string, readonly string[]> = {
   mode: ['minimal', 'normal', 'expanded'],
   autopilot: ['off', 'notify', 'resume'],
@@ -485,7 +485,7 @@ export function cliArgs(sub: string, rest: readonly string[]): { argv: string[] 
 }
 
 // the commands that change what the bar shows, so the band redraws after them
-export const CHANGES_BAR = new Set(['mode', 'autopilot', 'keep-working', 'name'])
+export const CHANGES_BAR = new Set(['mode', 'autopilot', 'keep-working', 'name', 'collapse', 'expand', 'toggle'])
 
 export function splitArgs(args: string): string[] {
   return String(args || '').trim().split(/\s+/).filter(Boolean)
@@ -496,6 +496,7 @@ export const HELP = [
   '/ccrig usage           a pane with the usage bars, reset times and the pace forecast',
   '/ccrig board           a pane with every session as a traffic light (needs "sessionBoard": true)',
   '/ccrig mode <m>        minimal | normal | expanded',
+  '/ccrig collapse        fold the bar to one line (expand, toggle to open it again)',
   '/ccrig autopilot <m>   off | notify | resume',
   '/ccrig keep-working <on|off>, name <label>, status, sessions, doctor, options, whatsnew, version, check-update, disarm',
   'The band above the prompt, the spinner readout and the toasts are set in /config (the ccrig rows).',

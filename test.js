@@ -69,7 +69,9 @@ function run(args, { stdin = '', env = {}, script = SCRIPT } = {}) {
   // contributor's own Claude Code version (read from `claude --version`) never changes the results
   for (const k of ['CCRIG_TEST_BASH_ARGV', 'CCRIG_BASH_PROBE_MS', 'CCRIG_STUCK_SECS', 'CCRIG_TEST_SHELL_FILTER', 'CLAUDE_CODE_GIT_BASH_PATH']) delete base[k];
   // CCRIG_TEST_SHELL_FILTER: the Git Bash watchdog may only ever end processes inside this test run's sandbox
-  const merged = { ...base, COLUMNS: '120', CCBSL_NO_ACT: '1', CCBSL_NO_NOTIFY: '1', CCBSL_GIT_TIMEOUT_MS: '5000', CCRIG_HOOK_FORM: 'shell', CCRIG_TEST_SHELL_FILTER: ROOT, ...env };
+  // CCRIG_STYLE=classic: the long-standing render assertions pin the classic glyphs; the refined
+  // default (rule line, meters, variants) has its own tests that pass CCRIG_STYLE: 'refined'
+  const merged = { ...base, COLUMNS: '120', CCBSL_NO_ACT: '1', CCBSL_NO_NOTIFY: '1', CCBSL_GIT_TIMEOUT_MS: '5000', CCRIG_HOOK_FORM: 'shell', CCRIG_TEST_SHELL_FILTER: ROOT, CCRIG_STYLE: 'classic', ...env };
   // on Windows os.homedir() reads USERPROFILE, not HOME; mirror it so HOME sandboxing works there too
   if (merged.HOME) merged.USERPROFILE = merged.HOME;
   const r = spawnSync(NODE, [script, ...args], {
@@ -301,7 +303,8 @@ test('a passed reset time shows "now" and clears the stale warning', () => {
   const passed = strip(render(baseInput({
     session_id: 'sx', rate_limits: { five_hour: { used_percentage: 96, resets_at: past } },
   }), { env }).out);
-  assert.match(passed, /session .*96% ↺now/);
+  assert.match(passed, /session ↺now/);
+  assert.ok(!/96%/.test(passed), 'the stale pre-reset number is not shown');
   assert.ok(!passed.includes('near limit'), 'no stale near-limit warning after reset passed');
   assert.ok(!passed.includes('⚠'), 'no stale warning glyph');
   // no resume ticket written for a window whose reset already passed
@@ -3377,4 +3380,192 @@ test('Windows: only shells running the exact status line command are ended, neve
     assert.ok(!alive(bar), 'the stuck status line shell was ended');
     assert.ok(alive(mine), 'the user\'s own shell was left alone');
   } finally { for (const c of [bar, mine]) { try { c.kill(); } catch {} } }
+});
+
+// ===========================================================================
+// refined style (the default since 1.9): rule line, meters, layout, number edge cases
+// ===========================================================================
+const R_ENV = (sb, extra = {}) => ({ CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_STYLE: 'refined', ...extra });
+const R_NOW = () => Math.floor(Date.now() / 1000);
+const fullInput = (extra = {}) => baseInput({
+  session_id: 'rf1', fast_mode: true, cost: { total_cost_usd: 3.5, total_lines_added: 10, total_lines_removed: 2 },
+  session_name: 'A rather long session title that keeps going',
+  workspace: { current_dir: '/tmp/a-long-project-name/packages/web/src', project_dir: '/tmp/a-long-project-name' },
+  rate_limits: { five_hour: { used_percentage: 64, resets_at: R_NOW() + 5000 }, seven_day: { used_percentage: 21, resets_at: R_NOW() + 3 * 86400 } },
+  ...extra,
+});
+
+test('refined: a rule line sets the bar apart, spanning the width', () => {
+  const sb = sandbox();
+  const lines = strip(render(fullInput(), { env: R_ENV(sb) }).out).split('\n');
+  assert.match(lines[0], /^▾ ccrig ─+$/, 'first line is the rule, marked as a foldable section');
+  assert.strictEqual(lines[0].length, 119, 'rule spans COLUMNS minus reserveCols');
+  assert.ok(lines.length >= 2 && !/─{4}/.test(lines[1]), 'segments follow the rule');
+});
+
+test('refined: the rule tints amber near a limit and red at critical; rule:false hides it', () => {
+  const sb = sandbox();
+  const at = (pct) => render(fullInput({ rate_limits: { five_hour: { used_percentage: pct, resets_at: R_NOW() + 900 } } }), { env: R_ENV(sb) }).out.split('\n')[0];
+  assert.ok(at(30).includes('38;5;240m'), 'quiet rule when healthy');
+  assert.ok(at(92).includes('38;5;178m'), 'amber rule at warn');
+  assert.ok(at(97).includes('38;5;167m'), 'red rule at critical');
+  const script = scriptCopy(sb.dir, { rule: false });
+  const out = strip(render(fullInput(), { env: R_ENV(sb), script }).out);
+  assert.ok(!/^▾ ccrig|^─{4,}$/m.test(out), 'no rule when rule:false');
+});
+
+test('refined: no line ever runs past the terminal, at any width', () => {
+  const SL = require(SCRIPT);
+  const sb = sandbox();
+  for (const cols of [12, 18, 24, 30, 40, 50, 60, 80, 100, 120, 160]) {
+    for (const mode of ['normal', 'expanded']) {
+      const script = scriptCopy(sb.dir, { mode });
+      const input = fullInput({ rate_limits: { five_hour: { used_percentage: 93, resets_at: R_NOW() + 900 }, seven_day: { used_percentage: 21, resets_at: R_NOW() + 3 * 86400 } } });
+      const out = render(input, { env: R_ENV(sb), cols: String(cols), script }).out;
+      for (const line of out.split('\n')) assert.ok(SL.dispWidth(line) <= cols - 1, `${mode} @${cols}: ${strip(line)}`);
+    }
+  }
+});
+
+test('refined: meters share one size, and the group stays on one line when it can', () => {
+  const sb = sandbox();
+  const narrow = strip(render(fullInput(), { env: R_ENV(sb), cols: '50' }).out);
+  const meterLine = narrow.split('\n').find((l) => /ctx/.test(l));
+  assert.ok(/5h/.test(meterLine) && /7d/.test(meterLine), 'the three meters share a line at 50 cols: ' + narrow);
+  assert.ok(!/━/.test(meterLine), 'one size for all: no full meter beside a shrunken one');
+  const wide = strip(render(fullInput(), { env: R_ENV(sb), cols: '120' }).out).split('\n');
+  assert.ok(wide.some((l) => /ctx .*session .*weekly/.test(l)), 'ctx, session and weekly together at 120: ' + wide.join(' / '));
+  assert.ok(!wide.some((l) => /^weekly/.test(l)), 'weekly never stranded alone');
+});
+
+test('refined: percentages never overstate, understate, or overflow', () => {
+  const sb = sandbox();
+  const pct = (p) => strip(render(baseInput({ rate_limits: { five_hour: { used_percentage: p, resets_at: R_NOW() + 3600 } } }), { env: R_ENV(sb) }).out);
+  assert.match(pct(99.6), /session \S+ 99%/, '99.6 is not 100% until it is full');
+  assert.match(pct(0.3), /session \S+ <1%/, 'a sliver of use is not 0%');
+  assert.match(pct(250), /session \S+ 100%/, 'clamped to 100');
+  assert.ok(!/session/.test(pct('80')), 'non-numeric usage is dropped');
+  const m = strip(render(baseInput({ context_window: { used_percentage: 3 } }), { env: R_ENV(sb) }).out);
+  assert.match(m, /ctx [━╸]/, 'any use draws a sliver');
+});
+
+test('refined: a passed reset shows "reset", a millisecond epoch is read as seconds', () => {
+  const sb = sandbox();
+  const stale = strip(render(baseInput({ rate_limits: { five_hour: { used_percentage: 100, resets_at: R_NOW() - 60 } } }), { env: R_ENV(sb) }).out);
+  assert.match(stale, /session ↺ reset/);
+  assert.ok(!/100%|near limit|▲/.test(stale), 'the refreshed window does not alarm: ' + stale);
+  const ms = strip(render(baseInput({ rate_limits: { five_hour: { used_percentage: 40, resets_at: (R_NOW() + 3600) * 1000 } } }), { env: R_ENV(sb) }).out);
+  assert.match(ms, /session \S+ 40% ↺ \d{1,2}:\d\d[ap]/, 'ms epoch renders as a clock time: ' + ms);
+});
+
+test('refined: a reset later this week reads as a weekday', () => {
+  const sb = sandbox();
+  const out = strip(render(baseInput({ rate_limits: { seven_day: { used_percentage: 10, resets_at: R_NOW() + 3 * 86400 } } }), { env: R_ENV(sb) }).out);
+  assert.match(out, /weekly \S+ 10% ↺ (Sun|Mon|Tue|Wed|Thu|Fri|Sat) \d{1,2}:\d\d[ap]/);
+});
+
+test('refined: text labels, no emoji; the limit alert gets its own line', () => {
+  const sb = sandbox();
+  const input = fullInput({ rate_limits: { five_hour: { used_percentage: 92, resets_at: R_NOW() + 900 } } });
+  const out = strip(render(input, { env: R_ENV(sb), cols: '200' }).out);
+  assert.ok(!/[\u{1F300}-\u{1FAFF}]|⚡|★/u.test(out), 'no emoji icons: ' + out);
+  assert.match(out, /effort high/);
+  assert.match(out, /Opus 4\.8 1M/);
+  const lines = out.split('\n');
+  assert.match(lines[lines.length - 1], /^▲ near limit/, 'alert on its own last line');
+});
+
+test('style: classic via config or CCRIG_STYLE restores the old look; a saved classic color yields to refined', () => {
+  const sb = sandbox();
+  const classic = strip(render(fullInput(), { env: R_ENV(sb, { CCRIG_STYLE: 'classic' }) }).out);
+  assert.match(classic, /📂 /);
+  assert.ok(!/^▾ ccrig|^─{4,}$/m.test(classic), 'classic has no rule line');
+  const script = scriptCopy(sb.dir, { style: 'classic' });
+  const viaCfg = strip(render(fullInput(), { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_STYLE: '' }, script }).out);
+  assert.match(viaCfg, /📂 /);
+  // the old example config shipped every classic color; under refined those are not a real choice
+  const s2 = sandbox();
+  const old = scriptCopy(s2.dir, { color: { folder: 75, model: 99 } });
+  const raw = render(baseInput(), { env: R_ENV(s2), script: old }).out;
+  assert.ok(raw.includes('38;5;74m'), 'classic-default folder color yields to the refined one');
+  assert.ok(raw.includes('38;5;99m'), 'a real custom color is kept');
+});
+
+test('refined: the mod host still gets one plain string per segment', () => {
+  const sb = sandbox();
+  const r = render(fullInput(), { env: R_ENV(sb, { CCRIG_HOST: 'mod', CCRIG_PURE: '1' }) });
+  const j = JSON.parse(r.out);
+  assert.ok(j.segments.length > 3 && j.segments.every((s) => typeof s === 'string'));
+  assert.strictEqual(j.segments.length, j.widths.length);
+});
+
+test('refined: the limit alert shrinks to fit a narrow terminal instead of being cut', () => {
+  const sb = sandbox();
+  const input = fullInput({ rate_limits: { five_hour: { used_percentage: 92, resets_at: R_NOW() + 900 } } });
+  for (const cols of ['40', '36']) {
+    const lines = strip(render(input, { env: R_ENV(sb), cols }).out).split('\n');
+    assert.strictEqual(lines[lines.length - 1], '▲ near limit · claude --continue', `@${cols}: ` + lines.join(' / '));
+  }
+  const tiny = strip(render(input, { env: R_ENV(sb), cols: '20' }).out).split('\n');
+  assert.strictEqual(tiny[tiny.length - 1], '▲ near limit', 'the head alone at 20 cols');
+});
+
+// ===========================================================================
+// collapse / expand the CCRig section
+// ===========================================================================
+test('collapse: ccrig collapse folds the section to one line; expand and toggle open it again', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir);
+  const env = R_ENV(sb);
+  const lines = () => strip(render(fullInput(), { env, script }).out).split('\n');
+  assert.ok(lines().length >= 3, 'open by default');
+  assert.strictEqual(run(['collapse'], { env, script }).code, 0);
+  const folded = lines();
+  assert.strictEqual(folded.length, 1, 'one line when collapsed: ' + folded.join(' / '));
+  assert.match(folded[0], /^▸ ccrig  a-long-project-name\/packages\/web\/src · Opus 4\.8 · ctx 42% · 5h 64% · 7d 21% ─+$/);
+  run(['expand'], { env, script });
+  assert.match(lines()[0], /^▾ ccrig ─+$/, 'expand restores the full section');
+  run(['--toggle'], { env, script });
+  assert.strictEqual(lines().length, 1, 'toggle folds it');
+  run(['--toggle'], { env, script });
+  assert.ok(lines().length >= 3, 'toggle again opens it');
+  const saved = JSON.parse(fs.readFileSync(path.join(sb.dir, 'statusline.config.json'), 'utf8'));
+  assert.ok(!('collapsed' in saved), 'an expanded section saves nothing (it is the default)');
+});
+
+test('collapse: the folded line fits any width, keeps the warning glyph, and never hides a critical alert', () => {
+  const SL = require(SCRIPT);
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { collapsed: true });
+  for (const cols of [16, 24, 40, 80, 160]) {
+    const out = render(fullInput(), { env: R_ENV(sb), cols: String(cols), script }).out;
+    assert.strictEqual(out.split('\n').length, 1, `one line @${cols}`);
+    assert.ok(SL.dispWidth(out) <= cols - 1, `fits @${cols}: ${strip(out)}`);
+  }
+  const narrow = strip(render(fullInput(), { env: R_ENV(sb), cols: '30', script }).out);
+  assert.match(narrow, /5h 64% · 7d 21%/, 'the usage numbers are the last to go: ' + narrow);
+  const warn = strip(render(fullInput({ rate_limits: { five_hour: { used_percentage: 92, resets_at: R_NOW() + 900 } } }), { env: R_ENV(sb), script }).out);
+  assert.match(warn, /▲ 5h 92%/);
+  assert.strictEqual(warn.split('\n').length, 1, 'warn stays folded');
+  const crit = strip(render(fullInput({ rate_limits: { five_hour: { used_percentage: 99, resets_at: R_NOW() + 900 } } }), { env: R_ENV(sb), script }).out).split('\n');
+  assert.strictEqual(crit.length, 2, 'critical adds the alert line');
+  assert.match(crit[1], /^▲ limit imminent/);
+  const classic = strip(render(fullInput(), { env: R_ENV(sb, { CCRIG_STYLE: 'classic' }), script }).out);
+  assert.match(classic, /^▸  .*5h 64%/, 'classic folds too');
+});
+
+test('collapse: the mod gets the folded line as its one segment; /ccrig:toggle is installed', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { collapsed: true });
+  const j = JSON.parse(render(fullInput(), { env: R_ENV(sb, { CCRIG_HOST: 'mod', CCRIG_PURE: '1' }), script }).out);
+  assert.strictEqual(j.segments.length, 1);
+  assert.match(strip(j.segments[0]), /^▸ ccrig  .*ctx 42%/);
+  assert.ok(!/─{3}/.test(strip(j.segments[0])), 'no rule fill: the mod lays out its own band');
+  const s2 = sandbox(); // a fresh home: the mod render above left its marker, which (rightly) skips markdown commands
+  const env = { CLAUDE_CONFIG_DIR: s2.cfg, HOME: s2.home };
+  run(['--install', '--this-profile', '--no-guardian'], { env });
+  const doc = fs.readFileSync(path.join(s2.cfg, 'commands', 'ccrig', 'toggle.md'), 'utf8');
+  assert.match(doc, /--toggle/);
+  run(['--uninstall', '--this-profile'], { env });
+  assert.ok(!fs.existsSync(path.join(s2.cfg, 'commands', 'ccrig', 'toggle.md')), 'uninstall removes it');
 });
