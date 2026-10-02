@@ -52,7 +52,7 @@ function scriptCopy(dir, config) {
   if (config !== undefined) fs.writeFileSync(path.join(dir, 'statusline.config.json'), JSON.stringify(config));
   return p;
 }
-function run(args, { stdin = '', env = {}, script = SCRIPT } = {}) {
+function run(args, { stdin = '', env = {}, script = SCRIPT, pre = [] } = {}) {
   // TEST-01: start from a scrubbed copy of the environment so a contributor's own
   // NO_UPDATE_NOTIFIER / API key / proxy / CCBSL_* settings can't change test behavior, and
   // redirect every temp path at TESTTMP so the product never reads or deletes host os.tmpdir().
@@ -74,7 +74,7 @@ function run(args, { stdin = '', env = {}, script = SCRIPT } = {}) {
   const merged = { ...base, COLUMNS: '120', CCBSL_NO_ACT: '1', CCBSL_NO_NOTIFY: '1', CCBSL_GIT_TIMEOUT_MS: '5000', CCRIG_HOOK_FORM: 'shell', CCRIG_TEST_SHELL_FILTER: ROOT, CCRIG_STYLE: 'classic', ...env };
   // on Windows os.homedir() reads USERPROFILE, not HOME; mirror it so HOME sandboxing works there too
   if (merged.HOME) merged.USERPROFILE = merged.HOME;
-  const r = spawnSync(NODE, [script, ...args], {
+  const r = spawnSync(NODE, [...pre, script, ...args], {
     input: stdin,
     encoding: 'utf8',
     timeout: 15000,
@@ -3568,4 +3568,75 @@ test('collapse: the mod gets the folded line as its one segment; /ccrig:toggle i
   assert.match(doc, /--toggle/);
   run(['--uninstall', '--this-profile'], { env });
   assert.ok(!fs.existsSync(path.join(s2.cfg, 'commands', 'ccrig', 'toggle.md')), 'uninstall removes it');
+});
+
+// ===========================================================================
+// performance budget: the render runs every few seconds per session, so its file system and process
+// work is counted, not eyeballed. A preload wraps fs.*Sync and child_process.* in the child and writes
+// the tally to a file at exit.
+// ===========================================================================
+const COUNTER = path.join(ROOT, 'count-preload.js');
+fs.writeFileSync(COUNTER, `
+const fs = require('fs'), cp = require('child_process');
+const out = { total: 0, fn: {}, path: {}, bytes: {}, spawns: 0 };
+const fds = {};
+const key = (a) => (typeof a === 'string' || Buffer.isBuffer(a)) ? String(a).replace(/\\\\/g, '/') : (typeof a === 'number' ? (fds[a] || 'fd' + a) : '?');
+for (const n of ['readFileSync', 'writeFileSync', 'statSync', 'lstatSync', 'fstatSync', 'existsSync', 'readdirSync', 'openSync', 'readSync', 'closeSync', 'writeSync', 'mkdirSync', 'unlinkSync', 'renameSync', 'chmodSync', 'realpathSync', 'copyFileSync', 'accessSync', 'appendFileSync']) {
+  const orig = fs[n];
+  fs[n] = function (...a) {
+    out.total++; out.fn[n] = (out.fn[n] || 0) + 1;
+    const k = n + ' ' + key(a[0]); out.path[k] = (out.path[k] || 0) + 1;
+    const r = orig.apply(this, a);
+    if (n === 'openSync') fds[r] = key(a[0]);
+    if (n === 'readSync') out.bytes[key(a[0])] = (out.bytes[key(a[0])] || 0) + r;
+    return r;
+  };
+}
+for (const n of ['execSync', 'execFileSync', 'spawnSync', 'spawn', 'exec', 'execFile', 'fork']) {
+  const orig = cp[n];
+  cp[n] = function (...a) { out.spawns++; return orig.apply(this, a); };
+}
+process.on('exit', () => { try { require('fs').writeFileSync.call(null, process.env.CCRIG_TEST_COUNT_OUT, JSON.stringify(out)); } catch {} });
+`);
+function countedRender(input, env, script) {
+  const outFile = path.join(ROOT, 'count-' + (++n) + '.json');
+  const r = run([], { stdin: JSON.stringify(input), env: { ...env, CCRIG_TEST_COUNT_OUT: outFile }, script, pre: ['-r', COUNTER] });
+  return { r, c: JSON.parse(fs.readFileSync(outFile, 'utf8')) };
+}
+const hits = (c, re) => Object.entries(c.path).filter(([k]) => re.test(k)).reduce((s, [, v]) => s + v, 0);
+
+test('perf: a warm render stays inside its budget (no spawn, one transcript stat, one sample read, no settings.json)', () => {
+  const sb = sandbox();
+  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), JSON.stringify({ model: 'opus', permissions: { allow: ['Bash(x:*)'] } }));
+  const tp = transcript(sb.dir, [userEntry('go'), { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'p1', name: 'Task', input: { description: 'scan' } }] } }]);
+  const now = Math.floor(Date.now() / 1000);
+  const input = baseInput({ session_id: 'perf-1', transcript_path: tp, version: '2.1.300',
+    rate_limits: { five_hour: { used_percentage: 40, resets_at: now + 7200 }, seven_day: { used_percentage: 20, resets_at: now + 4 * 86400 } } });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_STYLE: 'refined' };
+  render(input, { env }); render(input, { env });   // warm every cache (git, agents, samples, profiles)
+  const { r, c } = countedRender(input, env);
+  assert.strictEqual(r.code, 0);
+  assert.match(strip(r.out), /1 agent/, 'the render still did its work: ' + strip(r.out));
+  assert.strictEqual(c.spawns, 0, 'a warm render starts no process');
+  const tpKey = new RegExp('^\\w+ ' + tp.replace(/\\/g, '/').replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$');
+  assert.ok(hits(c, tpKey) <= 1, 'one stat of the transcript, nothing else: ' + JSON.stringify(c.path));
+  assert.ok(hits(c, /^readFileSync .*ccbsl-usage-/) <= 1, 'the burn-rate samples are read once: ' + JSON.stringify(c.path));
+  assert.strictEqual(hits(c, /settings\.json$/), 0, 'settings.json is not read on a healthy render: ' + JSON.stringify(c.path));
+  assert.ok(c.total <= 22, 'warm render file system calls: ' + c.total + ' ' + JSON.stringify(c.fn));
+});
+
+test('perf: during a turn the render reads only what was appended to the transcript', () => {
+  const sb = sandbox();
+  const big = Array.from({ length: 400 }, (_, i) => ({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'old' + i, content: 'x'.repeat(1500) }] } }));
+  const tp = transcript(sb.dir, [userEntry('go'), ...big, { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'q1', name: 'Agent', input: { description: 'build' } }] } }]);
+  const input = baseInput({ session_id: 'perf-2', transcript_path: tp });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_STYLE: 'refined' };
+  render(input, { env });
+  fs.appendFileSync(tp, JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'q0', content: 'ok' }] } }) + '\n');
+  const { r, c } = countedRender(input, env);
+  assert.match(strip(r.out), /1 agent/);
+  const read = Object.entries(c.bytes).filter(([k]) => k === tp.replace(/\\/g, '/')).reduce((s, [, v]) => s + v, 0);
+  assert.ok(read < 4096, 'read ' + read + ' bytes of a ' + fs.statSync(tp).size + '-byte transcript');
+  fs.appendFileSync(tp, JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'q1', content: 'done' }] } }) + '\n');
+  assert.ok(!/agent/.test(strip(render(input, { env }).out)), 'the appended result closes the agent');
 });
