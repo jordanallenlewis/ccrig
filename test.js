@@ -3992,3 +3992,34 @@ test('StopFailure: a session that never drew the bar (claude -p, SDK) gets the t
   run(['--hook', 'stop-failure'], { stdin: JSON.stringify(sfInput('sf6', { reset_after_seconds: 60 })), env, script: off });
   assert.ok(!fs.existsSync(path.join(sb.cfg, 'resume-tickets', 'sf6.md')), 'autopilot off: nothing');
 });
+
+// ===========================================================================
+// onboarding + fonts
+// ===========================================================================
+test('glyphs ascii: the refined bar is pure ASCII and keeps its width', () => {
+  const sb = sandbox();
+  const now = Math.floor(Date.now() / 1000);
+  const input = baseInput({ session_id: 'gl1', rate_limits: { five_hour: { used_percentage: 92, resets_at: now + 900 }, seven_day: { used_percentage: 30, resets_at: now + 3 * 86400 } } });
+  const uni = render(input, { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_STYLE: 'refined' } }).out;
+  const asc = render(input, { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_STYLE: 'refined', CCRIG_GLYPHS: 'ascii' } }).out;
+  assert.match(strip(asc), /^[\x20-\x7e\n]*$/, 'only printable ASCII: ' + strip(asc));
+  const SL = require(SCRIPT);
+  assert.deepStrictEqual(strip(asc).split('\n').map((l) => l.length), strip(uni).split('\n').map((l) => SL.dispWidth(l)), 'same layout, glyph for glyph');
+  assert.match(strip(asc), /^v ccrig -+$/m);
+  assert.match(strip(asc), /! (session|5h) =+-* 92%/);
+});
+
+test('first run: a plan bar with no usage yet says when it appears; an API key or a used session does not', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_STYLE: 'refined' };
+  const fresh = strip(render({ model: { display_name: 'Opus 5.5' }, workspace: { current_dir: '/tmp/p' } }, { env }).out);
+  assert.match(fresh, /plan usage appears after the first reply/);
+  const api = strip(render({ model: { display_name: 'Opus 5.5' }, workspace: { current_dir: '/tmp/p' } }, { env: { ...env, ANTHROPIC_API_KEY: 'x' } }).out);
+  assert.ok(!/first reply/.test(api), 'an API key never gets plan usage');
+  const tp = path.join(sb.dir, 'big.jsonl');
+  fs.writeFileSync(tp, 'x'.repeat(10000));
+  const used = strip(render({ model: { display_name: 'Opus 5.5' }, workspace: { current_dir: '/tmp/p' }, transcript_path: tp }, { env }).out);
+  assert.ok(!/first reply/.test(used), 'a session with history is past its first reply');
+  const classic = strip(render({ model: { display_name: 'Opus 5.5' }, workspace: { current_dir: '/tmp/p' } }, { env: { ...env, CCRIG_STYLE: 'classic' } }).out);
+  assert.ok(!/first reply/.test(classic), 'classic unchanged');
+});

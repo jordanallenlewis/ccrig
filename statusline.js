@@ -128,6 +128,9 @@ const DEFAULTS = {
   resetStyle: 'auto',   // 'auto' (the locale's clock) | 'clock' (10:40a) | 'clock24' (14:40) | 'relative' (2h14m)
   // East Asian Ambiguous glyphs (─ ━ │ ▲ ●): 'auto' counts them 2 cells wide under a ja/zh/ko locale | 'narrow' | 'wide'
   ambiguousWidth: 'auto',
+  // 'unicode' (━ ─ │ ▲ ↺ ●) | 'ascii' (= - | ! @ *) for a font without them: legacy Windows conhost with
+  // Consolas, Lucida Console or Courier New draws boxes for some. CCRIG_GLYPHS sets it for one terminal.
+  glyphs: 'unicode',
   resumeTickets: true,  // at critical usage, save resume-tickets/<session>.md with the exact pick-up command
   // ---- Guardian: keep working through soft stops, and survive the hard limit wall ----
   // Feature 2 (Relentless mode): a Stop hook keeps the session working while todos remain.
@@ -262,6 +265,8 @@ function loadConfig() {
     }
   }
   if (!STYLES.includes(merged.style)) merged.style = 'refined';
+  if (merged.glyphs !== 'ascii' && merged.glyphs !== 'unicode') merged.glyphs = 'unicode';
+  if (process.env.CCRIG_GLYPHS === 'ascii' || process.env.CCRIG_GLYPHS === 'unicode') merged.glyphs = process.env.CCRIG_GLYPHS;
   // CCRIG_STYLE picks the look for one terminal or one run without touching the shared config
   if (STYLES.includes(process.env.CCRIG_STYLE)) merged.style = process.env.CCRIG_STYLE;
   // A key the user never set takes the ACTIVE style's palette. A saved value that only repeats the
@@ -413,7 +418,11 @@ function ambiguousMode(setting, env) {
   if (setting === 'wide' || setting === 'narrow') return setting;
   return /^(ja|zh|ko)([_.@-]|$)/i.test(env.LC_ALL || env.LC_CTYPE || env.LANG || '') ? 'wide' : 'narrow';
 }
-let AMBIG_WIDE = ambiguousMode(CONFIG.ambiguousWidth) === 'wide';
+let AMBIG_WIDE = CONFIG.glyphs !== 'ascii' && ambiguousMode(CONFIG.ambiguousWidth) === 'wide';
+// glyphs: "ascii": every refined glyph swapped for a one-cell ASCII stand-in, after layout (widths are
+// identical, so nothing reflows). Meters read ====---- and warnings !, which survive any font.
+const ASCII_GLYPHS = { '━': '=', '╸': '-', '─': '-', '│': '|', '▾': 'v', '▸': '>', '▲': '!', '●': '*', '○': 'o', '↺': '@', '↑': '^', '↓': 'v', '·': '-', '…': '~' };
+function glyphsOut(s) { return CONFIG.glyphs === 'ascii' && isRefined() ? s.replace(/[━╸─│▾▸▲●○↺↑↓·…]/g, (ch) => ASCII_GLYPHS[ch]) : s; }
 // `n` cells of a one-glyph fill (a rule), whatever width the glyph takes in this terminal
 function fillCells(ch, n) { return n > 0 ? ch.repeat(Math.floor(n / glyphWidth(ch.codePointAt(0)))) : ''; }
 // display width: strip ANSI, then sum per-codepoint cell widths
@@ -2349,6 +2358,13 @@ function collectItems(input, width, gitOverride) {
     : (reset != null && !windowActive(reset)) ? c(K.dim, label + ' ↺now') : usageSeg(label, pct, reset));
   out.session = useSeg('session', sPct, sReset);
   out.weekly = useSeg('weekly', wPct, wReset);
+  // first run on a plan: Claude Code sends usage only with a reply, so a fresh bar has no meters. Say so,
+  // rather than look broken, until the first reply (or a few KB of transcript) arrives.
+  if (R && sPct == null && wPct == null && !process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
+    let small = true;
+    try { small = !input.transcript_path || fs.statSync(input.transcript_path).size < 4096; } catch {}
+    if (small) out.session = [lbl('plan usage appears after the first reply'), lbl('usage after 1st reply')];
+  }
   out.forecast = forecastSeg(input.session_id, sPct, sReset, wPct, wReset);
   out.resumeHint = resumeHintSeg(input, sPct, wPct, sReset, wReset, live);
 
@@ -2430,7 +2446,7 @@ function collapsedSummary(r, width, withFill) {
 }
 function render(input, width, gitOverride) {
   const r = collectItems(input, width, gitOverride);
-  if (isCollapsed()) return collapsedSummary(r, width, true).join('\n');
+  if (isCollapsed()) return glyphsOut(collapsedSummary(r, width, true).join('\n'));
   const { items, level } = r;
   if (!isRefined()) return wrapSegments(items.map((it) => it.v[0]), width);
   // the rule sets the bar apart from the transcript above it (and tints as a limit nears); its
@@ -2441,7 +2457,7 @@ function render(input, width, gitOverride) {
   if (!lines.length) return '';
   if (rule) lines.unshift(ruleLine(width, level));
   else lines[0] = foldMark(level) + lines[0];
-  return lines.join('\n');
+  return glyphsOut(lines.join('\n'));
 }
 
 // representative sample input for --demo / --config preview
@@ -3574,6 +3590,7 @@ function runOptions() {
   o += 'config file: ' + CONFIG_PATH + (fs.existsSync(CONFIG_PATH) ? '' : '  (not present: using defaults)') + '\n\n';
   o += 'display mode:   ' + CONFIG.mode + '        choices: ' + MODES.join(' | ') + '\n';
   o += 'reset style:    ' + CONFIG.resetStyle + '        choices: auto (the locale\'s clock) | clock | clock24 | relative\n';
+  o += 'glyphs:         ' + CONFIG.glyphs + '      choices: unicode | ascii (for a font without box drawing)\n';
   o += 'ambiguous width: ' + CONFIG.ambiguousWidth + '       auto | narrow | wide  (box-drawing glyphs counted as ' + (AMBIG_WIDE ? '2 cells' : '1 cell') + ' now)\n';
   o += 'look:           ' + CONFIG.style + '        choices: ' + STYLES.join(' | ') + '   (rule line: ' + (CONFIG.rule !== false ? 'on' : 'off') + ')\n';
   o += 'section:        ' + (isCollapsed() ? 'collapsed' : 'expanded') + '        ccrig collapse | expand | toggle  (/ccrig:toggle in a session)\n';
@@ -4336,9 +4353,12 @@ function runDoctor() {
   let fails = 0;
   const ok = (m) => process.stdout.write('  ok    ' + m + '\n');
   const bad = (m, fix) => { fails++; process.stdout.write('  FAIL  ' + m + (fix ? '\n        fix: ' + fix : '') + '\n'); };
-  const info = (m) => process.stdout.write('  --    ' + m + '\n');
+  const info = (m) => process.stdout.write('  info  ' + m + '\n');
   process.stdout.write('CCRig v' + VERSION + ' doctor\n');
   process.stdout.write('  script:  ' + __filename + '\n  profile: ' + CFG + '\n\n');
+  // legacy conhost (no Windows Terminal, no VS Code) usually draws in Consolas, which lacks some of the bar's glyphs
+  if (process.platform === 'win32' && !process.env.WT_SESSION && !process.env.TERM_PROGRAM && CONFIG.glyphs !== 'ascii' && isRefined()) info('this looks like the legacy Windows console; if the bar shows boxes, set "glyphs": "ascii" (or use Windows Terminal)');
+  if (AMBIG_WIDE) info('box-drawing glyphs are counted 2 cells wide (ambiguousWidth: ' + CONFIG.ambiguousWidth + '); set "ambiguousWidth": "narrow" if the bar looks too short');
 
   const mm = modMarker();
   const modOn = modFresh(mm);
