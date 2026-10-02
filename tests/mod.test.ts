@@ -429,6 +429,34 @@ test('Stop goes to the guardian when ccrig init did not wire it, and keep-workin
   expect(JSON.parse(hook!.init.stdin!).session_id).toBe('sess-2')
 })
 
+test('a turn that died on a usage limit goes to the guardian, unless ccrig init wired it or autopilot is off', async ($, on) => {
+  const sf = (sid = 'sess-1') => ({ hook_event_name: 'StopFailure', session_id: sid, transcript_path: '/t', cwd: '/w', error_type: 'rate_limit', error_message: 'Rate limit exceeded', reset_after_seconds: 600 })
+  const { seen } = setup(on, { config: '{"autopilot":"resume"}' })
+  on('classic.StopFailure', () => ({}))
+  await start($)
+  await $.classic.StopFailure(sf('sess-7'))
+  const hook = seen.runs.find((r) => r.argv.includes('--hook'))
+  expect(hook!.argv.slice(-2)).toEqual(['--hook', 'stop-failure'])
+  expect(JSON.parse(hook!.init.stdin!)).toMatchObject({ session_id: 'sess-7', error_type: 'rate_limit', reset_after_seconds: 600 })
+})
+
+test('StopFailure is left to a wired guardian, and does nothing with autopilot off', async ($, on) => {
+  const wiredSf = { ...WIRED, hooks: { ...WIRED.hooks, StopFailure: [{ matcher: 'rate_limit', hooks: [{ type: 'command', command: 'node C:/npm/node_modules/ccrig/statusline.js --hook stop-failure' }] }] } }
+  const a = setup(on, { settings: wiredSf, config: '{"autopilot":"resume"}' })
+  on('classic.StopFailure', () => ({}))
+  await start($)
+  await $.classic.StopFailure({ hook_event_name: 'StopFailure', session_id: 's', transcript_path: '/t', cwd: '/w', error_type: 'rate_limit' })
+  expect(hookRuns(a.seen)).toEqual([])
+})
+
+test('StopFailure with autopilot off runs nothing', async ($, on) => {
+  const { seen } = setup(on, { config: '{"autopilot":"off"}' })
+  on('classic.StopFailure', () => ({}))
+  await start($)
+  await $.classic.StopFailure({ hook_event_name: 'StopFailure', session_id: 's', transcript_path: '/t', cwd: '/w', error_type: 'rate_limit' })
+  expect(hookRuns(seen)).toEqual([])
+})
+
 test('hooks wired by ccrig init are left to it', async ($, on) => {
   const { seen } = setup(on, { settings: WIRED, hookOut: '{"decision":"block","reason":"x"}' })
   on('classic.Stop', () => ({}))
