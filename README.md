@@ -98,10 +98,11 @@ Restart Claude Code once so the hooks load. What it honestly can and cannot do: 
 
 ## The session board (opt-in)
 
-Turn on `"sessionBoard": true` and every session publishes its state to a shared folder in your home
+Turn it on with `ccrig board on` and every session publishes its state to a shared folder in your home
 directory, so one command shows all of them at once, most urgent first:
 
 ```bash
+ccrig board on         # sets "sessionBoard": true and wires the lamp hooks (restart Claude Code once)
 ccrig --board          # one snapshot
 ccrig board --watch    # redraws in place, and pings your desktop when a session starts waiting
 ```
@@ -112,10 +113,10 @@ finished, grey for one that has gone quiet (or, marked `ready`, one you have not
 you. Green fades to grey after 30 minutes (`"boardDecayMinutes"`), and the ping can be turned off
 with `"boardNotify": false`.
 
-The lamps come from hooks that `ccrig init` wires, so re-run `ccrig init` once if you installed an
-older version. Name a session with `/ccrig:name` (or `ccrig --name <label>` in the project folder), which writes `.claude/ccrig-name` there,
-or set `CCRIG_SESSION_NAME` in a shell to label just that one session. With the board off, nothing
-is written and the hooks do nothing.
+The lamps come from hooks (on each prompt, notification, session end and turn end) that are wired only
+while the board is on, since each one starts Node. `ccrig board off` turns the board off and takes them
+out again; with the board off, nothing is written. Name a session with `/ccrig:name` (or `ccrig --name <label>` in the project folder), which writes `.claude/ccrig-name` there,
+or set `CCRIG_SESSION_NAME` in a shell to label just that one session.
 
 ## Configure
 
@@ -161,7 +162,7 @@ source "$(npm root -g)/ccrig/claude-profiles.sh"          # bash / zsh / Git Bas
 | `--mode` / `--config` / `--options` | display density, interactive editor, list every setting |
 | `ccrig collapse` / `expand` / `toggle` (`--collapse` / `--expand` / `--toggle`) | fold the CCRig section to one summary line, or open it again; `/ccrig:toggle` does it from inside a session |
 | `--autopilot` / `--keep-working` | limit behavior and keep-working, from the shell |
-| `--sessions` / `--board` / `--status` / `--disarm` | list sessions, watch every session as a traffic light (`--board --watch`), list or stop armed watchers (every profile) |
+| `--sessions` / `--board` / `--status` / `--disarm` | list sessions, watch every session as a traffic light (`--board --watch`; `ccrig board on` / `off` turns it on or off), list or stop armed watchers (every profile) |
 | `--name <label>` | label this project on the board (what `/ccrig:name` runs) |
 | `--update` / `--check-update` / `--whatsnew` / `--dismiss-update` / `--force` | update from npm or in place, check now, show what changed, hide or repair |
 | `--demo` / `--selftest` / `--version` | sample render, edge-case checks, version |

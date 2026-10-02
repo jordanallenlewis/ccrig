@@ -19,6 +19,8 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const NODE = process.execPath;
+// on Windows a bar-only install keeps one Stop hook (board-stop) so the Git Bash watchdog has a trigger
+const WIN = process.platform === 'win32';
 
 // every sandbox lives under one scratch root, removed at the end
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'ccsl-test-'));
@@ -425,7 +427,7 @@ test('--install wires a fresh profile and is idempotent with a backup', () => {
   const j = JSON.parse(fs.readFileSync(sp, 'utf8'));
   assert.strictEqual(j.statusLine.type, 'command');
   assert.ok(cmdHasPath(j.statusLine.command, SCRIPT));
-  assert.strictEqual(j.statusLine.refreshInterval, 2);
+  assert.strictEqual(j.statusLine.refreshInterval, 5, 'every 5 seconds between messages (2 cost an idle session a Node start every 2s)');
   const again = run(['--install'], { env });
   assert.strictEqual(again.code, 0);
   assert.ok(fs.existsSync(sp + '.bak'), 'backup written on re-run');
@@ -521,7 +523,8 @@ test('--install --no-guardian installs the bar only (no guardian hooks)', () => 
   const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
   assert.ok(j.statusLine, 'status line wired');
   assert.ok(!hasSlug(j, 'Stop', 'stop'), 'no guardian hooks with --no-guardian');
-  assert.ok(hasSlug(j, 'Stop', 'board-stop'), 'the board still gets its own Stop hook');
+  for (const ev of ['UserPromptSubmit', 'Notification', 'SessionEnd']) assert.ok(!j.hooks || !j.hooks[ev], 'the board is off, so no ' + ev + ' lamp hook');
+  assert.strictEqual(hasSlug(j, 'Stop', 'board-stop'), WIN, 'board-stop stays only on Windows, as the Git Bash check');
 });
 
 test('--install refuses corrupt settings.json without clobbering it', () => {
@@ -1189,7 +1192,7 @@ test('--uninstall-guardian removes only guardian hooks, keeps the status line', 
   const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
   assert.ok(j.statusLine, 'status line stays');
   assert.ok(!hasSlug(j, 'Stop', 'stop'), 'guardian Stop hook gone');
-  assert.ok(hasSlug(j, 'Stop', 'board-stop'), 'the board Stop hook stays');
+  assert.strictEqual(hasSlug(j, 'Stop', 'board-stop'), WIN, 'with the board off, a Stop hook comes back only on Windows (the Git Bash check)');
 });
 
 test('--uninstall removes both the status line and guardian hooks', () => {
@@ -2476,10 +2479,15 @@ test('--board --watch is not an auto-resume watcher', () => {
   assert.match(run(['--status'], { env, script }).out, /No auto-resume watchers/, '--status still reports nothing armed');
 });
 
-test('--install wires the board lamp hooks even with --no-guardian', () => {
-  const sb = sandbox();
-  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
-  run(['--install', '--no-guardian'], { env, script: scriptCopy(sb.dir) });
+// how many of OUR hook entries an event holds, counted per hook rather than per group
+const ourHookCount = (j, ev) => (Array.isArray(j.hooks && j.hooks[ev]) ? j.hooks[ev] : [])
+  .reduce((a, g) => a + ((g && g.hooks) || []).filter((h) => (h.command || '').includes('--hook')).length, 0);
+const BOARD_HOOK_EVENTS = ['UserPromptSubmit', 'Notification', 'SessionEnd'];
+const GUARD_HOOK_EVENTS = ['Stop', 'SessionStart', 'PreCompact'];
+
+test('--install wires the board lamp hooks with the board on, even with --no-guardian', () => {
+  const { sb, script, env } = boardBox();
+  run(['--install', '--no-guardian'], { env, script });
   const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
   // pin the event -> slug mapping, not just "some --hook is here": transposing two slugs in the
   // table would otherwise ship UserPromptSubmit running the session-end handler, which deletes the row
@@ -2495,35 +2503,90 @@ test('--install wires the board lamp hooks even with --no-guardian', () => {
   assert.ok(!('timeout' in j.hooks.SessionEnd[0].hooks[0]), 'no timeout on SessionEnd: it would raise the exit budget');
 });
 
-// how many of OUR hook entries an event holds, counted per hook rather than per group
-const ourHookCount = (j, ev) => (Array.isArray(j.hooks && j.hooks[ev]) ? j.hooks[ev] : [])
-  .reduce((a, g) => a + ((g && g.hooks) || []).filter((h) => (h.command || '').includes('--hook')).length, 0);
-const BOARD_HOOK_EVENTS = ['UserPromptSubmit', 'Notification', 'SessionEnd'];
-const GUARD_HOOK_EVENTS = ['Stop', 'SessionStart', 'PreCompact'];
-
-test('hooks stay at one entry per event through installs in any order', () => {
+test('a default install starts one Node per turn end and none per prompt (the board is off)', () => {
   const sb = sandbox();
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
-  // the orders a real user hits: a plain install, an update's --no-guardian re-run, a guardian opt-in
+  run(['--install'], { env });
+  const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  assert.strictEqual(ourHookCount(j, 'Stop'), 1, 'one Stop hook: the guardian stamps the done lamp itself');
+  assert.ok(hasSlug(j, 'Stop', 'stop'));
+  for (const ev of ['UserPromptSubmit', 'Notification', 'SessionEnd']) assert.ok(!j.hooks[ev], 'no ' + ev + ' hook while the board is off');
+  // with the board on, the guardian's Stop still carries the lamp: no second Stop process
+  const box = boardBox();
+  run(['--install'], { env: box.env, script: box.script });
+  const k = JSON.parse(fs.readFileSync(path.join(box.sb.cfg, 'settings.json'), 'utf8'));
+  assert.strictEqual(ourHookCount(k, 'Stop'), 1, 'board on + guardian: still one Stop hook');
+  for (const ev of ['UserPromptSubmit', 'Notification', 'SessionEnd']) assert.strictEqual(ourHookCount(k, ev), 1, ev + ' wired for the board');
+});
+
+test('ccrig board on|off saves the setting and wires or removes the lamp hooks where CCRig is installed', () => {
+  const sb = sandbox();
   const script = scriptCopy(sb.dir);
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  run(['--install', '--this-profile'], { env, script });
+  // a second profile with no CCRig in it is never touched
+  const other = path.join(sb.home, '.claude-other'); fs.mkdirSync(other);
+  fs.writeFileSync(path.join(other, 'settings.json'), '{"model":"opus"}');
+  const sp = path.join(sb.cfg, 'settings.json');
+  const on = run(['board', 'on'], { env, script });
+  assert.strictEqual(on.code, 0, on.out);
+  assert.match(on.out, /session board -> on/);
+  assert.match(on.out, /Wired its lamp hooks in 1 profile\. Restart Claude Code once/);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(sb.dir, 'statusline.config.json'), 'utf8')).sessionBoard, true);
+  let j = JSON.parse(fs.readFileSync(sp, 'utf8'));
+  for (const ev of ['UserPromptSubmit', 'Notification', 'SessionEnd']) assert.strictEqual(ourHookCount(j, ev), 1, ev + ' wired');
+  assert.strictEqual(ourHookCount(j, 'Stop'), 1, 'the guardian Stop covers the done lamp');
+  assert.strictEqual(fs.readFileSync(path.join(other, 'settings.json'), 'utf8'), '{"model":"opus"}', 'a profile without CCRig is left alone');
+  assert.match(run(['--doctor'], { env, script }).out, /session board lamps wired \(UserPromptSubmit, Notification, SessionEnd, Stop\)/);
+  assert.match(run(['board', 'on'], { env, script }).out, /already wired/, 'a second on changes nothing');
+  const off = run(['--board', 'off'], { env, script });
+  assert.match(off.out, /Took its lamp hooks out of 1 profile/);
+  j = JSON.parse(fs.readFileSync(sp, 'utf8'));
+  for (const ev of ['UserPromptSubmit', 'Notification', 'SessionEnd']) assert.ok(!j.hooks[ev], ev + ' removed');
+  assert.ok(hasSlug(j, 'Stop', 'stop'), 'the guardian stays');
+  assert.match(run(['--board'], { env, script }).out, /session board is off/i, 'a bare --board still shows the board');
+});
+
+test('--config: turning the board on and saving wires the lamp hooks', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir);
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  run(['--install', '--this-profile', '--no-guardian'], { env, script });
+  const r = run(['--config'], { env, script, stdin: 'b\ns\n' });
+  assert.match(r.out, /Session board on\. Wired its lamp hooks in 1 profile/);
+  const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  for (const [ev, slug] of [['UserPromptSubmit', 'user-prompt'], ['Notification', 'notification'], ['SessionEnd', 'session-end'], ['Stop', 'board-stop']]) assert.ok(hasSlug(j, ev, slug), ev + ' wired');
+});
+
+test('--doctor points an older install at its idle lamp hooks when the board is off', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const box = boardBox();
+  run(['--install', '--this-profile'], { env, script: box.script });  // wired while the board was on
+  assert.match(run(['--doctor'], { env }).out, /3 of its lamp hooks are still wired and only start Node to exit, so run {2}ccrig board off/);
+});
+
+test('hooks stay at one entry per event through installs in any order', () => {
+  const { sb, script, env } = boardBox();
+  // the orders a real user hits: a plain install, an update's --no-guardian re-run, a guardian opt-in
   for (const args of [['--install'], ['--install'], ['--install-guardian'], ['--install', '--no-guardian'], ['--install-guardian'], ['--install']]) {
     run(args, { env: args.includes('--no-guardian') ? { ...env, CCBSL_REFRESH: '1' } : env, script }); // an update re-runs in refresh mode
   }
   const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
   for (const ev of [...BOARD_HOOK_EVENTS, ...GUARD_HOOK_EVENTS]) {
-    assert.strictEqual(ourHookCount(j, ev), ev === 'Stop' ? 2 : 1, ev + ' is wired exactly once per group, not once per install');
+    assert.strictEqual(ourHookCount(j, ev), 1, ev + ' is wired exactly once, not once per install (Stop: the guardian also stamps the lamp)');
   }
 });
 
 test('--uninstall-guardian keeps the board lamps; --uninstall removes them', () => {
-  const sb = sandbox();
-  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
-  run(['--install'], { env });
-  run(['--uninstall-guardian'], { env });
+  const { sb, script, env } = boardBox();
+  run(['--install'], { env, script });
+  run(['--uninstall-guardian'], { env, script });
   let j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
   assert.ok(!hasSlug(j, 'Stop', 'stop'), 'the guardian hook is gone');
   assert.ok(Array.isArray(j.hooks.UserPromptSubmit), 'removing the guardian does not take the board with it');
-  const r = run(['--uninstall'], { env });
+  assert.ok(hasSlug(j, 'Stop', 'board-stop'), 'the done lamp gets its own Stop hook back');
+  const r = run(['--uninstall'], { env, script });
   assert.match(r.out, /session-board hook/, 'the uninstall says what it removed');
   j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
   for (const ev of ['UserPromptSubmit', 'Notification', 'SessionEnd', 'Stop', 'SessionStart', 'PreCompact']) {
@@ -2532,19 +2595,21 @@ test('--uninstall-guardian keeps the board lamps; --uninstall removes them', () 
 });
 
 test('a user hook in every event we touch survives install and uninstall byte for byte', () => {
-  const sb = sandbox();
-  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const { sb, script, env } = boardBox();
   const seed = {};
   for (const ev of [...BOARD_HOOK_EVENTS, ...GUARD_HOOK_EVENTS]) seed[ev] = [{ hooks: [{ type: 'command', command: 'echo mine-' + ev }] }];
   const before = JSON.stringify(seed);
   fs.writeFileSync(path.join(sb.cfg, 'settings.json'), JSON.stringify({ hooks: seed }));
-  run(['--install'], { env });
+  run(['--install'], { env, script });
   const mid = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
   for (const ev of [...BOARD_HOOK_EVENTS, ...GUARD_HOOK_EVENTS]) {
     assert.match(JSON.stringify(mid.hooks[ev]), new RegExp('echo mine-' + ev), 'install keeps the user hook in ' + ev);
-    assert.strictEqual(ourHookCount(mid, ev), ev === 'Stop' ? 2 : 1, 'and adds exactly one of ours per group to ' + ev);
+    assert.strictEqual(ourHookCount(mid, ev), 1, 'and adds exactly one of ours to ' + ev);
   }
-  run(['--uninstall'], { env });
+  run(['--board', 'off'], { env, script });
+  const off = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  for (const ev of BOARD_HOOK_EVENTS) assert.strictEqual(JSON.stringify(off.hooks[ev]), JSON.stringify(seed[ev]), 'board off keeps the user hook in ' + ev);
+  run(['--uninstall'], { env, script });
   const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
   assert.strictEqual(JSON.stringify(j.hooks), before, 'uninstall leaves the user hooks exactly as they were');
 });
@@ -2831,6 +2896,7 @@ test('REGRESSION: a standalone --update keeps the exec bit, re-wires new hooks, 
   const script = path.join(inst, 'statusline.js'); fs.copyFileSync(SCRIPT, script);
   if (process.platform !== 'win32') fs.chmodSync(script, 0o755);
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, ...releaseMirror(sb.dir, '9.9.9') };
+  fs.writeFileSync(path.join(inst, 'statusline.config.json'), JSON.stringify({ sessionBoard: true })); // the lamps are wired only with the board on
   run(['--install'], { env, script });
   const sp = path.join(sb.cfg, 'settings.json');
   const j = JSON.parse(fs.readFileSync(sp, 'utf8')); delete j.hooks.SessionEnd; fs.writeFileSync(sp, JSON.stringify(j)); // as if an older version never wired it
@@ -3195,34 +3261,34 @@ test('--hook mod-resume hands back the resume prompt only after the reset, once,
 const ourHooks = (j) => Object.values(j.hooks || {}).flat().flatMap((g) => (g && g.hooks) || []).filter((h) => /statusline\.js/.test(h.command + ' ' + (h.args || []).join(' ')));
 
 test('exec form: hooks start node directly with args, stay idempotent, and --uninstall removes them', () => {
-  const sb = sandbox();
+  const { sb, script } = boardBox();
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_HOOK_FORM: 'exec' };
-  assert.strictEqual(run(['--install', '--this-profile'], { env }).code, 0);
+  assert.strictEqual(run(['--install', '--this-profile'], { env, script }).code, 0);
   const sp = path.join(sb.cfg, 'settings.json');
   let j = JSON.parse(fs.readFileSync(sp, 'utf8'));
   const hooks = ourHooks(j);
-  assert.strictEqual(hooks.length, 7, 'guardian + board hooks');
+  assert.strictEqual(hooks.length, 6, 'guardian + board hooks (the guardian Stop stamps the lamp)');
   for (const h of hooks) {
     assert.ok(Array.isArray(h.args) && h.args.length === 3, 'exec form');
     assert.ok(path.isAbsolute(h.command) && /node(\.exe)?$/i.test(h.command), 'node itself is the command');
-    assert.ok(cmdHasPath(h.args[0], SCRIPT) && h.args[1] === '--hook');
+    assert.ok(cmdHasPath(h.args[0], script) && h.args[1] === '--hook');
   }
-  assert.deepStrictEqual(hooks.map((h) => h.args[2]).sort(), ['board-stop', 'notification', 'pre-compact', 'session-end', 'session-start', 'stop', 'user-prompt']);
+  assert.deepStrictEqual(hooks.map((h) => h.args[2]).sort(), ['notification', 'pre-compact', 'session-end', 'session-start', 'stop', 'user-prompt']);
   // the status line itself has no exec form: still a command string
   assert.strictEqual(typeof j.statusLine.command, 'string');
   assert.ok(!('args' in j.statusLine));
   // a re-run replaces, never duplicates; doctor reads exec-form hooks as wired
-  run(['--install', '--this-profile'], { env });
+  run(['--install', '--this-profile'], { env, script });
   j = JSON.parse(fs.readFileSync(sp, 'utf8'));
-  assert.strictEqual(ourHooks(j).length, 7);
-  assert.match(run(['--doctor'], { env }).out, /ok {4}guardian hooks wired/);
+  assert.strictEqual(ourHooks(j).length, 6);
+  assert.match(run(['--doctor'], { env, script }).out, /ok {4}guardian hooks wired/);
   // switching back to shell form replaces them too
-  run(['--install', '--this-profile'], { env: { ...env, CCRIG_HOOK_FORM: 'shell' } });
+  run(['--install', '--this-profile'], { env: { ...env, CCRIG_HOOK_FORM: 'shell' }, script });
   j = JSON.parse(fs.readFileSync(sp, 'utf8'));
-  assert.strictEqual(ourHooks(j).length, 7);
+  assert.strictEqual(ourHooks(j).length, 6);
   assert.ok(ourHooks(j).every((h) => !h.args), 'back to shell form');
-  run(['--install', '--this-profile'], { env });
-  assert.strictEqual(run(['--uninstall', '--this-profile'], { env }).code, 0);
+  run(['--install', '--this-profile'], { env, script });
+  assert.strictEqual(run(['--uninstall', '--this-profile'], { env, script }).code, 0);
   j = JSON.parse(fs.readFileSync(sp, 'utf8'));
   assert.strictEqual(ourHooks(j).length, 0, 'exec-form hooks are removed');
   assert.ok(!j.statusLine);
@@ -3239,24 +3305,25 @@ test('Windows: hooks go shell-free only when the status line has seen Claude Cod
   render(baseInput({ version: '2.1.287' }), { env });
   run(['--install', '--this-profile'], { env });
   j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
-  assert.ok(ourHooks(j).length === 7 && ourHooks(j).every((h) => Array.isArray(h.args)), '2.1.287 gets exec form');
+  assert.ok(ourHooks(j).length === 3 && ourHooks(j).every((h) => Array.isArray(h.args)), '2.1.287 gets exec form (the board is off: guardian hooks only)');
 });
 
 test('Windows: an install wired the shell way moves to exec form once the bar sees Claude Code 2.1.139+', { skip: process.platform !== 'win32' && 'Windows only' }, () => {
-  const sb = sandbox();
+  const { sb, script } = boardBox();
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
-  run(['--install', '--this-profile'], { env });     // the harness wires shell form
+  run(['--install', '--this-profile'], { env, script });     // the harness wires shell form
   const sp = path.join(sb.cfg, 'settings.json');
   assert.ok(ourHooks(JSON.parse(fs.readFileSync(sp, 'utf8'))).every((h) => !h.args));
-  render(baseInput({ version: '2.1.287' }), { env: { ...env, CCRIG_HOOK_FORM: '' } });
+  render(baseInput({ version: '2.1.287' }), { env: { ...env, CCRIG_HOOK_FORM: '' }, script });
   const j = JSON.parse(fs.readFileSync(sp, 'utf8'));
-  assert.strictEqual(ourHooks(j).length, 7, 'same hooks, none added or dropped');
+  assert.strictEqual(ourHooks(j).length, 6, 'same hooks, none added or dropped');
   assert.ok(ourHooks(j).every((h) => Array.isArray(h.args)), 'now exec form');
   // a bar-only install keeps only its board hooks
-  const sb2 = sandbox();
+  const box2 = boardBox();
+  const sb2 = box2.sb;
   const env2 = { CLAUDE_CONFIG_DIR: sb2.cfg, HOME: sb2.home };
-  run(['--install', '--this-profile', '--no-guardian'], { env: env2 });
-  render(baseInput({ version: '2.1.287' }), { env: { ...env2, CCRIG_HOOK_FORM: '' } });
+  run(['--install', '--this-profile', '--no-guardian'], { env: env2, script: box2.script });
+  render(baseInput({ version: '2.1.287' }), { env: { ...env2, CCRIG_HOOK_FORM: '' }, script: box2.script });
   const j2 = JSON.parse(fs.readFileSync(path.join(sb2.cfg, 'settings.json'), 'utf8'));
   assert.deepStrictEqual(ourHooks(j2).map((h) => h.args[2]).sort(), ['board-stop', 'notification', 'session-end', 'user-prompt']);
 });
@@ -3639,4 +3706,38 @@ test('perf: during a turn the render reads only what was appended to the transcr
   assert.ok(read < 4096, 'read ' + read + ' bytes of a ' + fs.statSync(tp).size + '-byte transcript');
   fs.appendFileSync(tp, JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'q1', content: 'done' }] } }) + '\n');
   assert.ok(!/agent/.test(strip(render(input, { env }).out)), 'the appended result closes the agent');
+});
+
+test('perf: a warn-band checkpoint reads HEAD from .git and dirty from the git cache, starting no git', { skip: !HAS_GIT && 'git is not installed' }, () => {
+  const sb = sandbox();
+  const repo = path.join(sb.dir, 'repo'); fs.mkdirSync(repo);
+  const g = (args, cwd = repo) => spawnSync('git', args, { cwd, encoding: 'utf8' });
+  g(['init', '-q']);
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'x');
+  g(['add', '.']); g(['-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'one']);
+  g(['pack-refs', '--all']);                                  // the branch now lives only in packed-refs
+  fs.writeFileSync(path.join(repo, 'new.txt'), 'untracked');  // and the tree is dirty
+  const head = g(['rev-parse', 'HEAD']).stdout.trim();
+  const now = Math.floor(Date.now() / 1000);
+  const warn = (sid, dir) => baseInput({ session_id: sid, workspace: { current_dir: dir, project_dir: dir }, rate_limits: { five_hour: { used_percentage: 92, resets_at: now + 3600 } } });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const script = scriptCopy(sb.dir); // its own config: earlier tests save autopilot off beside the shared script
+  const cpOf = (sid) => path.join(sb.cfg, 'guardian', sid + '.checkpoint.json');
+  render(warn('gitck-1', repo), { env, script });                     // probes git once, writes the first checkpoint
+  fs.unlinkSync(cpOf('gitck-1'));                             // so the next render writes a fresh one
+  const { c } = countedRender(warn('gitck-1', repo), env, script);
+  assert.strictEqual(c.spawns, 0, 'no git process: the segment cache is fresh and HEAD comes from .git');
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(cpOf('gitck-1'), 'utf8')).git, { head, dirty: true });
+  // a worktree: .git is a file naming its gitdir, and the branch ref lives in the common dir
+  const wt = path.join(sb.dir, 'wt');
+  g(['worktree', 'add', '-q', '-b', 'side', wt]);
+  render(warn('gitck-2', wt), { env, script });
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(cpOf('gitck-2'), 'utf8')).git, { head: g(['rev-parse', 'HEAD'], wt).stdout.trim(), dirty: false });
+  // outside any repository there is no fingerprint, and still no git process
+  const plain = path.join(sb.dir, 'plain'); fs.mkdirSync(plain);
+  render(warn('gitck-3', plain), { env, script });
+  fs.unlinkSync(cpOf('gitck-3'));
+  const r3 = countedRender(warn('gitck-3', plain), env, script);
+  assert.strictEqual(JSON.parse(fs.readFileSync(cpOf('gitck-3'), 'utf8')).git, null);
+  assert.strictEqual(r3.c.spawns, 0);
 });

@@ -73,7 +73,7 @@ that every change lands through a pull request that a maintainer approves.
 
 ## Performance budget
 
-The status line runs on every refresh (about every 2 seconds), so the render is a
+The status line runs on every message and every few seconds between them (`refreshInterval` 5), so the render is a
 hot path. Measured on a recent laptop:
 
 - Node interpreter startup is the floor, roughly 47ms, and about 75% of a render. A
