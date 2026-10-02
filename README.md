@@ -7,7 +7,7 @@ A status line and usage-limit guardian for [Claude Code](https://claude.com/clau
 
 ```
 ▾ ccrig ───────────────────────────────────────────────────────────────────────────────────────
-● work │ my-project │ Opus 4.8 1M │ effort high │ git main ●3 ↑1 │ sub
+● work │ my-project │ Opus 4.8 1M │ effort high │ git main ●3 ↑1
 ctx ━━━━────── 42% │ session ━━━━━━╸─── 63% ↺ 8:53a │ weekly ━━━━━━━━╸─ 88% ↺ Tue 6:53a
 ```
 
@@ -73,14 +73,14 @@ The band is shared, so you can build on it. A mod of your own that lists `ccrig`
 - **Folder, model, effort**: with a `1M` tag on 1M-context models, plus `fast` / `no-think` flags
 - **Context window**: a color-coded meter (green, yellow, red)
 - **Git**: branch, uncommitted count, unpushed/unpulled vs upstream
-- **Billing**: `sub` (Claude.ai subscription) or `api` (pay-per-token)
+- **Billing**: `api` when an API key is billing you per token (`"billing": "always"` under `show` also shows `sub` for a Claude.ai subscription)
 - **Session / weekly usage**: your plan's 5-hour and 7-day windows, each with its reset time
 - **Forecast**: when you will hit the wall, projected from your recent burn rate
-- **Near-limit warning**: as usage climbs the bar turns red and names the resume command; approaching the wall it saves a resume ticket with the exact `claude --resume <session-id>` line
+- **Near-limit warning**: from 90% a window's meter turns red with a `▲`, and adds `· saved` once the guardian has checkpointed your work; at 95% a line of its own names the exact `claude --resume <session-id>` command, saved in a resume ticket too
 
 Running subagents and an update badge appear when relevant; cost and the session name show in `expanded` mode or when you turn them on.
 
-The bar fits the terminal it is in. Related items stay on one line when they can, the meters shorten to `5h` / `7d` and then drop their bars on a narrow terminal, and the limit warning shortens instead of being cut off. Color is reserved for state (green, amber, red), so it reads on light and dark terminals alike. Prefer the pre-1.9 look with emoji icons and block bars? Set `"style": "classic"` (or `CCRIG_STYLE=classic` for one terminal); `"rule": false` hides the rule line.
+The bar fits the terminal it is in. Related items stay on one line when they can, the meters shorten to `5h` / `7d` and then drop their bars on a narrow terminal, and the limit warning shortens instead of being cut off. Color is reserved for state (green, amber, red), so it reads on light and dark terminals alike, and with `NO_COLOR` set it draws no color at all (the meters still read: a heavy fill on a thin track). `minimal` mode keeps the folder, model and the plan numbers (`ctx 42% │ 5h 63% │ 7d 21%`) on one short line. Prefer the pre-1.9 look with emoji icons and block bars? Set `"style": "classic"` (or `CCRIG_STYLE=classic` for one terminal). `"rule": false` hides the rule line; a `▾` at the start of the first line then marks the section, tinted amber or red near a limit like the rule was.
 
 ## The Guardian (on by default)
 
