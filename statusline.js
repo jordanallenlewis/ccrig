@@ -1393,8 +1393,8 @@ function sampleLines(sid) {
   SAMPLES = { file, lines };
   return lines;
 }
-function recordSample(sid, sPct, wPct) {
-  if (CONFIG.forecast === false || !sid || !SID_RE.test(sid)) return;
+function recordSample(sid, sPct, wPct, sReset, wReset) {
+  if ((CONFIG.forecast === false && cfgAutopilot() !== 'resume') || !sid || !SID_RE.test(sid)) return;
   const now = Math.floor(Date.now() / 1000);
   const file = sampleFile(sid);
   let lines = sampleLines(sid).slice();
@@ -1418,7 +1418,10 @@ function recordSample(sid, sPct, wPct) {
       else if (now - last.t < 12) return; // throttle: at most one sample per 12s
     }
   } catch {}
-  lines.push(JSON.stringify({ t: now, s: sPct == null ? null : Math.round(sPct * 10) / 10, w: wPct == null ? null : Math.round(wPct * 10) / 10 }));
+  const smp = { t: now, s: sPct == null ? null : Math.round(sPct * 10) / 10, w: wPct == null ? null : Math.round(wPct * 10) / 10 };
+  if (sReset != null) smp.rs = sReset;
+  if (wReset != null) smp.rw = wReset;
+  lines.push(JSON.stringify(smp));
   if (lines.length > 40) lines = lines.slice(-40);               // rolling window
   try { fs.writeFileSync(file, lines.join('\n') + '\n', { mode: 0o600 }); SAMPLES = { file, lines }; } catch {}
 }
@@ -2330,7 +2333,7 @@ function collectItems(input, width, gitOverride) {
     maybeCheckUpdate(updateInfo);                  // once/day background version check (never blocks)
     writeBoard(input, sPct, sReset, wPct, wReset, ctx, agentInfo.list.length, agentInfo.size); // attention board (opt-in)
     if (sPct != null || wPct != null) {
-      recordSample(input.session_id, sPct, wPct);   // Feature 3: build the burn-rate history
+      recordSample(input.session_id, sPct, wPct, sReset, wReset); // Feature 3: the burn-rate history (+ resets, for StopFailure)
       writeLedger(input, sPct, sReset, wPct, wReset); // Feature 4: publish this profile's usage
     }
   }
@@ -2476,7 +2479,7 @@ if (require.main !== module) {
     fetchText, httpGetText, VERSION,
     DEFAULTS, DEFAULT_ORDER, MODES, helpText, watcherCmdMatches, notifySpec, maybeCheckUpdate,
     cleanLabel, padCell, sessionLabel, lampSupersedes, lampFor, lampPings, winLaunch, parseJsonText, profileLabelOf,
-    NOTIFY_MATCHER, burnSlope, resumeShell, resumeCmdLine, ambiguousMode, localeHour24, humanText,
+    NOTIFY_MATCHER, burnSlope, parseResetText, limitFromFailure, resumeShell, resumeCmdLine, ambiguousMode, localeHour24, humanText,
     _setAmbiguous: (m) => { AMBIG_WIDE = m === 'wide'; },
   };
   return;
@@ -2917,6 +2920,80 @@ function takePauseNote() {
   return 'CCRig paused its status line: Git Bash is not starting on this machine (' + (p.why || 'it hangs') + '), and Claude Code runs every status line through it, so each refresh was leaving a stuck bash.exe' +
     (p.ended ? ' (' + p.ended + ' ended)' : '') + '. The bar comes back by itself once Git Bash works; a reboot usually fixes it, and if not, repair Git for Windows. Details: ccrig --doctor';
 }
+// StopFailure (rate_limit): the turn died on a usage limit. Catch it even when no render saw usage climb
+// (another session, or a background agent, used the window up): checkpoint, resume ticket, desktop ping,
+// and, with autopilot "resume", the same auto-resume a critical render arms. Only a session that has drawn
+// the bar (its renders record usage samples) is relaunched: a claude -p script or an SDK run that hits a
+// limit gets the ticket, never an unattended relaunch, and so does the guardian's own relaunch.
+function runHookStopFailure(input) {
+  const sid = input && input.session_id;
+  if (!input || input.error_type !== 'rate_limit' || typeof sid !== 'string' || !SID_RE.test(sid) || cfgAutopilot() === 'off') return emitHook({});
+  const lim = limitFromFailure(input, nowSec());
+  if (CONFIG.resumeTickets !== false) writeResumeTicket(input, 100, lim.which, lim.reset, true);
+  const drewBar = sampleLines(sid).length > 0;
+  if (process.env.CCBSL_UNATTENDED || !drewBar || !lim.reset) {
+    writeCheckpoint(input, { reason: lim.which + ' limit hit', window: lim.which, resets_at: lim.reset });
+    oncePerSession(sid, 'notified', () => notify('Claude Code: ' + (lim.which === 'weekly' ? 'weekly (7d)' : 'session (5h)') + ' limit reached',
+      'Work checkpointed. Resume with claude --resume' + (lim.reset ? ' after ' + fmtReset(lim.reset) : '') + '.'));
+    return emitHook({});
+  }
+  armAutopilot(input, lim.which, 100, lim.reset);
+  emitHook({});
+}
+// Which window ran out and when it resets, from (in order): Claude Code's reset_after_seconds, the reset
+// written in the error text ("resets 12:30pm (America/Los_Angeles)", "resets in 2h 5m"), and the reset this
+// session's last render saw. The window: named in the text, else the one the samples show nearer full,
+// else by how far away the reset is. A reset more than 8 days out, or in the past, is not trusted.
+function limitFromFailure(input, now) {
+  const det = input.error_details;
+  const msg = [input.error_message, typeof det === 'string' ? det : (det ? JSON.stringify(det) : '')].filter((x) => typeof x === 'string').join(' ');
+  let which = /\b(weekly|week|7[- ]?day)\b/i.test(msg) ? 'weekly' : /\b(session|5[- ]?hour)\b/i.test(msg) ? 'session' : '';
+  const ok = (t) => (typeof t === 'number' && Number.isFinite(t) && t > now && t <= now + 8 * 86400 ? Math.round(t) : null);
+  const ra = Number(input.reset_after_seconds);
+  let reset = Number.isFinite(ra) && ra > 0 ? ok(now + Math.ceil(ra)) : null;
+  if (!reset) reset = ok(parseResetText(msg, now));
+  let last = null;
+  try { const ls = sampleLines(input.session_id); last = ls.length ? JSON.parse(ls[ls.length - 1]) : null; } catch {}
+  if (!which && last && typeof last.s === 'number' && typeof last.w === 'number') which = last.w > last.s ? 'weekly' : 'session';
+  if (!which && reset) which = reset - now > 5 * 3600 + 600 ? 'weekly' : 'session';
+  if (!which) which = 'session';
+  if (!reset && last) reset = ok(which === 'weekly' ? last.rw : last.rs);
+  return { which, reset };
+}
+// The reset time written in a usage-limit message, as epoch seconds, or null. Pure (now passed in).
+function parseResetText(msg, now) {
+  msg = String(msg || '');
+  const rel = /resets?\s+in\s+(?:(\d+)\s*d(?:ays?)?)?\s*(?:(\d+)\s*h(?:ours?|rs?)?)?\s*(?:(\d+)\s*m(?:in(?:ute)?s?)?)?/i.exec(msg);
+  if (rel && (rel[1] || rel[2] || rel[3])) return now + (+(rel[1] || 0)) * 86400 + (+(rel[2] || 0)) * 3600 + (+(rel[3] || 0)) * 60;
+  const MON = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+  const m = /resets?\s+(?:(?:on\s+)?([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(?:at\s+)?)?(\d{1,2})(?::(\d\d))?\s*([ap])\.?\s*m\.?(?:\s*\(([^)]+)\))?/i.exec(msg);
+  if (!m) return null;
+  let h = +m[3] % 12; if (m[5].toLowerCase() === 'p') h += 12;
+  const mi = m[4] ? +m[4] : 0;
+  if (h > 23 || mi > 59) return null;
+  const tz = m[6] && /^[A-Za-z_]+(\/[A-Za-z_+-]+)*$/.test(m[6].trim()) ? m[6].trim() : null;
+  // the wall clock in that zone (or this machine's), as parts, and the zone's offset at an instant
+  const partsAt = (epoch) => {
+    try {
+      const p = {};
+      for (const x of new Intl.DateTimeFormat('en-US', { timeZone: tz || undefined, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' }).formatToParts(new Date(epoch * 1000))) p[x.type] = +x.value;
+      return p;
+    } catch { const d = new Date(epoch * 1000); return { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate(), hour: d.getHours(), minute: d.getMinutes(), second: d.getSeconds() }; }
+  };
+  const offsetAt = (epoch) => { const p = partsAt(epoch); return Date.UTC(p.year, p.month - 1, p.day, p.hour % 24, p.minute, p.second) / 1000 - epoch; };
+  const wall = (y, mo, d) => { const g = Date.UTC(y, mo, d, h, mi) / 1000; let e = g - offsetAt(g); e = g - offsetAt(e); return e; };
+  const today = partsAt(now);
+  if (m[1] && m[2]) {
+    const mo = MON.indexOf(m[1].slice(0, 3).toLowerCase());
+    if (mo < 0) return null;
+    let e = wall(today.year, mo, +m[2]);
+    if (e < now - 86400) e = wall(today.year + 1, mo, +m[2]);
+    return e;
+  }
+  let e = wall(today.year, today.month - 1, today.day);
+  if (e <= now) e = wall(today.year, today.month - 1, today.day + 1);
+  return e;
+}
 function runHook(event, input) {
   if (['stop', 'Stop', 'board-stop', 'user-prompt', 'UserPromptSubmit'].includes(event)) maybeWatchdog();
   // board-stop rides with every bar install; session-start covers a fresh session. (The guardian's own
@@ -2931,6 +3008,7 @@ function runHook(event, input) {
     if (event === 'notification' || event === 'Notification') return runHookNotification(input);
     if (event === 'session-end' || event === 'SessionEnd') return runHookSessionEnd(input);
     if (event === 'board-stop') return runHookBoardStop(input);
+    if (event === 'stop-failure' || event === 'StopFailure') return runHookStopFailure(input);
     if (event === 'mod-resume') return runHookModResume(input);
     if (event === 'mod-exit') return runHookModExit(input);
   } catch {}
@@ -3807,7 +3885,17 @@ const HOOK_EVENTS = [
   ['SessionEnd', 'session-end', 'board', '', 0],
   // the green "done" lamp needs a Stop hook of its own, or a --no-guardian install never shows it
   ['Stop', 'board-stop', 'board', '', 5],
+  // a turn that died on a usage limit. The bar only learns usage from this session's own replies, so a
+  // limit another session or a background agent used up arrives with no warning render; this is the
+  // signal that catches it. Claude Code 2.1.78 added the event; an older one never gets it wired.
+  ['StopFailure', 'stop-failure', 'guardian', 'rate_limit', 0, '2.1.78'],
 ];
+// can this Claude Code run the hook? (an entry's 6th field is the first version that has its event)
+function hookSupported(e) {
+  if (!e[5]) return true;
+  const v = process.env.CCRIG_CC_VERSION || ccVersion();
+  return !!v && /^\d+\.\d+\.\d+/.test(v) && !semverGt(e[5], v.match(/^\d+\.\d+\.\d+/)[0]);
+}
 const GUARD_EVENTS = HOOK_EVENTS.filter((e) => e[2] === 'guardian');
 const BOARD_EVENTS = HOOK_EVENTS.filter((e) => e[2] === 'board');
 function guardianHookCommand(slug) { return ourCommand('--hook ' + slug); }
@@ -3847,8 +3935,21 @@ function rememberCcVersion(v) {
   try { if (fs.readFileSync(ccVersionFile(), 'utf8').trim() === want) return; } catch {}
   try { fs.writeFileSync(ccVersionFile(), want + '\n'); } catch { return; }
   CC_VERSION_CACHE = want;
-  // once per Claude Code version: hooks wired the shell way move to exec form when it is now allowed
+  // once per Claude Code version: hooks wired the shell way move to exec form when it is now allowed,
+  // and a wired guardian picks up any hook event this version newly supports (StopFailure at 2.1.78)
   try { migrateHooksToExec(); } catch {}
+  try { wireNewGuardEvents(); } catch {}
+}
+function wireNewGuardEvents() {
+  const raw = readSettingsRaw();
+  if (raw.state !== 'ok' || !isPlainObject(raw.value.hooks)) return false;
+  const hk = raw.value.hooks;
+  const has = ([Ev, slug]) => Array.isArray(hk[Ev]) && hk[Ev].some((g) => groupHasSlug(g, slug));
+  if (!GUARD_EVENTS.some(has)) return false;                                  // the guardian is not wired here
+  if (GUARD_EVENTS.filter(hookSupported).every(has)) return false;            // nothing new to add
+  backupSettings();
+  addGuardianHooks(raw.value);
+  return writeJsonAtomic(settingsPathOf(), raw.value);
 }
 // Rewire the CCRig hook groups that are already wired (and only those), the way an npm update's refresh
 // does, when any of them still runs through Git Bash and this Claude Code can start node directly.
@@ -3924,7 +4025,7 @@ function ourCommand(args) {
 function addHooks(settings, events) {
   settings.hooks = stripOurHooks(isPlainObject(settings.hooks) ? settings.hooks : {}, events).hooks || {};
   const exec = hookExecForm();
-  for (const [Event, slug, , matcher, timeout] of events) {
+  for (const [Event, slug, , matcher, timeout] of events.filter(hookSupported)) {
     const kept = Array.isArray(settings.hooks[Event]) ? settings.hooks[Event] : [];
     const hook = exec
       ? { type: 'command', command: nodeOnPathOrSelf(), args: [stableScriptPath(), '--hook', slug] }
@@ -4069,7 +4170,7 @@ function runInstallGuardian() {
   const okd = results.filter((r) => !r.err);
   const failed = results.filter((r) => r.err);
   for (const r of okd) {
-    process.stdout.write('Set up the guardian for the ' + profileLabel(r.dir) + ' profile (Stop, SessionStart, and PreCompact hooks)'
+    process.stdout.write('Set up the guardian for the ' + profileLabel(r.dir) + ' profile (Stop, SessionStart, PreCompact' + (hookSupported(GUARD_EVENTS.find((e) => e[0] === 'StopFailure')) ? ', and StopFailure hooks)' : ' hooks)')
       + (CONFIG.sessionBoard === true ? ', plus the session-board lamp hooks' : '') + '.  (' + r.sp + ')'
       + (r.bak ? '  A backup was saved first.' : '') + '\n');
   }
@@ -4309,7 +4410,9 @@ function runDoctor() {
   if (raw.state === 'ok') {
     const hooks = isPlainObject(raw.value.hooks) ? raw.value.hooks : {};
     const wired = GUARD_EVENTS.filter(([Event, slug]) => Array.isArray(hooks[Event]) && hooks[Event].some((g) => groupHasSlug(g, slug))).map(([Event]) => Event);
-    if (wired.length === GUARD_EVENTS.length) ok('guardian hooks wired (' + wired.join(', ') + ')');
+    const supported = GUARD_EVENTS.filter(hookSupported);
+    const unsupported = GUARD_EVENTS.filter((e) => !hookSupported(e)).map((e) => e[0] + ' (Claude Code ' + e[5] + '+)');
+    if (wired.length && supported.every(([Event]) => wired.includes(Event))) ok('guardian hooks wired (' + wired.join(', ') + ')' + (unsupported.length ? '; not on this Claude Code: ' + unsupported.join(', ') : ''));
     else if (wired.length) info('guardian partly wired (' + wired.join(', ') + '); re-run --install-guardian to wire them all');
     else info('guardian hooks not wired (no Relentless mode, no resume-time context); enable with --install-guardian');
     if (raw.value.disableAllHooks === true) bad('"disableAllHooks" is true, so Claude Code runs neither the status line nor any hook', 'set it to false (or turn hooks back on in /hooks)');
