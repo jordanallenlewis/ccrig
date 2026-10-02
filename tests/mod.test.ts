@@ -276,6 +276,24 @@ test('standalone: the band draws the bar statusline.js rendered, and the render 
   await ui.unmount()
 })
 
+test('the band draws the lines statusline.js laid out for its width, and packs segments at another width', async ($, on) => {
+  const laid = JSON.stringify({ v: '1.9.1', segments: ['\x1b[38;5;74mmy-app\x1b[0m'], widths: [6], lines: ['\x1b[38;5;245mLAID-OUT\x1b[0m'], width: 119 })
+  const { seen } = setup(on, { rig: laid })
+  await start($)
+  const wide = await $.ui.mount({ ...BAND, surface: 'terminal', viewport: { columns: 120, rows: 30 }, props: { ...BAND.props, bodyColumns: 120 } })
+  expect(await wide.find({ type: 'Text', text: 'LAID-OUT' })).toBeDefined()
+  expect(await wide.find({ type: 'Text', text: 'my-app' })).toBeUndefined()
+  await wide.unmount()
+  // another width: the band asks statusline.js to lay the bar out again for it
+  const before = seen.runs.length
+  const narrow = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await narrow.find({ type: 'Text', text: 'LAID-OUT' })
+  const again = seen.runs.slice(before).find((r) => r.argv.length === 2)
+  expect(again).toBeDefined()
+  expect(again!.init.env!.COLUMNS).toBe('100')
+  await narrow.unmount()
+})
+
 test('standalone without Node: the band falls back to the native line', async ($, on) => {
   setup(on, { rig: null })
   await start($)
