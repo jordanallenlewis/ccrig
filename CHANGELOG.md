@@ -20,8 +20,15 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ### Fixed
 - The bar honors `NO_COLOR`: no color codes at all (bold stays), in both looks. `--board` already did.
+- `ccrig --name` (and `/ccrig:name`) no longer writes `.claude/ccrig-name` into your project, which made every named repository read as dirty (`git ●1`, the file was CCRig's own). Labels now live in `~/.ccrig/names/`; a label an older version wrote is still read.
+- `--sessions` and the resume ticket print commands for the shell you will paste them into: Git Bash on Windows gets the `cd … && CLAUDE_CONFIG_DIR=… claude --resume …` form instead of PowerShell syntax, and a ticket on Windows carries both forms.
+- The pace forecast no longer reacts to one big turn landing at once: it uses the median of the pairwise slopes (Theil-Sen) and needs at least 4 samples over 2 minutes, so a jump from 63% to 92% reads as a step, not as "~2m to the limit".
+- `--sessions` labels a session by Claude Code's own summary or your first request instead of "(no first request found)" when its last turns are all tool results.
+- In a terminal set to draw East Asian "ambiguous" characters two cells wide (common with a Japanese, Chinese or Korean locale), the rule, meters and separators now fit: `"ambiguousWidth": "auto"` (the default) counts them as two cells under a ja, zh or ko locale; `"narrow"`/`"wide"` or `CCRIG_AMBIGUOUS` set it by hand.
 
 ### Added
+- Reset times follow your locale: `"resetStyle": "auto"` (the new default) shows `14:40` where clocks run to 24 hours and `2:40p` where they do not, with weekday names in your language (`Di 14:40`). `clock`, `clock24` and `relative` still pick one by hand.
+- The session board's usage column reads `5h 96% · 7d 71%`, the same words as the bar.
 - `ccrig board on` / `ccrig board off` (or `b` in `--config`, then save) turns the session board on or off and wires or removes its lamp hooks in every profile CCRig is installed in. Restart Claude Code once afterward.
 
 ### Performance
