@@ -2580,7 +2580,7 @@ test('--doctor points an older install at its idle lamp hooks when the board is 
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
   const box = boardBox();
   run(['--install', '--this-profile'], { env, script: box.script });  // wired while the board was on
-  assert.match(run(['--doctor'], { env }).out, /3 of its lamp hooks are still wired and only start Node to exit, so run {2}ccrig board off/);
+  assert.match(run(['--doctor'], { env }).out, /2 of its lamp hooks are still wired and only start Node to exit, so run {2}ccrig board off/, 'the stop pings keep the Notification hook busy');
 });
 
 test('hooks stay at one entry per event through installs in any order', () => {
@@ -4083,15 +4083,18 @@ test('stop pings: background work, a one-shot wakeup and claude -p stay quiet; t
   hookRun('board-stop', STOP('q2', { session_crons: [{ id: 'w', schedule: '5 9 8 10 *', recurring: false, prompt: '/loop' }] }), { env, script });
   hookRun('board-stop', STOP('q3'), { env: { ...env, CLAUDE_CODE_ENTRYPOINT: 'sdk-cli' }, script });
   hookRun('board-stop', STOP('q4'), { env: { ...env, CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' }, script });
+  // the mod says outright whether a human is at the session, whatever env its process inherits
+  hookRun('board-stop', STOP('q8'), { env: { ...env, CCRIG_HOST: 'mod', CCRIG_ATTENDED: '0', CLAUDE_CODE_ENTRYPOINT: 'cli' }, script });
   await settle();
   assert.deepStrictEqual(pings(), [], 'none of those is a stop the human waits on');
   hookRun('board-stop', STOP('q5', { session_crons: [{ id: 'd', schedule: '0 9 * * 1-5', recurring: true, prompt: 'standup' }] }), { env, script });
   hookRun('board-stop', STOP('q6'), { env: { ...env, CLAUDE_CODE_ENTRYPOINT: 'sdk-cli', CCBSL_UNATTENDED: '1' }, script });
-  assert.ok(await waitFor(() => pings().length === 2), 'a recurring cron and the unattended relaunch both ping: ' + pings().join(' / '));
+  hookRun('board-stop', STOP('q9'), { env: { ...env, CCRIG_HOST: 'mod', CCRIG_ATTENDED: '1', CLAUDE_CODE_ENTRYPOINT: '' }, script });
+  assert.ok(await waitFor(() => pings().length === 3), 'a recurring cron, the unattended relaunch and an attended mod session all ping: ' + pings().join(' / '));
   // a dev server never reports back, so it must not silence every later stop
   hookRun('board-stop', STOP('q7', { background_tasks: [{ id: 'b', type: 'shell', status: 'running', description: 'npm run dev', command: 'npm run dev' }] }), { env, script });
-  assert.ok(await waitFor(() => pings().length === 3), 'a background shell does not hold the ping');
-  assert.match(pings()[2], /1 still running in the background/);
+  assert.ok(await waitFor(() => pings().length === 4), 'a background shell does not hold the ping');
+  assert.match(pings()[3], /1 still running in the background/);
 });
 
 test('stop pings: two stops of a quick back-and-forth both ping', { skip: WIN && 'Windows toasts go through PowerShell' }, async () => {
