@@ -63,7 +63,9 @@ function run(args, { stdin = '', env = {}, script = SCRIPT, pre = [] } = {}) {
     'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
     'CCBSL_UPDATE_BASE', 'CCBSL_UNATTENDED', 'CLAUDE_CONFIG_DIR', 'CCRIG_SESSION_NAME',
     // the shell a resume command is written for, and the ambiguous-width and clock guesses, read these
-    'MSYSTEM', 'SHELL', 'CCRIG_AMBIGUOUS', 'LC_ALL', 'LC_CTYPE']) delete base[k];
+    'MSYSTEM', 'SHELL', 'CCRIG_AMBIGUOUS', 'LC_ALL', 'LC_CTYPE',
+    // stop pings read these: a suite run from inside Claude Code inherits its entrypoint
+    'CLAUDE_CODE_ENTRYPOINT', 'CCRIG_PUSH_URL']) delete base[k];
   base.LANG = 'en_US.UTF-8'; // a 12-hour English locale wherever Node takes it from the environment
   base.TMPDIR = base.TEMP = base.TMP = TESTTMP;
   // CCBSL_NO_ACT keeps the guardian from spawning real notifications / watcher / relaunch
@@ -97,6 +99,8 @@ const cmdHasPath = (cmd, p) => cmd.includes(p) || cmd.includes(p.replace(/\\/g, 
 // does an event hold one of OUR hooks with this --hook slug? (Stop carries a guardian AND a board hook)
 const hasSlug = (j, ev, slug) => (Array.isArray(j.hooks && j.hooks[ev]) ? j.hooks[ev] : [])
   .some((g) => ((g && g.hooks) || []).some((h) => new RegExp('--hook ' + slug + '$').test(h.command || '')));
+// the Notification matcher the stop pings wire while the board is off (no idle_prompt)
+const NOTIFY_BLOCKED = 'permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input';
 const baseInput = (extra = {}) => ({
   model: { id: 'claude-opus-4-8[1m]', display_name: 'Opus 4.8 (1M context)' },
   effort: { level: 'high' },
@@ -526,8 +530,15 @@ test('--install --no-guardian installs the bar only (no guardian hooks)', () => 
   const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
   assert.ok(j.statusLine, 'status line wired');
   assert.ok(!hasSlug(j, 'Stop', 'stop'), 'no guardian hooks with --no-guardian');
-  for (const ev of ['UserPromptSubmit', 'Notification', 'SessionEnd']) assert.ok(!j.hooks || !j.hooks[ev], 'the board is off, so no ' + ev + ' lamp hook');
-  assert.strictEqual(hasSlug(j, 'Stop', 'board-stop'), WIN, 'board-stop stays only on Windows, as the Git Bash check');
+  for (const ev of ['UserPromptSubmit', 'SessionEnd']) assert.ok(!j.hooks || !j.hooks[ev], 'the board is off, so no ' + ev + ' lamp hook');
+  assert.ok(hasSlug(j, 'Stop', 'board-stop'), 'stop pings: with no guardian Stop hook, board-stop carries the ping');
+  assert.strictEqual(j.hooks.Notification[0].matcher, NOTIFY_BLOCKED, 'stop pings: the waiting-on-you types only, no idle_prompt with the board off');
+  // stop pings off: the bar-only install of before
+  const sb2 = sandbox();
+  run(['--install', '--no-guardian'], { env: { CLAUDE_CONFIG_DIR: sb2.cfg, HOME: sb2.home }, script: scriptCopy(sb2.dir, { stopNotify: false }) });
+  const k = JSON.parse(fs.readFileSync(path.join(sb2.cfg, 'settings.json'), 'utf8'));
+  for (const ev of ['UserPromptSubmit', 'Notification', 'SessionEnd']) assert.ok(!k.hooks || !k.hooks[ev], 'pings and board off: no ' + ev + ' hook');
+  assert.strictEqual(hasSlug(k, 'Stop', 'board-stop'), WIN, 'board-stop stays only on Windows, as the Git Bash check');
 });
 
 test('--install refuses corrupt settings.json without clobbering it', () => {
@@ -1195,7 +1206,7 @@ test('--uninstall-guardian removes only guardian hooks, keeps the status line', 
   const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
   assert.ok(j.statusLine, 'status line stays');
   assert.ok(!hasSlug(j, 'Stop', 'stop'), 'guardian Stop hook gone');
-  assert.strictEqual(hasSlug(j, 'Stop', 'board-stop'), WIN, 'with the board off, a Stop hook comes back only on Windows (the Git Bash check)');
+  assert.ok(hasSlug(j, 'Stop', 'board-stop'), 'with the guardian gone, board-stop comes back to carry the stop ping');
 });
 
 test('--uninstall removes both the status line and guardian hooks', () => {
@@ -2511,9 +2522,10 @@ test('a default install starts one Node per turn end and none per prompt (the bo
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
   run(['--install'], { env });
   const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
-  assert.strictEqual(ourHookCount(j, 'Stop'), 1, 'one Stop hook: the guardian stamps the done lamp itself');
+  assert.strictEqual(ourHookCount(j, 'Stop'), 1, 'one Stop hook: the guardian stamps the done lamp and sends the stop ping itself');
   assert.ok(hasSlug(j, 'Stop', 'stop'));
-  for (const ev of ['UserPromptSubmit', 'Notification', 'SessionEnd']) assert.ok(!j.hooks[ev], 'no ' + ev + ' hook while the board is off');
+  for (const ev of ['UserPromptSubmit', 'SessionEnd']) assert.ok(!j.hooks[ev], 'no ' + ev + ' hook while the board is off');
+  assert.strictEqual(j.hooks.Notification[0].matcher, NOTIFY_BLOCKED, 'the stop pings\' Notification hook starts Node only when a session waits on you, never on idle');
   // with the board on, the guardian's Stop still carries the lamp: no second Stop process
   const box = boardBox();
   run(['--install'], { env: box.env, script: box.script });
@@ -2545,7 +2557,9 @@ test('ccrig board on|off saves the setting and wires or removes the lamp hooks w
   const off = run(['--board', 'off'], { env, script });
   assert.match(off.out, /Took its lamp hooks out of 1 profile/);
   j = JSON.parse(fs.readFileSync(sp, 'utf8'));
-  for (const ev of ['UserPromptSubmit', 'Notification', 'SessionEnd']) assert.ok(!j.hooks[ev], ev + ' removed');
+  for (const ev of ['UserPromptSubmit', 'SessionEnd']) assert.ok(!j.hooks[ev], ev + ' removed');
+  assert.strictEqual(ourHookCount(j, 'Notification'), 1, 'the stop pings keep their Notification hook');
+  assert.strictEqual(j.hooks.Notification[0].matcher, NOTIFY_BLOCKED, '...without idle_prompt, which only settled a lamp');
   assert.ok(hasSlug(j, 'Stop', 'stop'), 'the guardian stays');
   assert.match(run(['--board'], { env, script }).out, /session board is off/i, 'a bare --board still shows the board');
 });
@@ -2611,7 +2625,9 @@ test('a user hook in every event we touch survives install and uninstall byte fo
   }
   run(['--board', 'off'], { env, script });
   const off = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
-  for (const ev of BOARD_HOOK_EVENTS) assert.strictEqual(JSON.stringify(off.hooks[ev]), JSON.stringify(seed[ev]), 'board off keeps the user hook in ' + ev);
+  // the stop pings keep our Notification hook with the board off; every user hook is untouched either way
+  const userOnly = (groups) => JSON.stringify((groups || []).filter((g) => !g.hooks.some((h) => / --hook /.test(h.command || ''))));
+  for (const ev of BOARD_HOOK_EVENTS) assert.strictEqual(userOnly(off.hooks[ev]), JSON.stringify(seed[ev]), 'board off keeps the user hook in ' + ev);
   run(['--uninstall'], { env, script });
   const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
   assert.strictEqual(JSON.stringify(j.hooks), before, 'uninstall leaves the user hooks exactly as they were');
@@ -3925,9 +3941,10 @@ test('StopFailure: wired with the guardian only on a Claude Code that has it (2.
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_CC_VERSION: '2.1.287' };
   run(['--install', '--this-profile'], { env });
   const s = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
-  assert.ok(Array.isArray(s.hooks.StopFailure) && s.hooks.StopFailure.length === 1, 'one StopFailure group');
-  assert.strictEqual(s.hooks.StopFailure[0].matcher, 'rate_limit');
-  assert.ok(hasSlug(s, 'StopFailure', 'stop-failure'));
+  assert.ok(Array.isArray(s.hooks.StopFailure) && s.hooks.StopFailure.length === 2, 'two StopFailure groups: the guardian\'s and the stop ping\'s');
+  const sfGroup = (slug) => s.hooks.StopFailure.find((g) => g.hooks.some((h) => new RegExp('--hook ' + slug + '$').test(h.command)));
+  assert.strictEqual(sfGroup('stop-failure').matcher, 'rate_limit');
+  assert.ok(sfGroup('stop-error') && !sfGroup('stop-error').matcher, 'the stop ping hears every API error');
   run(['--uninstall', '--this-profile'], { env });
   const u = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
   assert.ok(!(u.hooks && u.hooks.StopFailure && u.hooks.StopFailure.length), 'uninstall strips it');
@@ -4022,4 +4039,218 @@ test('first run: a plan bar with no usage yet says when it appears; an API key o
   assert.ok(!/first reply/.test(used), 'a session with history is past its first reply');
   const classic = strip(render({ model: { display_name: 'Opus 5.5' }, workspace: { current_dir: '/tmp/p' } }, { env: { ...env, CCRIG_STYLE: 'classic' } }).out);
   assert.ok(!/first reply/.test(classic), 'classic unchanged');
+});
+
+// ===========================================================================
+// stop pings: a desktop notification (and, with pushUrl, an ntfy push) each time a session stops
+// ===========================================================================
+// A sandbox whose desktop notifier is a stub that logs its arguments, with real spawns allowed. Windows
+// toasts go through PowerShell, which a PATH stub cannot stand in for, so these run on macOS and Linux.
+function pingBox(config, extraEnv) {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, config);
+  const bin = path.join(sb.dir, 'bin'); fs.mkdirSync(bin);
+  const log = path.join(sb.dir, 'pings.log');
+  // one write per ping, so two pings landing together never share a line
+  const stub = '#!/bin/sh\nline=""\nfor a in "$@"; do line="$line$a\t"; done\nprintf "%s\\n" "$line" >> "' + log + '"\n';
+  fs.writeFileSync(path.join(bin, process.platform === 'darwin' ? 'osascript' : 'notify-send'), stub, { mode: 0o755 });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, PATH: bin + path.delimiter + process.env.PATH, CCBSL_NO_ACT: '', CCBSL_NO_NOTIFY: '', CLAUDE_CODE_ENTRYPOINT: 'cli', ...(extraEnv || {}) };
+  const pings = () => { try { return fs.readFileSync(log, 'utf8').split('\n').filter(Boolean); } catch { return []; } };
+  return { sb, script, env, pings };
+}
+// the notifier is spawned detached: give it a moment to land (and, for "none", to have had the chance)
+const settle = (ms = 700) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(fn, ms = 4000) { const end = Date.now() + ms; while (Date.now() < end) { if (fn()) return true; await settle(50); } return !!fn(); }
+const STOP = (sid, extra = {}) => ({ hook_event_name: 'Stop', session_id: sid, transcript_path: '', cwd: '/tmp/pingproj', stop_hook_active: false, background_tasks: [], session_crons: [], ...extra });
+
+test('stop pings: a finished turn pings once, with the start of the reply', { skip: WIN && 'Windows toasts go through PowerShell' }, async () => {
+  const { script, env, pings } = pingBox({});
+  const stop = STOP('p1', { last_assistant_message: 'All 12 tests pass.\nBranch pushed.' });
+  const r = hookRun('board-stop', stop, { env, script });
+  assert.strictEqual(r.code, 0);
+  assert.strictEqual(r.out, '', 'a Stop hook that pings still says nothing to Claude Code');
+  assert.ok(await waitFor(() => pings().length === 1), 'one ping: ' + pings().join(' / '));
+  assert.match(pings()[0], /Claude Code: pingproj finished/);
+  assert.match(pings()[0], /All 12 tests pass\. Branch pushed\./, 'the reply, on one line');
+  hookRun('stop', stop, { env, script });                   // the same stop reaching a second hook
+  await settle();
+  assert.strictEqual(pings().length, 1, 'the same stop pings once');
+});
+
+test('stop pings: background work, a one-shot wakeup and claude -p stay quiet; the guardian\'s relaunch pings', { skip: WIN && 'Windows toasts go through PowerShell' }, async () => {
+  const { script, env, pings } = pingBox({});
+  hookRun('board-stop', STOP('q1', { background_tasks: [{ id: 'a', type: 'subagent', status: 'running' }] }), { env, script });
+  hookRun('board-stop', STOP('q2', { session_crons: [{ id: 'w', schedule: '5 9 8 10 *', recurring: false, prompt: '/loop' }] }), { env, script });
+  hookRun('board-stop', STOP('q3'), { env: { ...env, CLAUDE_CODE_ENTRYPOINT: 'sdk-cli' }, script });
+  hookRun('board-stop', STOP('q4'), { env: { ...env, CLAUDE_CODE_ENTRYPOINT: 'sdk-ts' }, script });
+  await settle();
+  assert.deepStrictEqual(pings(), [], 'none of those is a stop the human waits on');
+  hookRun('board-stop', STOP('q5', { session_crons: [{ id: 'd', schedule: '0 9 * * 1-5', recurring: true, prompt: 'standup' }] }), { env, script });
+  hookRun('board-stop', STOP('q6'), { env: { ...env, CLAUDE_CODE_ENTRYPOINT: 'sdk-cli', CCBSL_UNATTENDED: '1' }, script });
+  assert.ok(await waitFor(() => pings().length === 2), 'a recurring cron and the unattended relaunch both ping: ' + pings().join(' / '));
+  // a dev server never reports back, so it must not silence every later stop
+  hookRun('board-stop', STOP('q7', { background_tasks: [{ id: 'b', type: 'shell', status: 'running', description: 'npm run dev', command: 'npm run dev' }] }), { env, script });
+  assert.ok(await waitFor(() => pings().length === 3), 'a background shell does not hold the ping');
+  assert.match(pings()[2], /1 still running in the background/);
+});
+
+test('stop pings: two stops of a quick back-and-forth both ping', { skip: WIN && 'Windows toasts go through PowerShell' }, async () => {
+  const { script, env, pings } = pingBox({});
+  hookRun('board-stop', STOP('r1', { last_assistant_message: 'Which file?' }), { env, script });
+  hookRun('board-stop', STOP('r1', { last_assistant_message: 'Done: fixed src/a.js.' }), { env, script });
+  assert.ok(await waitFor(() => pings().length === 2), pings().join(' / '));
+});
+
+test('stop pings: the guardian\'s Stop pings when the stop stands, never when keep-working turns it around', { skip: WIN && 'Windows toasts go through PowerShell' }, async () => {
+  const { sb, script, env, pings } = pingBox({ keepWorking: true });
+  const open = transcript(sb.dir, [userEntry('do it'), todoEntry([{ content: 'A', status: 'pending' }]), asstEntry('on A.')]);
+  const r = hookRun('stop', STOP('k1', { transcript_path: open }), { env, script });
+  assert.strictEqual(JSON.parse(r.out).decision, 'block');
+  await settle();
+  assert.deepStrictEqual(pings(), [], 'the session goes on, so no ping');
+  const done = transcript(sb.dir, [todoEntry([{ content: 'A', status: 'completed' }])]);
+  assert.strictEqual(hookRun('stop', STOP('k1', { transcript_path: done }), { env, script }).out, '');
+  assert.ok(await waitFor(() => pings().length === 1), 'the stop that stands pings');
+  assert.match(pings()[0], /finished/);
+});
+
+test('stop pings: waiting on you pings, idle does not; an API error pings, a usage limit is the guardian\'s', { skip: WIN && 'Windows toasts go through PowerShell' }, async () => {
+  const { script, env, pings } = pingBox({});
+  const note = (sid, type, message) => ({ hook_event_name: 'Notification', session_id: sid, transcript_path: '', cwd: '/tmp/pingproj', notification_type: type, message });
+  hookRun('notification', note('n1', 'permission_prompt', 'Claude needs your permission to use Bash'), { env, script });
+  hookRun('notification', note('n2', 'idle_prompt', 'Claude is waiting for your input'), { env, script });
+  hookRun('notification', note('n3', 'auth_success', 'Signed in'), { env, script });
+  hookRun('stop-error', { hook_event_name: 'StopFailure', session_id: 'e1', cwd: '/tmp/pingproj', error_type: 'overloaded' }, { env, script });
+  // the guardian is wired here (2.1.78+), so it is the one to report a usage limit, with the resume time
+  run(['--install-guardian', '--this-profile'], { env: { ...env, CCRIG_CC_VERSION: '2.1.287', CCBSL_NO_ACT: '1' }, script });
+  hookRun('stop-error', { hook_event_name: 'StopFailure', session_id: 'e2', cwd: '/tmp/pingproj', error_type: 'rate_limit' }, { env, script });
+  assert.ok(await waitFor(() => pings().length >= 2));
+  await settle();
+  const all = pings().join('\n');
+  assert.strictEqual(pings().length, 2, all);
+  assert.match(all, /Claude Code: pingproj needs you/);
+  assert.match(all, /Claude needs your permission to use Bash/);
+  assert.match(all, /Claude Code: pingproj stopped/);
+  assert.match(all, /API error \(overloaded\)/);
+  // a profile the guardian is not wired into (another profile's guardian keeps autopilot on), and the
+  // guardian off: nothing else reports the limit, so the stop ping does
+  const bare = pingBox({});
+  hookRun('stop-error', { hook_event_name: 'StopFailure', session_id: 'e4', cwd: '/tmp/pingproj', error_type: 'rate_limit' }, { env: bare.env, script: bare.script });
+  assert.ok(await waitFor(() => bare.pings().length === 1), 'no guardian hook in this profile');
+  const off = pingBox({ autopilot: 'off' });
+  hookRun('stop-error', { hook_event_name: 'StopFailure', session_id: 'e3', cwd: '/tmp/pingproj', error_type: 'rate_limit' }, { env: off.env, script: off.script });
+  assert.ok(await waitFor(() => off.pings().length === 1));
+  assert.match(off.pings()[0], /rate_limit/);
+});
+
+test('stop pings: "stopNotify": false silences every hook', { skip: WIN && 'Windows toasts go through PowerShell' }, async () => {
+  const { script, env, pings } = pingBox({ stopNotify: false });
+  hookRun('board-stop', STOP('s1'), { env, script });
+  hookRun('stop', STOP('s2'), { env, script });
+  hookRun('notification', { session_id: 's3', cwd: '/tmp/pingproj', notification_type: 'permission_prompt' }, { env, script });
+  hookRun('stop-error', { session_id: 's4', cwd: '/tmp/pingproj', error_type: 'server_error' }, { env, script });
+  await settle(900);
+  assert.deepStrictEqual(pings(), []);
+});
+
+test('stop pings: pushUrl gets one POST per ping with the label and a fixed line, never Claude\'s words', { skip: WIN && 'Windows toasts go through PowerShell' }, async () => {
+  const http = require('http');
+  const got = [];
+  const srv = http.createServer((req, res) => { let b = ''; req.on('data', (c) => { b += c; }); req.on('end', () => { got.push({ method: req.method, url: req.url, body: b, type: req.headers['content-type'] }); res.end('{}'); }); });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  try {
+    const url = 'http://127.0.0.1:' + srv.address().port + '/my-topic?auth=tok';
+    const { script, env } = pingBox({ pushUrl: url });
+    hookRun('board-stop', STOP('u1', { last_assistant_message: 'The secret plan is ready.' }), { env, script });
+    hookRun('notification', { session_id: 'u2', cwd: '/tmp/pingproj', notification_type: 'elicitation_dialog', message: 'Server asks: what is your API token?' }, { env, script });
+    assert.ok(await waitFor(() => got.length === 2), 'two pushes: ' + JSON.stringify(got));
+    for (const g of got) {
+      assert.strictEqual(g.method, 'POST');
+      const u = new URL(g.url, 'http://x');
+      assert.strictEqual(u.pathname, '/my-topic');
+      assert.strictEqual(u.searchParams.get('auth'), 'tok', 'the URL\'s own query survives');
+      assert.match(g.type, /^text\/plain/);
+    }
+    const byTitle = Object.fromEntries(got.map((g) => [new URL(g.url, 'http://x').searchParams.get('title'), g]));
+    const fin = byTitle['Claude Code: pingproj finished'], ask = byTitle['Claude Code: pingproj needs you'];
+    assert.ok(fin && ask, Object.keys(byTitle).join(' / '));
+    assert.strictEqual(fin.body, 'Finished. Your turn.', 'Claude\'s reply stays on the desktop');
+    assert.strictEqual(new URL(fin.url, 'http://x').searchParams.get('priority'), '3');
+    assert.strictEqual(ask.body, 'Waiting on your answer.', 'an MCP form\'s own text stays on the desktop');
+    assert.strictEqual(new URL(ask.url, 'http://x').searchParams.get('priority'), '4');
+    assert.ok(!JSON.stringify(got).includes('secret plan') && !JSON.stringify(got).includes('API token'));
+  } finally { srv.close(); }
+});
+
+test('--notify-test pings the desktop, pushes, and names the push target by host only', { skip: WIN && 'Windows toasts go through PowerShell' }, async () => {
+  const http = require('http');
+  const { execFile } = require('child_process');
+  const got = [];
+  const srv = http.createServer((req, res) => { req.resume(); req.on('end', () => { got.push(req.url); res.end('ok'); }); });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  try {
+    const { script, env, pings } = pingBox({});
+    const host = '127.0.0.1:' + srv.address().port;
+    // async: the test's own server has to answer while the CLI waits on it
+    const out = await new Promise((res) => execFile(NODE, [script, '--notify-test'], { env: { ...process.env, ...env, TMPDIR: TESTTMP, HTTP_PROXY: '', http_proxy: '', HTTPS_PROXY: '', https_proxy: '', CCRIG_PUSH_URL: 'http://' + host + '/hidden-topic?auth=sekrit' }, encoding: 'utf8' },
+      (err, stdout) => res({ code: err ? err.code : 0, stdout })));
+    assert.strictEqual(out.code, 0, out.stdout);
+    assert.match(out.stdout, /Sent a desktop notification/);
+    assert.match(out.stdout, new RegExp('Pushed to ' + host.replace(/\./g, '\\.') + ' \\(HTTP 200\\)'));
+    assert.ok(!/hidden-topic|sekrit/.test(out.stdout), 'the topic and token are secrets: ' + out.stdout);
+    assert.strictEqual(got.length, 1);
+    assert.ok(await waitFor(() => pings().length === 1), 'the desktop ping went out');
+  } finally { srv.close(); }
+  // no pushUrl: it says how to get one, and still exits 0
+  const bare = pingBox({});
+  const r = run(['--notify-test'], { env: bare.env, script: bare.script });
+  assert.strictEqual(r.code, 0);
+  assert.match(r.out, /No phone push: set "pushUrl"/);
+});
+
+test('stop pings: install turns on Claude Code\'s own phone push only where never set, and never on an update', () => {
+  const env = (sb) => ({ CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_CC_VERSION: '2.1.287' });
+  const read = (sb) => JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  const a = sandbox();
+  const r = run(['--install', '--this-profile'], { env: env(a) });
+  assert.strictEqual(read(a).inputNeededNotifEnabled, true);
+  assert.strictEqual(read(a).agentPushNotifEnabled, true);
+  assert.match(r.out, /Stop pings are on/);
+  assert.match(r.out, /Turned on Claude Code's own phone push/);
+  // a choice made in /config stands, in settings.json or in the older .claude.json
+  const b = sandbox();
+  fs.writeFileSync(path.join(b.cfg, 'settings.json'), JSON.stringify({ agentPushNotifEnabled: false }));
+  fs.writeFileSync(path.join(b.cfg, '.claude.json'), JSON.stringify({ inputNeededNotifEnabled: false }));
+  const rb = run(['--install', '--this-profile'], { env: env(b) });
+  assert.strictEqual(read(b).agentPushNotifEnabled, false, 'an explicit false in settings.json stays');
+  assert.ok(!('inputNeededNotifEnabled' in read(b)), 'a choice in .claude.json is not overridden');
+  assert.ok(!/Turned on Claude Code's own phone push/.test(rb.out));
+  // an older Claude Code, an npm update's refresh, pings off, and a pushUrl (which would double every push):
+  // nothing written
+  const cases = [[{ CCRIG_CC_VERSION: '2.1.50' }, undefined], [{ CCBSL_REFRESH: '1' }, undefined], [{}, { stopNotify: false }], [{}, { pushUrl: 'https://ntfy.sh/x' }]];
+  for (const [extra, config] of cases) {
+    const sb = sandbox();
+    const opts = { env: { ...env(sb), ...extra } };
+    if (config) opts.script = scriptCopy(sb.dir, config);
+    const ro = run(['--install', '--this-profile'], opts);
+    assert.ok(!('inputNeededNotifEnabled' in read(sb)) && !('agentPushNotifEnabled' in read(sb)), JSON.stringify(extra) + JSON.stringify(config || {}));
+    if (config && config.stopNotify === false) assert.ok(!/Stop pings are on/.test(ro.out));
+  }
+});
+
+test('stop pings: StopFailure gets the stop ping hook on 2.1.78+, and --config n turns pings off and rewires', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir);
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_CC_VERSION: '2.1.287' };
+  run(['--install', '--this-profile', '--no-guardian'], { env, script });
+  let j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  assert.ok(hasSlug(j, 'StopFailure', 'stop-error'), 'bar-only installs get the API-error ping too');
+  assert.ok(hasSlug(j, 'Stop', 'board-stop') && hasSlug(j, 'Notification', 'notification'));
+  assert.match(run(['--options'], { env, script }).out, /stop pings: {5}on/);
+  const r = run(['--config'], { env, script, stdin: 'n\ns\n' });
+  assert.match(r.out, /Stop pings off; rewired the hooks in 1 profile/);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(sb.dir, 'statusline.config.json'), 'utf8')).stopNotify, false);
+  j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  for (const ev of ['StopFailure', 'Notification']) assert.ok(!j.hooks || !j.hooks[ev], ev + ' taken out with the pings');
+  assert.strictEqual(hasSlug(j, 'Stop', 'board-stop'), WIN, 'board-stop stays only on Windows, as the Git Bash check');
 });

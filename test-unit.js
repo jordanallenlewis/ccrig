@@ -508,3 +508,23 @@ test('localeHour24: which locales write a 24-hour clock', () => {
   assert.strictEqual(SL.localeHour24('en-GB'), true);
   assert.strictEqual(SL.localeHour24('en-US'), false);
 });
+
+test('pushRequest: an ntfy publish with the title, priority and tags as query parameters', () => {
+  const r = SL.pushRequest('https://ntfy.sh/my-topic?auth=tok', 'Claude Code: café ☕ finished', 'Finished. Your turn.', 'done');
+  const u = new URL(r.url);
+  assert.strictEqual(u.origin + u.pathname, 'https://ntfy.sh/my-topic');
+  assert.strictEqual(u.searchParams.get('auth'), 'tok', 'the URL\'s own query is kept');
+  assert.strictEqual(u.searchParams.get('title'), 'Claude Code: café ☕ finished', 'a Unicode label survives (a raw header could not carry it)');
+  assert.strictEqual(u.searchParams.get('priority'), '3');
+  assert.strictEqual(u.searchParams.get('tags'), 'white_check_mark');
+  assert.strictEqual(r.body, 'Finished. Your turn.');
+  assert.match(r.headers['Content-Type'], /^text\/plain; charset=utf-8$/);
+  assert.strictEqual(new URL(SL.pushRequest('http://10.0.0.5:8080/t', 'x', 'y', 'needs').url).searchParams.get('priority'), '4');
+  assert.strictEqual(new URL(SL.pushRequest('http://h/t', 'x', 'y', 'failed').url).searchParams.get('tags'), 'warning');
+  assert.strictEqual(new URL(SL.pushRequest('http://h/t', 'x', 'y', 'bogus').url).searchParams.get('priority'), '3', 'an unknown kind reads as done');
+  for (const bad of ['', 'ntfy.sh/topic', 'file:///etc/passwd', 'javascript:alert(1)', 'ftp://h/t', null]) assert.strictEqual(SL.pushRequest(bad, 't', 'm', 'done'), null, String(bad));
+});
+
+test('NOTIFY_BLOCKED_MATCHER: the board matcher without idle_prompt', () => {
+  assert.strictEqual(SL.NOTIFY_BLOCKED_MATCHER + '|idle_prompt', SL.NOTIFY_MATCHER);
+});

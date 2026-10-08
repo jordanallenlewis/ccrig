@@ -5,7 +5,7 @@
 
 **See your Claude plan budget while you work, and keep the thread when you hit the wall.**
 
-CCRig is a status line and usage-limit guardian for [Claude Code](https://claude.com/claude-code). It shows your 5-hour and weekly plan usage with reset times, warns before a limit, saves where you were when you reach one, and can pick the session back up at the reset on its own.
+CCRig is a status line and usage-limit guardian for [Claude Code](https://claude.com/claude-code). It shows your 5-hour and weekly plan usage with reset times, pings you (desktop, and your phone if you like) every time a session stops and waits on you, warns before a limit, saves where you were when you reach one, and can pick the session back up at the reset on its own.
 
 ```
 ▾ ccrig ───────────────────────────────────────────────────────────────────────────────────────
@@ -15,7 +15,7 @@ ctx ━━━━────── 42% │ session ━━━━━━╸──�
 
 Preview it with sample data before installing: `npx ccrig --demo` (add `--cols 80` to size a screenshot). Fold it to one line any time with `/ccrig:toggle`.
 
-One Node file, zero dependencies, and no network calls while it draws: everything comes from the JSON Claude Code already hands the status line. (The only network anywhere is an optional once-a-day update check; `"updateCheck": false` turns it off.)
+One Node file, zero dependencies, and no network calls while it draws: everything comes from the JSON Claude Code already hands the status line. (The only network anywhere is an optional once-a-day update check, which `"updateCheck": false` turns off, and the phone push for [stop pings](#stop-pings-on-by-default), only if you set `"pushUrl"`.)
 
 ## Install
 
@@ -65,7 +65,7 @@ Run `/reload-plugins` (or restart) and you get:
 - **Usage on the spinner.** `Thinking · session 63%…` while Claude works.
 - **A toast before the wall.** Claude Code pushes usage to the mod as it moves, so the toast lands when a window crosses warn (90%) or critical (95%), with no polling.
 - **`/ccrig` with no Claude turn.** It answers at once, even mid-turn: `/ccrig` for a one-line summary, `/ccrig usage` for a pane with the bars, reset times and the pace forecast, `/ccrig board` for the session board, and `mode`, `autopilot`, `keep-working`, `status`, `sessions` and `doctor` as in the CLI.
-- **The guardian, from the mod.** Checkpoints, resume tickets, keep-working and the board lamps run from the mod's hooks, so nothing is written to `settings.json`. Each hook `ccrig init` already wired is left to it, so none runs twice.
+- **The guardian, from the mod.** Checkpoints, resume tickets, keep-working, stop pings and the board lamps run from the mod's hooks, so nothing is written to `settings.json`. Each hook `ccrig init` already wired is left to it, so none runs twice.
 - **Resume in place.** With `"autopilot": "resume"` and the terminal still open, the session continues on its own at the reset, in the same window, where you can watch it and answer any prompt. Close the terminal first and the detached watcher takes over as before.
 
 The band (`auto`, `always`, `alerts`, `off`), the spinner readout and the toasts are the ccrig rows in `/config`, and a change there applies at once. Everything else (segments, mode, thresholds, autopilot) lives in the same `~/.ccrig/statusline.config.json` the npm install reads, so `/ccrig mode minimal` changes both.
@@ -109,6 +109,23 @@ ccrig --autopilot off             # bar only, no guardian side effects
 Restart Claude Code once so the hooks load. What it honestly can and cannot do: auto-resume needs a Claude.ai Pro/Max plan (Claude Code sends rate-limit data only to subscribers) and a machine that is awake at reset time. It watches the 5-hour and 7-day windows Claude Code reports; a per-model weekly cap (an Opus-only limit, say) is not in that data, so it gets no warning ahead of time, but hitting it still ends the turn with a usage-limit error, which the `StopFailure` hook catches. Only a session that has drawn the bar is relaunched: a `claude -p` script that hits a limit gets the resume ticket, never an unattended relaunch. From the npm install it cannot reach into your open terminal, so it launches a fresh headless run and reconciles via the git snapshot; nothing is lost, because the transcript is continuous. As a [Claude Code mod](#or-install-it-as-a-claude-code-mod) in an open terminal, the resume happens in that session at the reset (no headless relaunch); close the terminal and the detached watcher takes over as before. (If an auto-resume fires while the old terminal is still parked at the limit, close that one rather than typing into it, or the two will fork the same session.) If usage recovers on its own before the reset, because you upgraded your plan or bought extra usage, the guardian notices and stands down. The headless relaunch cannot answer permission prompts; if one blocks it you can set `"autopilotBypassPermissions": true`, off by default because it is a real skip-permission-checks step. It applies only to the guardian's own unattended relaunch, never your interactive session. Nothing runs as a hidden daemon: `ccrig --status` lists armed watchers and `ccrig --disarm` stops them.
 
 Keep-working applies to every session the hook runs in, including a `claude -p` script: with todos still open, its Stop hook asks for another turn (up to its limit). Turn it off for scripts with `--keep-working off`, or run them under a profile without the guardian. Cross-profile failover is for people who hold two plans of their own (work and personal, say); whether continuing on another account is allowed is between you and your plan's terms, which is why it is off unless you turn it on.
+
+## Stop pings (on by default)
+
+A session that stops while you are looking at something else is time lost. CCRig sends a desktop notification every time a session stops and the next move is yours, whether or not its terminal has focus:
+
+- **finished**: the turn ended. The notification carries the start of Claude's reply (`Claude Code: my-project finished`)
+- **needs you**: Claude is waiting on a permission prompt, a question (an MCP form), or, for a background session, your input
+- **stopped**: the turn died on an API error (overloaded, a server error, an auth or billing problem). A usage limit gets the guardian's own ping instead, which says when to resume (Claude Code 2.1.78 or newer)
+
+A stop parked on a subagent, a workflow or a `/loop` wakeup stays quiet: those report back and wake the session, so you hear about it when it really stops. A background shell or monitor may run for good (a dev server), so it never holds a ping; the ping says what is still running. Keep-working turning a stop around is not a stop either. `claude -p` scripts and SDK runs never ping. Send a test with `ccrig --notify-test`, and turn pings off with `"stopNotify": false` (or `n` in `ccrig --config`). On macOS the notification comes from Script Editor: if none shows up, allow Script Editor in System Settings › Notifications. On Linux it needs `notify-send`.
+
+**On your phone.** Two routes; use either or both:
+
+- **ntfy, for every session.** Install the [ntfy](https://ntfy.sh) app, subscribe to a topic name nobody would guess, and set `"pushUrl": "https://ntfy.sh/<that-topic>"` (or your own ntfy server; add `?auth=<token>` for a protected topic). `CCRIG_PUSH_URL` sets it for one shell. Every ping then reaches your phone too. The push says which session and what happened (`Finished. Your turn.`), never Claude's reply, and it is the only hook that uses the network. Anyone who knows a topic name on the public ntfy.sh server can read it, so make it long and random.
+- **Remote Control, Claude Code's own.** For a session you drive from the Claude app, `ccrig init` turns on Claude Code's own phone push where you have never set it: `inputNeededNotifEnabled` and `agentPushNotifEnabled` in `settings.json`, which `/config` › Notifications shows as "Notify when Claude needs you" and "Notify when Claude is done" (Claude Code 2.1.140 or newer, with Remote Control on). Claude Code decides when that push fires; the ntfy route fires on every stop. With `"pushUrl"` set, `ccrig init` leaves Claude Code's push switches alone, so a stop does not reach your phone twice.
+
+The hooks behind the pings ride with the bar: the guardian's Stop hook (or, for a bar-only install, a Stop hook of its own), a Notification hook for the waiting-on-you types, and a `StopFailure` hook for API errors. `ccrig init` or an npm update wires them; turning pings off in `ccrig --config` takes them out.
 
 ## The session board (opt-in)
 
@@ -178,6 +195,7 @@ source "$(npm root -g)/ccrig/claude-profiles.sh"          # bash / zsh / Git Bas
 | `--autopilot` / `--keep-working` | limit behavior and keep-working, from the shell |
 | `--sessions` / `--board` / `--status` / `--disarm` | list sessions, watch every session as a traffic light (`--board --watch`; `ccrig board on` / `off` turns it on or off), list or stop armed watchers (every profile) |
 | `--name <label>` | label this project on the board (what `/ccrig:name` runs) |
+| `--notify-test` | send a sample stop ping to your desktop, and to your phone when `"pushUrl"` is set |
 | `--update` / `--check-update` / `--whatsnew` / `--dismiss-update` / `--force` | update from npm or in place, check now, show what changed, hide or repair |
 | `--demo` / `--selftest` / `--version` | sample render, edge-case checks, version |
 | `--purge` | delete local guardian state (checkpoints, tickets, cache) |

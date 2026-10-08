@@ -463,7 +463,7 @@ export function register(on, options: { band?: string; spinner?: boolean; alerts
     const base = await next(e)
     const s = cur()
     if (!wired('stop') && (s.autopilot !== 'off' || s.keepWorking)) return forward($, 'stop', e, base)
-    if (s.sessionBoard && !wired('board-stop') && !wired('stop')) return forward($, 'board-stop', e, base)
+    if ((s.sessionBoard || s.stopNotify !== false) && !wired('board-stop') && !wired('stop')) return forward($, 'board-stop', e, base)
     return base
   })
 
@@ -495,8 +495,20 @@ export function register(on, options: { band?: string; spinner?: boolean; alerts
 
   on('classic.Notification', { notification_type: ['permission_prompt', 'elicitation_dialog', 'elicitation_url_dialog', 'agent_needs_input', 'idle_prompt'] }, async ($, e, next) => {
     const base = await next(e)
-    if (cur().sessionBoard && !wired('notification')) return forward($, 'notification', e, base)
+    if (wired('notification')) return base
+    // idle_prompt only settles a board lamp; the waiting-on-you types also carry the stop ping
+    const s = cur()
+    if (s.sessionBoard || (s.stopNotify !== false && e.notification_type !== 'idle_prompt')) return forward($, 'notification', e, base)
     return base
+  })
+
+  // a turn that died on any API error: the stop ping. A usage limit is the guardian's to report (with the
+  // resume time) unless autopilot is off.
+  on('classic.StopFailure', async ($, e, next) => {
+    const base = await next(e)
+    const s = cur()
+    if (s.stopNotify === false || wired('stop-error') || (e.error_type === 'rate_limit' && s.autopilot !== 'off')) return base
+    return forward($, 'stop-error', e, base, 5000)
   })
 
   // runs before Claude Code's own exit work, with a short timeout, so the board cleanup and the watcher

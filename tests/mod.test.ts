@@ -449,12 +449,50 @@ test('StopFailure is left to a wired guardian, and does nothing with autopilot o
   expect(hookRuns(a.seen)).toEqual([])
 })
 
-test('StopFailure with autopilot off runs nothing', async ($, on) => {
+test('StopFailure with autopilot off: no guardian, so the stop ping reports the limit; pings off runs nothing', async ($, on) => {
   const { seen } = setup(on, { config: '{"autopilot":"off"}' })
   on('classic.StopFailure', () => ({}))
   await start($)
   await $.classic.StopFailure({ hook_event_name: 'StopFailure', session_id: 's', transcript_path: '/t', cwd: '/w', error_type: 'rate_limit' })
+  expect(hookRuns(seen)).toEqual(['stop-error'])
+})
+
+test('StopFailure with stop pings and the guardian off runs nothing', async ($, on) => {
+  const { seen } = setup(on, { config: '{"autopilot":"off","stopNotify":false}' })
+  on('classic.StopFailure', () => ({}))
+  await start($)
+  await $.classic.StopFailure({ hook_event_name: 'StopFailure', session_id: 's', transcript_path: '/t', cwd: '/w', error_type: 'rate_limit' })
   expect(hookRuns(seen)).toEqual([])
+})
+
+test('stop pings from the mod: an API error, a bar-only Stop and a permission prompt go to statusline.js; idle does not', async ($, on) => {
+  const { seen } = setup(on, { config: '{"autopilot":"off"}' })
+  on('classic.StopFailure', () => ({}))
+  on('classic.Stop', () => ({}))
+  on('classic.Notification', () => ({}))
+  await start($)
+  await $.classic.StopFailure({ hook_event_name: 'StopFailure', session_id: 's', transcript_path: '/t', cwd: '/w', error_type: 'overloaded' })
+  await $.classic.Stop(stopEvent())
+  await $.classic.Notification({ hook_event_name: 'Notification', session_id: 's', transcript_path: '/t', cwd: '/w', notification_type: 'idle_prompt', message: 'idle' })
+  await $.classic.Notification({ hook_event_name: 'Notification', session_id: 's', transcript_path: '/t', cwd: '/w', notification_type: 'permission_prompt', message: 'Claude needs your permission to use Bash' })
+  expect(hookRuns(seen)).toEqual(['stop-error', 'board-stop', 'notification'])
+})
+
+test('stop pings from the mod: a stop-error ccrig init wired is left to it', async ($, on) => {
+  const wiredSe = { ...WIRED, hooks: { ...WIRED.hooks, StopFailure: [{ hooks: [{ type: 'command', command: 'node C:/npm/node_modules/ccrig/statusline.js --hook stop-error' }] }] } }
+  const { seen } = setup(on, { settings: wiredSe })
+  on('classic.StopFailure', () => ({}))
+  await start($)
+  await $.classic.StopFailure({ hook_event_name: 'StopFailure', session_id: 's', transcript_path: '/t', cwd: '/w', error_type: 'server_error' })
+  expect(hookRuns(seen)).toEqual([])
+})
+
+test('stop pings from the mod: a usage limit goes to the guardian alone, which reports it with the resume time', async ($, on) => {
+  const { seen } = setup(on, { settings: WIRED, config: '{"autopilot":"notify"}' })
+  on('classic.StopFailure', () => ({}))
+  await start($)
+  await $.classic.StopFailure({ hook_event_name: 'StopFailure', session_id: 's', transcript_path: '/t', cwd: '/w', error_type: 'rate_limit' })
+  expect(hookRuns(seen)).toEqual(['stop-failure'])
 })
 
 test('hooks wired by ccrig init are left to it', async ($, on) => {
