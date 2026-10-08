@@ -39,9 +39,12 @@ test('packLines wraps whole segments and never starts a line with a separator', 
 test('parseRigOutput reads the segments statusline.js prints, and refuses anything else', () => {
   const old = parseRigOutput(JSON.stringify({ v: '1.7.0', segments: ['\x1b[38;5;75mccrig\x1b[0m'], widths: [5] }))
   expect(old).toEqual({ segs: [{ spans: [{ text: 'ccrig', color: '#5fafff' }], width: 5 }], state: null, lines: null, width: null })
-  const state = { thresholds: { green: 50, yellow: 80, warn: 85, critical: 93 }, mode: 'normal', autopilot: 'resume', keepWorking: true, sessionBoard: false, forecast: { window: 'session', etaSec: 2700, safe: false, text: '⏳ ~45m to session limit' }, resume: { armed: false, window: '', resetsAt: null }, update: { latest: null, hint: '' } }
+  const state = { thresholds: { green: 50, yellow: 80, warn: 85, critical: 93 }, mode: 'normal', autopilot: 'resume', keepWorking: true, sessionBoard: false, stopNotify: false, forecast: { window: 'session', etaSec: 2700, safe: false, text: '⏳ ~45m to session limit' }, resume: { armed: false, window: '', resetsAt: null }, update: { latest: null, hint: '' } }
   const withState = parseRigOutput(JSON.stringify({ v: '1.8.0', segments: [], widths: [], state }))
   expect(withState!.state).toEqual(state)
+  // a statusline.js from before stop pings reports no stopNotify: they are on by default
+  const { stopNotify: _, ...older } = state
+  expect(parseRigOutput(JSON.stringify({ v: '1.9.0', segments: [], widths: [], state: older }))!.state!.stopNotify).toBe(true)
   expect(parseRigOutput(JSON.stringify({ segments: [], state: { thresholds: { warn: 'x' } } }))!.state).toBe(null)
   expect(parseRigOutput('statusline error: run node statusline.js --doctor')).toBe(null)
   expect(parseRigOutput(JSON.stringify({ segments: [1] }))).toBe(null)
@@ -93,9 +96,10 @@ test('crossings reports each threshold once, the highest one crossed', () => {
 })
 
 test('configFrom reads the guardian settings with the statusline.js defaults', () => {
-  expect(configFrom(null)).toEqual({ thresholds: DEFAULT_THRESHOLDS, autopilot: 'notify', keepWorking: false, sessionBoard: false })
+  expect(configFrom(null)).toEqual({ thresholds: DEFAULT_THRESHOLDS, autopilot: 'notify', keepWorking: false, sessionBoard: false, stopNotify: true })
   expect(configFrom('{"autopilot":"resume","keepWorking":{"maxContinues":5},"sessionBoard":true,"mode":"minimal"}'))
-    .toEqual({ thresholds: DEFAULT_THRESHOLDS, autopilot: 'resume', keepWorking: true, sessionBoard: true, mode: 'minimal' })
+    .toEqual({ thresholds: DEFAULT_THRESHOLDS, autopilot: 'resume', keepWorking: true, sessionBoard: true, stopNotify: true, mode: 'minimal' })
+  expect(configFrom('{"stopNotify":false}').stopNotify).toBe(false)
   expect(configFrom('{"autopilot":"sometimes"}').autopilot).toBe('notify')
 })
 
