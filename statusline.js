@@ -1198,7 +1198,12 @@ function stopNotifyOn() { return CONFIG.stopNotify !== false; }
 // Code sets CLAUDE_CODE_ENTRYPOINT (sdk-cli for -p) and its hooks inherit it. The guardian's own unattended
 // relaunch is a -p run too, but that one finishing is news.
 const HEADLESS_ENTRY = new Set(['sdk-cli', 'sdk-ts', 'sdk-py', 'mcp', 'claude-code-github-action']);
-function attendedRun() { return !!process.env.CCBSL_UNATTENDED || !HEADLESS_ENTRY.has(process.env.CLAUDE_CODE_ENTRYPOINT || ''); }
+// A hook the mod forwards says it outright (CCRIG_ATTENDED), since a mod's process may not carry Claude Code's env.
+function attendedRun() {
+  if (process.env.CCBSL_UNATTENDED) return true;
+  if (process.env.CCRIG_HOST === 'mod' && (process.env.CCRIG_ATTENDED === '1' || process.env.CCRIG_ATTENDED === '0')) return process.env.CCRIG_ATTENDED === '1';
+  return !HEADLESS_ENTRY.has(process.env.CLAUDE_CODE_ENTRYPOINT || '');
+}
 const PING_KIND = {
   done: { verb: 'finished', priority: '3', tags: 'white_check_mark' },
   needs: { verb: 'needs you', priority: '4', tags: 'raising_hand' },
@@ -4695,8 +4700,10 @@ function runDoctor() {
   const hasSlug = (Ev, slug) => Array.isArray(bh[Ev]) && bh[Ev].some((g) => groupHasSlug(g, slug));
   const lampEvents = [['UserPromptSubmit', 'user-prompt'], ['Notification', 'notification'], ['SessionEnd', 'session-end'], ['Stop', 'board-stop']];
   if (CONFIG.sessionBoard !== true) {
-    // an install from before the lamps followed the setting: hooks that start Node only to exit
-    const idle = lampEvents.filter(([Ev, slug]) => Ev !== 'Stop' && hasSlug(Ev, slug)).length;
+    // an install from before the lamps followed the setting: hooks that start Node only to exit (the stop
+    // pings' Notification hook is not one of them)
+    const wanted = new Set(wantedBoardEvents(raw.value).map((e) => e[1]));
+    const idle = lampEvents.filter(([Ev, slug]) => Ev !== 'Stop' && hasSlug(Ev, slug) && !wanted.has(slug)).length;
     info('session board: off (ccrig board on turns it on)' + (idle ? '; ' + idle + ' of its lamp hooks are still wired and only start Node to exit, so run  ccrig board off  to take them out' : ''));
   } else {
     const bw = lampEvents.filter(([Ev, slug]) => hasSlug(Ev, slug) || (Ev === 'Stop' && hasSlug('Stop', 'stop'))).map(([Ev]) => Ev);
