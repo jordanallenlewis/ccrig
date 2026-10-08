@@ -19,6 +19,8 @@ export type ModState = {
   autopilot: string
   keepWorking: boolean
   sessionBoard: boolean
+  // stop pings (a desktop ping, and a phone push with pushUrl, each time a session stops); on unless false
+  stopNotify?: boolean
   forecast?: { window: string; etaSec: number; safe: boolean; text: string } | null
   resume?: { armed: boolean; window: string; resetsAt: number | null }
   update?: { latest: string | null; hint: string }
@@ -155,6 +157,7 @@ function validState(x: unknown): ModState | null {
     autopilot: typeof s.autopilot === 'string' ? s.autopilot : 'notify',
     keepWorking: s.keepWorking === true,
     sessionBoard: s.sessionBoard === true,
+    stopNotify: s.stopNotify !== false,
     forecast: s.forecast && typeof s.forecast === 'object' ? (s.forecast as ModState['forecast']) : null,
     resume: s.resume && typeof s.resume === 'object' ? (s.resume as ModState['resume']) : undefined,
     update: s.update && typeof s.update === 'object' ? (s.update as ModState['update']) : undefined,
@@ -289,7 +292,7 @@ export function summaryLine(model: string, usage: Usage | null, nowMs: number): 
 // The fallback when no render has printed `state` yet (no Node, the Desktop app, or an older
 // statusline.js): CCRig's own config file, read the way statusline.js reads it, with its defaults.
 export function configFrom(configText: string | null | undefined): ModState {
-  const out: ModState = { thresholds: { ...DEFAULT_THRESHOLDS }, autopilot: 'notify', keepWorking: false, sessionBoard: false }
+  const out: ModState = { thresholds: { ...DEFAULT_THRESHOLDS }, autopilot: 'notify', keepWorking: false, sessionBoard: false, stopNotify: true }
   if (!configText) return out
   let cfg: Record<string, unknown> | null = null
   try { cfg = JSON.parse(configText.split(BOM).join('')) } catch { return out }
@@ -304,6 +307,7 @@ export function configFrom(configText: string | null | undefined): ModState {
   if (cfg.autopilot === 'off' || cfg.autopilot === 'notify' || cfg.autopilot === 'resume') out.autopilot = cfg.autopilot
   out.keepWorking = !!cfg.keepWorking
   out.sessionBoard = cfg.sessionBoard === true
+  out.stopNotify = cfg.stopNotify !== false
   if (typeof cfg.mode === 'string') out.mode = cfg.mode
   return out
 }

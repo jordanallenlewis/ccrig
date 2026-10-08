@@ -171,6 +171,14 @@ const DEFAULTS = {
   boardDecayMinutes: 30,
   // Desktop ping when a session watched by `--board --watch` starts waiting on a human.
   boardNotify: true,
+  // Stop pings: a desktop notification every time a session stops and the next move is yours (a turn
+  // finished, Claude is waiting on a permission prompt or a question, or a turn died on an API error),
+  // whether or not the terminal has focus. `claude -p` scripts and SDK runs never ping. false = off.
+  stopNotify: true,
+  // Also send stop pings to your phone: an ntfy-style URL (https://ntfy.sh/<a-private-topic>, or your own
+  // ntfy server). Empty = off (the default). The push carries the session label and what happened, never
+  // Claude's reply. This is the only hook that touches the network, and only when you set it.
+  pushUrl: '',
   // Re-inject a rules file after Claude Code compacts context (SessionStart source=compact),
   // in case compaction drops your project rules. false | true (=CLAUDE.md) | "path/to/file".
   reinjectOnCompact: false,
@@ -1182,6 +1190,85 @@ function oncePerSession(sid, tag, fn) {
   return true;
 }
 
+// --- stop pings: the moment a session stops and the next move is the human's, say so (desktop, and the
+// phone when "pushUrl" is set). Every time, focused terminal or not: Claude Code's own notifications only
+// fire for an unfocused terminal, and its phone push for a finished turn is left to the model.
+function stopNotifyOn() { return CONFIG.stopNotify !== false; }
+// `claude -p` scripts, SDK apps, `claude mcp serve` and GitHub Actions have no human waiting on them. Claude
+// Code sets CLAUDE_CODE_ENTRYPOINT (sdk-cli for -p) and its hooks inherit it. The guardian's own unattended
+// relaunch is a -p run too, but that one finishing is news.
+const HEADLESS_ENTRY = new Set(['sdk-cli', 'sdk-ts', 'sdk-py', 'mcp', 'claude-code-github-action']);
+function attendedRun() { return !!process.env.CCBSL_UNATTENDED || !HEADLESS_ENTRY.has(process.env.CLAUDE_CODE_ENTRYPOINT || ''); }
+const PING_KIND = {
+  done: { verb: 'finished', priority: '3', tags: 'white_check_mark' },
+  needs: { verb: 'needs you', priority: '4', tags: 'raising_hand' },
+  failed: { verb: 'stopped', priority: '4', tags: 'warning' },
+};
+// where a push goes: CCRIG_PUSH_URL (this shell) or "pushUrl". Only an absolute http(s) URL counts.
+function pushTarget() {
+  const raw = String(process.env.CCRIG_PUSH_URL || CONFIG.pushUrl || '').trim();
+  if (!raw) return '';
+  try { const u = new URL(raw); return /^https?:$/.test(u.protocol) && u.hostname ? u.toString() : ''; } catch { return ''; }
+}
+// The ntfy publish request for one ping. Title, priority and tags ride as query parameters, which ntfy reads
+// the same as its headers and which carry a Unicode session label safely (a raw header cannot). Pure.
+function pushRequest(target, title, msg, kind) {
+  let u; try { u = new URL(String(target || '')); } catch { return null; }
+  if (!/^https?:$/.test(u.protocol) || !u.hostname) return null;
+  const k = PING_KIND[kind] || PING_KIND.done;
+  u.searchParams.set('title', String(title == null ? '' : title));
+  u.searchParams.set('priority', k.priority);
+  u.searchParams.set('tags', k.tags);
+  return { url: u.toString(), body: String(msg == null ? '' : msg), headers: { 'Content-Type': 'text/plain; charset=utf-8', 'User-Agent': 'ccrig/' + VERSION } };
+}
+// the push leaves from a detached child (`--push`), so the hook itself returns at once
+function pushSend(title, msg, kind) {
+  const target = pushTarget();
+  if (!target || !actAllowed()) return false;
+  return spawnDetached(process.execPath, [__filename, '--push'], { env: Object.assign({}, process.env, {
+    NODE_USE_SYSTEM_CA: '1', CCRIG_PUSH_TO: target, CCRIG_PUSH_TITLE: String(title), CCRIG_PUSH_MSG: String(msg), CCRIG_PUSH_KIND: kind,
+  }) });
+}
+// One ping per stop, so a stop that reaches two of our hooks (a settings hook and the mod's forward of it,
+// say) still pings once. A stop is known by its session, kind and what it carries (the reply, the prompt,
+// the error), so the next stop of a quick back-and-forth still pings. One small file, not one per session.
+function pingOnce(sid, kind, stamp) {
+  const f = path.join(guardDir(), 'recent-pings.json'), now = Date.now(), key = sid + ' ' + kind + ' ' + strHash(String(stamp || ''));
+  let recent = {};
+  try { const p = JSON.parse(fs.readFileSync(f, 'utf8')); if (isPlainObject(p)) recent = p; } catch {}
+  for (const k of Object.keys(recent)) if (!(now - recent[k] < 5000)) delete recent[k];
+  if (recent[key]) return false;
+  recent[key] = now;
+  try { fs.mkdirSync(guardDir(), { recursive: true, mode: 0o700 }); } catch {}
+  writeJsonAtomic(f, recent);
+  return true;
+}
+// Ping that this session stopped. `detail` is the desktop line; `pushDetail` replaces it on the phone, so
+// Claude's own words stay on this machine.
+function stopPing(input, kind, detail, pushDetail) {
+  if (!stopNotifyOn() || !attendedRun() || !input) return false;
+  const stamp = [input.last_assistant_message, input.notification_type, input.message, input.error_type].map((x) => (typeof x === 'string' ? x : '')).join('\n');
+  if (!pingOnce(String(input.session_id || ''), kind, stamp)) return false;
+  const title = 'Claude Code: ' + (sessionLabel(input, inputCwd(input)) || 'session') + ' ' + (PING_KIND[kind] || PING_KIND.done).verb;
+  notify(title, detail || 'Your turn.');
+  pushSend(title, pushDetail || detail || 'Your turn.', kind);
+  return true;
+}
+// A Stop worth a ping: nothing in flight that will wake the session by itself. A subagent or a workflow
+// always reports back, and so does a one-shot wakeup such as /loop's, so those hold the ping. A background
+// shell or monitor may run for good (a dev server), so it never silences a stop; the ping says it is still
+// running. A recurring cron does not hold it either: between fires the session is idle.
+const WAKING_TASKS = new Set(['subagent', 'workflow', 'local_agent', 'agent']);
+function pingStop(input) {
+  if (!input) return false;
+  const bg = Array.isArray(input.background_tasks) ? input.background_tasks.filter((t) => t && typeof t === 'object') : [];
+  if (bg.some((t) => WAKING_TASKS.has(String(t.type || '')))) return false;
+  if (Array.isArray(input.session_crons) && input.session_crons.some((c) => c && c.recurring === false)) return false;
+  const said = cleanLabel(typeof input.last_assistant_message === 'string' ? input.last_assistant_message : '', 140);
+  const still = bg.length ? ' (' + bg.length + ' still running in the background)' : '';
+  return stopPing(input, 'done', (said || 'Your turn.') + still, 'Finished. Your turn.' + still);
+}
+
 // --- Feature 4: cross-profile usage ledger. Each render records THIS profile's
 // last-seen usage to a shared dir in HOME (not CFG), so any profile can later see
 // which others still have headroom. Honest about staleness: entries carry a time.
@@ -1230,6 +1317,7 @@ const BLOCKED_NOTIFY = new Set(['permission_prompt', 'elicitation_dialog', 'elic
 // idle_prompt (Claude has sat waiting for the user) turns a stuck yellow lamp green: an Esc interrupt or
 // an API error ends a turn without any Stop hook
 const NOTIFY_MATCHER = 'permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|idle_prompt';
+const NOTIFY_BLOCKED_MATCHER = 'permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input';
 const NOTIFY_WHY = { permission_prompt: 'perms', elicitation_dialog: 'form', elicitation_url_dialog: 'url', agent_needs_input: 'input' };
 
 function lampPath(sid) { return path.join(boardDir(), sid + '.lamp'); }
@@ -1669,6 +1757,7 @@ function modState(input) {
     autopilot: cfgAutopilot(),
     keepWorking: !!cfgKeepWorking(),
     sessionBoard: CONFIG.sessionBoard === true,
+    stopNotify: stopNotifyOn(),
     forecast: f ? { window: f.window, etaSec: Math.round(f.etaSec), safe: f.safe, text: f.text } : null,
     resume: { armed, window: armed ? cp.window || '' : '', resetsAt: armed ? cp.resets_at : null },
     update: { latest, hint: latest ? MOD_UPDATE_CMD : '' },
@@ -1795,8 +1884,9 @@ function httpGetText(url, depth, cb) {
     req.on('timeout', () => req.destroy(new Error('timeout')));
   } catch (e) { cb(e); }
 }
-// minimal zero-dep proxy support: CONNECT-tunnel for https, absolute-URI GET for http
-function httpViaProxy(u, proxy, isHttps, headers, onRes, cb) {
+// minimal zero-dep proxy support: CONNECT-tunnel for https, absolute-URI request for http. A GET unless
+// `send` ({ method, body }) says otherwise.
+function httpViaProxy(u, proxy, isHttps, headers, onRes, cb, send) {
   let p;
   try { p = new URL(proxy); } catch (e) { return cb(e); }
   const auth = p.username ? { 'Proxy-Authorization': 'Basic ' + Buffer.from(decodeURIComponent(p.username) + ':' + decodeURIComponent(p.password || '')).toString('base64') } : {};
@@ -1805,8 +1895,9 @@ function httpViaProxy(u, proxy, isHttps, headers, onRes, cb) {
   const tlsProxy = p.protocol === 'https:';
   if (!isHttps) {
     const http = require(tlsProxy ? 'https' : 'http');
-    const req = http.get({ hostname: p.hostname, port: proxyPort, path: u.toString(), headers: Object.assign({ Host: u.host }, headers, auth), timeout: 7000 }, onRes);
+    const req = http.request({ method: send ? send.method : 'GET', hostname: p.hostname, port: proxyPort, path: u.toString(), headers: Object.assign({ Host: u.host }, headers, auth), timeout: 7000 }, onRes);
     req.on('error', cb); req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.end(send ? send.body : undefined);
     return;
   }
   const net = require('net'), tls = require('tls');
@@ -1831,14 +1922,63 @@ function httpViaProxy(u, proxy, isHttps, headers, onRes, cb) {
     if (leftover.length) { try { sock.unshift(leftover); } catch {} }
     const tlsSock = tls.connect({ socket: sock, servername: u.hostname }, () => {
       const https = require('https');
-      const req = https.request({ createConnection: () => tlsSock, hostname: u.hostname, port: u.port || 443, path: u.pathname + u.search, headers, timeout: 7000 }, (res) => { done = true; onRes(res); });
+      const req = https.request({ method: send ? send.method : 'GET', createConnection: () => tlsSock, hostname: u.hostname, port: u.port || 443, path: u.pathname + u.search, headers, timeout: 7000 }, (res) => { done = true; onRes(res); });
       req.on('error', fail);
       req.on('timeout', () => req.destroy(new Error('timeout'))); // no timeout handler = a mid-body stall hangs forever
-      req.end();
+      req.end(send ? send.body : undefined);
     });
     tlsSock.on('error', fail);
   };
   sock.on('data', onData);
+}
+
+// One bounded POST (a stop ping's push): redirects are not followed, any 2xx is success, proxy-aware.
+// cb(err, status) runs exactly once.
+function httpPost(req, cb) {
+  let settled = false;
+  const finish = (err, status) => { if (!settled) { settled = true; cb(err, status); } };
+  let u; try { u = new URL(req.url); } catch (e) { return finish(e); }
+  const isHttps = u.protocol === 'https:';
+  const proxy = isHttps ? (process.env.HTTPS_PROXY || process.env.https_proxy) : (process.env.HTTP_PROXY || process.env.http_proxy);
+  const body = Buffer.from(req.body || '', 'utf8');
+  const headers = Object.assign({}, req.headers, { 'Content-Length': body.length });
+  const onRes = (res) => { res.resume(); const st = res.statusCode || 0; finish(st >= 200 && st < 300 ? null : new Error('HTTP ' + st), st); };
+  try {
+    if (proxy && !noProxy(u.hostname)) return httpViaProxy(u, proxy, isHttps, headers, onRes, finish, { method: 'POST', body });
+    const r = require(isHttps ? 'https' : 'http').request({ method: 'POST', hostname: u.hostname, port: u.port || (isHttps ? 443 : 80), path: u.pathname + u.search, headers, timeout: 10000 }, onRes);
+    r.on('error', finish);
+    r.on('timeout', () => r.destroy(new Error('timeout')));
+    r.end(body);
+  } catch (e) { finish(e); }
+}
+// --push: the detached sender a stop ping spawns; the request rides in its env. Exits 0 on a 2xx.
+function runPush() {
+  const req = pushRequest(process.env.CCRIG_PUSH_TO, process.env.CCRIG_PUSH_TITLE, process.env.CCRIG_PUSH_MSG, process.env.CCRIG_PUSH_KIND);
+  if (!req) process.exit(1);
+  httpPost(req, (err) => process.exit(err ? 1 : 0));
+}
+// --notify-test: one sample stop ping, on the desktop and (with "pushUrl") the phone, saying how each went.
+// The push is reported by host only: an ntfy topic, or an ?auth= token, in the URL is a secret.
+function runNotifyTest() {
+  const target = pushTarget();
+  // a corporate root CA often lives only in the OS store (Node 22.15+ reads NODE_USE_SYSTEM_CA at startup)
+  if (target && !process.env.NODE_USE_SYSTEM_CA) {
+    const r = require('child_process').spawnSync(process.execPath, process.argv.slice(1), { stdio: 'inherit', env: Object.assign({}, process.env, { NODE_USE_SYSTEM_CA: '1' }) });
+    process.exit(r.status == null ? 1 : r.status);
+  }
+  if (!stopNotifyOn()) process.stdout.write('Stop pings are off ("stopNotify": false); sending a test anyway.\n');
+  const title = 'Claude Code: ' + (cleanLabel(path.basename(process.cwd()), 32) || 'session') + ' finished';
+  notify(title, 'A test ping from CCRig. A real one comes each time a session stops and waits on you.');
+  process.stdout.write('Sent a desktop notification.' + (process.platform === 'darwin' ? ' No banner? Allow Script Editor in System Settings > Notifications.' : process.platform === 'linux' ? ' It needs notify-send (libnotify).' : '') + '\n');
+  if (!target) {
+    process.stdout.write('No phone push: set "pushUrl" to an ntfy topic URL (https://ntfy.sh/<a-private-topic>) to get one' + (CONFIG.pushUrl ? ' (the one set is not an http(s) URL)' : '') + '.\n');
+    process.exit(0);
+  }
+  httpPost(pushRequest(target, title, 'A test ping from CCRig.', 'done'), (err, status) => {
+    const host = new URL(target).host;
+    process.stdout.write(err ? 'The phone push to ' + host + ' failed: ' + err.message + '\n' : 'Pushed to ' + host + ' (HTTP ' + status + ').\n');
+    process.exit(err ? 1 : 0);
+  });
 }
 
 // pull the VERSION constant out of a fetched statusline.js
@@ -2495,7 +2635,7 @@ if (require.main !== module) {
     fetchText, httpGetText, VERSION,
     DEFAULTS, DEFAULT_ORDER, MODES, helpText, watcherCmdMatches, notifySpec, maybeCheckUpdate,
     cleanLabel, padCell, sessionLabel, lampSupersedes, lampFor, lampPings, winLaunch, parseJsonText, profileLabelOf,
-    NOTIFY_MATCHER, burnSlope, parseResetText, limitFromFailure, resumeShell, resumeCmdLine, ambiguousMode, localeHour24, humanText,
+    NOTIFY_MATCHER, NOTIFY_BLOCKED_MATCHER, pushRequest, burnSlope, parseResetText, limitFromFailure, resumeShell, resumeCmdLine, ambiguousMode, localeHour24, humanText,
     _setAmbiguous: (m) => { AMBIG_WIDE = m === 'wide'; },
   };
   return;
@@ -2509,7 +2649,7 @@ const SUBCOMMANDS = {
   board: '--board', config: '--config', help: '--help', version: '--version',
   status: '--status', disarm: '--disarm', purge: '--purge', options: '--options', whatsnew: '--whatsnew',
   mode: '--mode', autopilot: '--autopilot', 'keep-working': '--keep-working', 'check-update': '--check-update',
-  selftest: '--selftest', name: '--name',
+  selftest: '--selftest', name: '--name', 'notify-test': '--notify-test',
   collapse: '--collapse', expand: '--expand', toggle: '--toggle',
 };
 if (argv[0] && !argv[0].startsWith('-')) {
@@ -2519,7 +2659,7 @@ if (argv[0] && !argv[0].startsWith('-')) {
 // validate every flag BEFORE any mode runs: a typo in a modifier (--this-profle, --no-gaurdian) must stop
 // the command, not silently widen it to every profile or wire the guardian. (Claude Code passes no args.)
 if (argv.some((a) => a.startsWith('--'))) {
-  const KNOWN = new Set(['--install', '--install-guardian', '--no-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--options', '--config', '--demo', '--selftest', '--version', '--help', '--cols', '--this-profile', '--auto', '--force', '--hook', '--watch', '--name', '--collapse', '--expand', '--toggle']);
+  const KNOWN = new Set(['--install', '--install-guardian', '--no-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--options', '--config', '--demo', '--selftest', '--version', '--help', '--cols', '--this-profile', '--auto', '--force', '--hook', '--watch', '--name', '--collapse', '--expand', '--toggle', '--notify-test', '--push']);
   const unknown = argv.find((a) => a.startsWith('--') && !KNOWN.has(a));
   if (unknown) { process.stdout.write('unknown flag: ' + unknown + '\nRun  ccrig --help  for the flag list.\n'); process.exit(1); }
   if (argv.includes('--auto') && !argv.includes('--install-guardian')) { process.stdout.write('--auto goes with --install-guardian (ccrig --install-guardian --auto).\n'); process.exit(1); }
@@ -2549,6 +2689,7 @@ function helpText() {
     '  --status             list armed auto-resume watchers (nothing is a hidden daemon)',
     '  --disarm [id]        stop auto-resume watcher(s) and clear their state',
     '  --purge              delete all local guardian state (checkpoints, tickets, cache)',
+    '  --notify-test        send a sample stop ping (desktop, and your phone when "pushUrl" is set)',
     '  --update             update in place (npm installs: npm install -g ccrig@latest; else git pull or download)',
     '  --force              with --update: apply even when the remote is not newer (repair)',
     '  --check-update       check now whether a newer version is available',
@@ -2613,39 +2754,47 @@ function stampStopLamp(input) {
   if (prev && prev.why === 'todos' && Date.now() - (prev.at || 0) < 5000) return;
   writeLamp(input, (input && Array.isArray(input.background_tasks) && input.background_tasks.length) ? 'working' : 'done', 'stop');
 }
-function runHookBoardStop(input) { stampStopLamp(input); emitHook({}); }
+// board-stop is wired only where the guardian's Stop hook is not, so it owns the stop ping there
+function runHookBoardStop(input) { stampStopLamp(input); pingStop(input); emitHook({}); }
 function runHookStop(input) {
   stampStopLamp(input); // the board's own Stop hook stamps it too; whichever runs, the lamp is the same
+  const block = keepWorkingBlock(input);
+  if (block) return emitHook(block);                              // keep-working: the session goes on, no ping
+  pingStop(input);                                                // the stop stands: the next move is the human's
+  emitHook({});
+}
+// keep-working's verdict on a Stop: the block to send, or null to let the stop stand
+function keepWorkingBlock(input) {
   // an unattended auto-resume must not loop overnight: never force-continue there
-  if (process.env.CCBSL_UNATTENDED) return emitHook({});
+  if (process.env.CCBSL_UNATTENDED) return null;
   const kw = cfgKeepWorking();
-  if (!kw) return emitHook({});                                   // disabled -> allow stop
+  if (!kw) return null;                                           // disabled -> allow stop
   const sid = input.session_id, tp = input.transcript_path;
   const validSid = sid && SID_RE.test(sid);
   const pending = (latestTodos(tp, true) || []).filter((x) => x && x.status !== 'completed'); // full-scan: don't miss todos past the tail
-  if (!pending.length) { if (validSid) clearGuardCounters(sid); return emitHook({}); } // done -> allow
+  if (!pending.length) { if (validSid) clearGuardCounters(sid); return null; } // done -> allow
   // a trailing question or an explicit hand-off is a real human decision: never talk over it
   const last = latestAssistantText(tp);
   if (/\?\s*$/.test(last) || /\b(which would you|which one|should i|do you want|would you like|let me know|please (confirm|choose|decide|clarify|advise)|blocked:?|need (your|you to|a decision|input|clarification)|waiting for|up to you|your call|can't proceed|cannot proceed|awaiting)\b/i.test(last.slice(-320))) {
     if (validSid) clearGuardCounters(sid);                        // fresh burst starts clean after a hand-off
-    return emitHook({});
+    return null;
   }
-  if (!validSid) return emitHook({});                             // can't loop-guard safely -> don't force
+  if (!validSid) return null;                             // can't loop-guard safely -> don't force
   const cont = guardVal(sid, 'continues'), stuck = guardVal(sid, 'stuck'), lastN = guardVal(sid, 'lastpending');
   const n = cont.get() + 1;
-  if (n > kw.maxContinues) { clearGuardCounters(sid); return emitHook({}); }   // hard cap -> allow stop
+  if (n > kw.maxContinues) { clearGuardCounters(sid); return null; }   // hard cap -> allow stop
   const prev = lastN.get();
   const s = (prev && pending.length >= prev) ? stuck.get() + 1 : 0;            // pending not shrinking = stalled
-  if (s >= kw.maxStuck) { clearGuardCounters(sid); return emitHook({}); }      // stalled -> allow stop
+  if (s >= kw.maxStuck) { clearGuardCounters(sid); return null; }      // stalled -> allow stop
   // fail OPEN: if the counters can't be persisted, we can't bound the loop, so allow the stop.
   // (all three run, no short-circuit, so a partial write doesn't leave a half-updated state.)
   const okC = cont.set(n), okS = stuck.set(s), okL = lastN.set(pending.length);
-  if (!okC || !okS || !okL) { clearGuardCounters(sid); return emitHook({}); }
+  if (!okC || !okS || !okL) { clearGuardCounters(sid); return null; }
   const list = pending.slice(0, 6).map((x) => '- ' + (x.content || x.activeForm)).join('\n');
   writeLamp(input, 'working', 'todos', true); // keep-working refuses the stop: force past our own 'done'
-  emitHook({ decision: 'block', reason:
+  return { decision: 'block', reason:
     'Do not stop yet: ' + pending.length + ' todo(s) still open. Keep working through them:\n' + list +
-    '\nIf you are genuinely blocked on a human decision, a missing secret, or a question, state that explicitly, then stop.' });
+    '\nIf you are genuinely blocked on a human decision, a missing secret, or a question, state that explicitly, then stop.' };
 }
 // Feature 1 (re-kick): on resume/compact, inject the checkpoint so no work repeats.
 // Also (opt-in) re-inject a rules file after a compaction, in case compaction dropped it.
@@ -2716,6 +2865,29 @@ function runHookNotification(input) {
   }
   if (t && !BLOCKED_NOTIFY.has(t)) return emitHook({}); // auth_success and friends: not blocked
   writeLamp(input, 'blocked', NOTIFY_WHY[t] || 'input');
+  // Claude Code's own line ("Claude needs your permission to use Bash") names what it waits on. It stays on
+  // the desktop: an MCP form's line is the server's own text, so the phone gets a fixed phrase.
+  const said = cleanLabel(typeof input.message === 'string' ? input.message : '', 140);
+  stopPing(input, 'needs', said || NEEDS_TEXT[t] || 'Waiting on you.', NEEDS_TEXT[t] || 'Waiting on you.');
+  emitHook({});
+}
+// Does the guardian get this session's usage-limit StopFailure (and ping about it with the resume time)?
+// Only with autopilot on, and only where its hook runs: wired in this profile, or forwarded by the mod.
+function guardianHearsLimits() {
+  if (cfgAutopilot() === 'off') return false;
+  if (process.env.CCRIG_HOST === 'mod' || modFresh(modMarker())) return true;
+  const raw = readSettingsRaw();
+  const sf = raw.state === 'ok' && isPlainObject(raw.value.hooks) && Array.isArray(raw.value.hooks.StopFailure) ? raw.value.hooks.StopFailure : [];
+  return sf.some((g) => groupHasSlug(g, 'stop-failure'));
+}
+const NEEDS_TEXT = { permission_prompt: 'Waiting on a permission prompt.', elicitation_dialog: 'Waiting on your answer.', elicitation_url_dialog: 'Waiting on your answer.', agent_needs_input: 'A background session is waiting on your input.' };
+// StopFailure, any error: the turn died on an API error (overloaded, a server error, an auth or billing
+// problem...), so no Stop hook ran and nothing else says the session stopped. A usage limit is the
+// guardian's to report (with the resume time), unless the guardian is off.
+function runHookStopError(input) {
+  const t = cleanLabel(String((input && input.error_type) || ''), 32) || 'unknown';
+  if (t === 'rate_limit' && guardianHearsLimits()) return emitHook({});
+  stopPing(input, 'failed', 'The turn ended on an API error (' + t + '). Your turn.');
   emitHook({});
 }
 // Board lamp: the session is gone (exit, /clear, a resume switch). Drop its rows so the board never
@@ -3025,6 +3197,7 @@ function runHook(event, input) {
     if (event === 'session-end' || event === 'SessionEnd') return runHookSessionEnd(input);
     if (event === 'board-stop') return runHookBoardStop(input);
     if (event === 'stop-failure' || event === 'StopFailure') return runHookStopFailure(input);
+    if (event === 'stop-error') return runHookStopError(input);
     if (event === 'mod-resume') return runHookModResume(input);
     if (event === 'mod-exit') return runHookModExit(input);
   } catch {}
@@ -3459,7 +3632,8 @@ function runBoardWatch() {
     const rows = boardRows(now);
     if (CONFIG.boardNotify !== false) {
       for (const r of lampPings(rows, seen, n === 0)) { // the first frame seeds silently: no ping storm
-        notify('Claude Code is waiting on you', rowLabel(r) + ' needs a decision to continue.');
+        // stop pings already said so from the session's own hook; the board pings only with them off
+        if (!stopNotifyOn()) notify('Claude Code is waiting on you', rowLabel(r) + ' needs a decision to continue.');
       }
     }
     const lines = boardFrame(rows, now, useColor).split('\n');
@@ -3534,8 +3708,8 @@ function runSessions() {
 }
 // one mode at a time: silently ignoring the second flag misleads the user. This gate sits ABOVE
 // the one-shot dispatch so a combined command (e.g. `--purge --install`) is rejected, not half-run.
-// --hook/--watch are installer-wired internals, never user-typed, so they are exempt.
-const EXCLUSIVE = ['--install', '--install-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--config', '--demo', '--selftest', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--options', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--name', '--collapse', '--expand', '--toggle'];
+// --hook/--watch/--push are installer-wired internals, never user-typed, so they are exempt.
+const EXCLUSIVE = ['--install', '--install-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--config', '--demo', '--selftest', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--options', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--name', '--collapse', '--expand', '--toggle', '--notify-test'];
 const picked = EXCLUSIVE.filter((m) => argv.includes(m));
 if (picked.length > 1) {
   process.stdout.write('pick one of: ' + picked.join(', ') + '\n');
@@ -3543,6 +3717,8 @@ if (picked.length > 1) {
 }
 
 if (argv.includes('--hook')) { let inp = {}; try { inp = JSON.parse(fs.readFileSync(0, 'utf8')); } catch {} runHook(argv[argv.indexOf('--hook') + 1], inp); }
+if (argv.includes('--push')) { runPush(); return; }             // async: exits in its callback
+if (argv.includes('--notify-test')) { runNotifyTest(); return; } // async when it pushes
 // `--board --watch` is the board's own redraw loop, not the auto-resume watcher, so --board wins here
 if (argv.includes('--watch') && !argv.includes('--board')) { runWatch(argv[argv.indexOf('--watch') + 1]); return; }
 if (argv.includes('--status')) runStatus();
@@ -3600,6 +3776,8 @@ function runOptions() {
   o += 'session board:  ' + (CONFIG.sessionBoard === true ? 'on' : 'off') + '        --board lists every session with a blocked/working/done/idle lamp (ccrig board on|off)\n';
   o += '  done decay:    ' + Math.round(boardDecayMs() / 60000) + 'm       how long a finished session stays green before it goes grey\n';
   o += '  blocked ping:  ' + (CONFIG.boardNotify === false ? 'off' : 'on') + '        desktop ping when a session watched by --board --watch starts waiting on you\n';
+  o += 'stop pings:     ' + (stopNotifyOn() ? 'on' : 'off') + '        desktop ping every time a session stops and waits on you ("stopNotify"; try: ccrig --notify-test)\n';
+  o += '  phone push:    ' + (pushTarget() ? 'on (' + new URL(pushTarget()).host + ')' : 'off') + '        stop pings on your phone too: "pushUrl": an ntfy topic URL\n';
   o += '\nguardian (needs --install-guardian to wire the hooks):\n';
   o += '  keep-working:  ' + (cfgKeepWorking() ? 'on' : 'off') + '        keep the session working while todos remain\n';
   o += '  autopilot:     ' + cfgAutopilot() + '        off | notify | resume (auto-relaunch at reset)\n';
@@ -3808,10 +3986,12 @@ function installStatusLineInto(dir, withGuardian) {
     if (withGuardian || (REFRESH && hadGuardian)) addGuardianHooks(settings);
     else if (hadGuardian) { settings.hooks = stripGuardianHooks(settings.hooks).hooks || {}; strippedGuardian = true; }
     addBoardHooks(settings); // the board lamps follow sessionBoard, with or without the guardian
+    // a setup you typed (never an npm update's refresh) also turns on Claude Code's own phone push
+    const nativePush = REFRESH ? [] : enableNativePush(dir, settings);
     if (!writeJsonAtomic(sp, settings)) throw new Error('could not save ' + sp + '; it was left unchanged');
     JSON.parse(fs.readFileSync(sp, 'utf8')); // round-trip validate
     const cmd = writeSlashCommands(dir);
-    return { dir, sp, bak, cmd, replacedForeign, guardian: !!withGuardian || (REFRESH && hadGuardian), strippedGuardian, hooksOff: settings.disableAllHooks === true };
+    return { dir, sp, bak, cmd, replacedForeign, guardian: !!withGuardian || (REFRESH && hadGuardian), strippedGuardian, hooksOff: settings.disableAllHooks === true, nativePush };
   } catch (e) { return { dir, sp: settingsPathOf(dir), err: e.message }; }
 }
 function refuseModCopy() {
@@ -3881,8 +4061,9 @@ function runInstall() {
     if (!detectProfiles().some(profileHasGuardian) && cfgAutopilot() !== 'off') { CONFIG.autopilot = 'off'; CONFIG.keepWorking = false; saveConfig(); }
     process.stdout.write('Installed the status line only (guardian off). Turn it on any time:  node "' + __filename + '" --install-guardian\n');
   }
+  if (!REFRESH) writeStopPingNote(okd);
   // honest one-line privacy note; the render is zero-network, a once-a-day check is the only exception
-  process.stdout.write('Privacy: drawing the bar never uses the network. The only exception is a once-a-day update check, which you can turn off with "updateCheck": false (or NO_UPDATE_NOTIFIER=1).\n');
+  process.stdout.write('Privacy: drawing the bar never uses the network. The only exceptions are a once-a-day update check, which you can turn off with "updateCheck": false (or NO_UPDATE_NOTIFIER=1), and a stop-ping push to your phone, only if you set "pushUrl".\n');
   process.stdout.write('\nRestart Claude Code once, and you are set. After that, changes to your settings apply live.\n');
   process.exit(0);
 }
@@ -3906,12 +4087,42 @@ const HOOK_EVENTS = [
   // limit another session or a background agent used up arrives with no warning render; this is the
   // signal that catches it. Claude Code 2.1.78 added the event; an older one never gets it wired.
   ['StopFailure', 'stop-failure', 'guardian', 'rate_limit', 0, '2.1.78'],
+  // a turn that died on any API error: the stop ping for a turn that never reached a Stop hook
+  ['StopFailure', 'stop-error', 'board', '', 5, '2.1.78'],
 ];
 // can this Claude Code run the hook? (an entry's 6th field is the first version that has its event)
-function hookSupported(e) {
-  if (!e[5]) return true;
+function hookSupported(e) { return !e[5] || ccAtLeast(e[5]); }
+// is this Claude Code known to be at least `min`? An unknown version is not.
+function ccAtLeast(min) {
   const v = process.env.CCRIG_CC_VERSION || ccVersion();
-  return !!v && /^\d+\.\d+\.\d+/.test(v) && !semverGt(e[5], v.match(/^\d+\.\d+\.\d+/)[0]);
+  return !!v && /^\d+\.\d+\.\d+/.test(v) && !semverGt(min, v.match(/^\d+\.\d+\.\d+/)[0]);
+}
+// Claude Code's own phone push for Remote Control sessions (/config > Notifications): "push when actions
+// required" and "push when Claude decides", which a session that pings on every stop wants too. Turned on
+// only where never set, so a choice made in /config stands (older Claude Code kept it in .claude.json).
+// Both keys are in the settings of Claude Code 2.1.140 and later; on an older or unknown one nothing is
+// written. Returns the keys it turned on.
+const NATIVE_PUSH_KEYS = ['inputNeededNotifEnabled', 'agentPushNotifEnabled'];
+const NATIVE_PUSH_SINCE = '2.1.140';
+function enableNativePush(dir, settings) {
+  // with a "pushUrl" every stop already reaches the phone; Claude Code's own push on top would double it
+  if (!stopNotifyOn() || pushTarget() || !ccAtLeast(NATIVE_PUSH_SINCE)) return [];
+  const chosen = {};
+  const globals = [path.join(dir, '.claude.json')];
+  if (path.resolve(dir) === path.resolve(HOME, '.claude')) globals.push(path.join(HOME, '.claude.json'));
+  for (const f of globals) {
+    try { const g = JSON.parse(fs.readFileSync(f, 'utf8')); if (isPlainObject(g)) for (const k of NATIVE_PUSH_KEYS) if (g[k] !== undefined) chosen[k] = true; } catch {}
+  }
+  const on = [];
+  for (const k of NATIVE_PUSH_KEYS) if (settings[k] === undefined && !chosen[k]) { settings[k] = true; on.push(k); }
+  return on;
+}
+// the install's word on stop pings, said once for every profile it set up
+function writeStopPingNote(results) {
+  if (!stopNotifyOn()) return;
+  process.stdout.write('Stop pings are on: a desktop notification every time a session stops and waits on you. Get them on your phone too with "pushUrl" (an ntfy topic), or turn them off with "stopNotify": false. Try one:  node "' + __filename + '" --notify-test\n');
+  if (results.some((r) => r.nativePush && r.nativePush.length)) process.stdout.write('Turned on Claude Code\'s own phone push for Remote Control sessions ("Notify when Claude needs you" and "Notify when Claude is done"); change either in /config > Notifications.\n');
+  if (process.platform === 'darwin') process.stdout.write('On macOS the ping comes from Script Editor: if none shows up, allow it in System Settings > Notifications > Script Editor.\n');
 }
 const GUARD_EVENTS = HOOK_EVENTS.filter((e) => e[2] === 'guardian');
 const BOARD_EVENTS = HOOK_EVENTS.filter((e) => e[2] === 'board');
@@ -3956,6 +4167,19 @@ function rememberCcVersion(v) {
   // and a wired guardian picks up any hook event this version newly supports (StopFailure at 2.1.78)
   try { migrateHooksToExec(); } catch {}
   try { wireNewGuardEvents(); } catch {}
+  try { wireNewBoardEvents(); } catch {}
+}
+// the same for the bar's own hooks (stop-error, the stop ping for a turn that died, at 2.1.78), in a profile
+// whose status line is CCRig's
+function wireNewBoardEvents() {
+  const raw = readSettingsRaw();
+  if (raw.state !== 'ok' || !isPlainObject(raw.value.statusLine) || !isOurCmd(raw.value.statusLine.command)) return false;
+  const hk = isPlainObject(raw.value.hooks) ? raw.value.hooks : {};
+  const has = ([Ev, slug]) => Array.isArray(hk[Ev]) && hk[Ev].some((g) => groupHasSlug(g, slug));
+  if (wantedBoardEvents(raw.value).filter(hookSupported).every(has)) return false;  // nothing new to add
+  backupSettings();
+  addBoardHooks(raw.value);
+  return writeJsonAtomic(settingsPathOf(), raw.value);
 }
 function wireNewGuardEvents() {
   const raw = readSettingsRaw();
@@ -4057,11 +4281,20 @@ function addGuardianHooks(settings) { addHooks(settings, GUARD_EVENTS); }
 // wired only while the board is on: with it off they would only exit. The guardian's own Stop hook
 // already stamps the done lamp, so board-stop rides only when the guardian is not wired. On Windows a
 // bar-only install keeps board-stop either way: it is the hook that notices a broken Git Bash.
+// Stop pings ("stopNotify", on by default) need board-stop (where the guardian's Stop hook is not wired),
+// the Notification hook for the waiting-on-you types, and stop-error; without the board, the Notification
+// matcher leaves out idle_prompt, which only settles a lamp, so an idle session starts no Node.
 function wantedBoardEvents(settings) {
   const hooks = settings && isPlainObject(settings.hooks) ? settings.hooks : {};
   const guardStop = Array.isArray(hooks.Stop) && hooks.Stop.some((g) => groupHasSlug(g, 'stop'));
   const board = CONFIG.sessionBoard === true;
-  return BOARD_EVENTS.filter(([, slug]) => (slug === 'board-stop' ? !guardStop && (board || process.platform === 'win32') : board));
+  const ping = stopNotifyOn();
+  return BOARD_EVENTS.filter(([, slug]) => {
+    if (slug === 'board-stop') return !guardStop && (board || ping || process.platform === 'win32');
+    if (slug === 'notification') return board || ping;
+    if (slug === 'stop-error') return ping;
+    return board;
+  }).map((e) => (e[1] === 'notification' && !board ? [e[0], e[1], e[2], NOTIFY_BLOCKED_MATCHER, e[4]] : e));
 }
 // make the board hooks match wantedBoardEvents: add what is missing, take out what no longer applies
 function addBoardHooks(settings) {
@@ -4173,10 +4406,11 @@ function installGuardianInto(dir) {
     // strip any prior guardian hooks surgically (keeps the user's own), then add fresh
     addGuardianHooks(settings);
     addBoardHooks(settings); // the guardian's Stop now stamps the done lamp, so a board-stop beside it goes
+    const nativePush = enableNativePush(dir, settings);
     if (!writeJsonAtomic(sp, settings)) throw new Error('could not save ' + sp + '; it was left unchanged');
     JSON.parse(fs.readFileSync(sp, 'utf8')); // round-trip validate
     writeSlashCommands(dir);
-    return { dir, sp, bak };
+    return { dir, sp, bak, nativePush };
   } catch (e) { return { dir, sp: settingsPathOf(dir), err: e.message }; }
 }
 function runInstallGuardian() {
@@ -4206,6 +4440,7 @@ function runInstallGuardian() {
   process.stdout.write('Limit Autopilot: ' + want + (want === 'resume'
     ? '. It restarts your session on its own the moment the limit resets.'
     : '. It saves your place and sends a desktop alert; add --auto to have it restart on its own.') + '\n');
+  writeStopPingNote(okd);
   process.stdout.write('\nAdjust it any time:  --autopilot <off|notify|resume>   --keep-working <on|off>\n');
   process.stdout.write('Remove it with:  node "' + __filename + '" --uninstall-guardian\n');
   process.stdout.write('\nRestart Claude Code once so the hooks load.\n');
@@ -4705,6 +4940,7 @@ async function runConfigEditor() {
   });
   const order = Array.isArray(CONFIG.order) ? CONFIG.order : DEFAULT_ORDER;
   const boardWas = CONFIG.sessionBoard === true;
+  const pingWas = stopNotifyOn();
   while (true) {
     let out = '\n\x1b[1mstatusline config\x1b[0m   (edits go to statusline.config.json)\n\n';
     out += 'Preview:\n  ' + render(demoInput(), 96, DEMO_GIT()).split('\n').join('\n  ') + '\n\nSegments:\n';
@@ -4720,6 +4956,7 @@ async function runConfigEditor() {
     out += `   b) session board: ${CONFIG.sessionBoard === true ? 'on' : 'off'}  (lamps in --board)\n`;
     out += `   d) done decay: ${Math.round(boardDecayMs() / 60000)}m  (a finished session goes grey after this)\n`;
     out += `   p) board ping: ${CONFIG.boardNotify !== false ? 'on' : 'off'}  (--board --watch pings when a session waits on you)\n`;
+    out += `   n) stop pings: ${stopNotifyOn() ? 'on' : 'off'}  (a desktop ping each time a session stops and waits on you)\n`;
     out += `   s) save & quit    q) quit without saving\n`;
     if (CONFIG.mode !== 'normal') out += `   note: mode is ${CONFIG.mode}, so the segment toggles above only take effect in normal mode.\n`;
     process.stdout.write(out);
@@ -4731,6 +4968,8 @@ async function runConfigEditor() {
         // the board's lamp hooks follow the setting, so a toggle here rewires them like `ccrig board on|off`
         const on = CONFIG.sessionBoard === true;
         if (on !== boardWas) process.stdout.write('Session board ' + (on ? 'on' : 'off') + '. ' + boardRewireNote(on, installKind() === 'mod' ? 0 : rewireBoard()));
+        // stop pings ride on the same hooks
+        else if (stopNotifyOn() !== pingWas) { const n = installKind() === 'mod' ? 0 : rewireBoard(); process.stdout.write('Stop pings ' + (stopNotifyOn() ? 'on' : 'off') + (n ? '; rewired the hooks in ' + n + ' ' + plural(n, 'profile') + '. Restart Claude Code once' : '') + '.\n'); }
       }
       break;
     }
@@ -4740,6 +4979,7 @@ async function runConfigEditor() {
     if (a === 'r') { const st = ['auto', 'clock', 'clock24', 'relative']; CONFIG.resetStyle = st[(st.indexOf(CONFIG.resetStyle) + 1) % st.length]; continue; }
     if (a === 'b') { CONFIG.sessionBoard = CONFIG.sessionBoard !== true; continue; }
     if (a === 'p') { CONFIG.boardNotify = CONFIG.boardNotify === false; continue; }
+    if (a === 'n') { CONFIG.stopNotify = !stopNotifyOn(); continue; }
     if (a === 'd') { const steps = [15, 30, 60, 120]; CONFIG.boardDecayMinutes = steps[(steps.indexOf(Math.round(boardDecayMs() / 60000)) + 1) % steps.length]; continue; }
     if (/^\d+$/.test(a)) {
       const n = order[parseInt(a, 10) - 1];
@@ -4748,7 +4988,7 @@ async function runConfigEditor() {
       else CONFIG.show[n] = !CONFIG.show[n];
       continue;
     }
-    process.stdout.write('Enter a segment number, b, c, d, m, p, r, y, s, or q.\n');
+    process.stdout.write('Enter a segment number, b, c, d, m, n, p, r, y, s, or q.\n');
   }
   rl.close();
   process.exit(0);
