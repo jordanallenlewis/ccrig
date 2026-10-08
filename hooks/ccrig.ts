@@ -30,6 +30,8 @@ let toasts = true
 // where this session runs: only an interactive terminal or Desktop session draws or acts on its own
 let surface: string | null = null
 let draws = false
+// a human is at this session (any surface): the stop pings statusline.js sends from a forwarded hook
+let attended = false
 
 // what this session knows
 let sessionId = ''
@@ -248,7 +250,9 @@ async function cli($, argv: string[]) {
 async function forward($, slug: string, e, base, timeoutMs = 20000) {
   const result = base && typeof base === 'object' ? base : {}
   try {
-    const out = await runCcrig($, ['--hook', slug], { stdin: JSON.stringify(e), env: { CCRIG_HOST: 'mod' }, timeoutMs })
+    // CCRIG_ATTENDED: whether a human waits on this session, said outright rather than left to the env a
+    // mod's process inherits, so a claude -p run never sends a stop ping
+    const out = await runCcrig($, ['--hook', slug], { stdin: JSON.stringify(e), env: { CCRIG_HOST: 'mod', CCRIG_ATTENDED: attended ? '1' : '0' }, timeoutMs })
     return classicResult(out.stdout, result)
   } catch {
     return result
@@ -405,6 +409,7 @@ export function register(on, options: { band?: string; spinner?: boolean; alerts
   on('session.start', async ($, e, next) => {
     surface = e.surface ?? null
     draws = e.isInteractive === true && (surface === 'terminal' || surface === 'desktop')
+    attended = e.isInteractive === true
     await learnSession($)
     await loadConfig($)
     if (draws) {

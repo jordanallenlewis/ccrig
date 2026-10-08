@@ -476,6 +476,16 @@ test('stop pings from the mod: an API error, a bar-only Stop and a permission pr
   await $.classic.Notification({ hook_event_name: 'Notification', session_id: 's', transcript_path: '/t', cwd: '/w', notification_type: 'idle_prompt', message: 'idle' })
   await $.classic.Notification({ hook_event_name: 'Notification', session_id: 's', transcript_path: '/t', cwd: '/w', notification_type: 'permission_prompt', message: 'Claude needs your permission to use Bash' })
   expect(hookRuns(seen)).toEqual(['stop-error', 'board-stop', 'notification'])
+  for (const r of seen.runs.filter((x) => x.argv.includes('--hook'))) expect(r.init.env).toMatchObject({ CCRIG_HOST: 'mod', CCRIG_ATTENDED: '1' })
+})
+
+test('stop pings from the mod: a claude -p session forwards its hooks marked unattended', async ($, on) => {
+  const { seen } = setup(on, { config: '{"autopilot":"off"}' })
+  on('classic.StopFailure', () => ({}))
+  await start($, null, false)
+  await $.classic.StopFailure({ hook_event_name: 'StopFailure', session_id: 's', transcript_path: '/t', cwd: '/w', error_type: 'overloaded' })
+  const hook = seen.runs.find((r) => r.argv.includes('--hook'))
+  expect(hook!.init.env).toMatchObject({ CCRIG_HOST: 'mod', CCRIG_ATTENDED: '0' })
 })
 
 test('stop pings from the mod: a stop-error ccrig init wired is left to it', async ($, on) => {
