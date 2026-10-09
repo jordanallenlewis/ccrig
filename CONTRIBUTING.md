@@ -144,8 +144,9 @@ manifest. Then two independent jobs run, each safe to re-run:
   workflow `release.yml`).
 
 The Claude Code mod needs no step of its own: `/plugin update ccrig@ccrig` follows the tag pinned in
-`marketplace.json`, and the Anthropic plugin directory (once listed) picks up new versions from the
-tracked branch.
+`marketplace.json`. The Anthropic plugin directory follows the `release` branch, which a third job in
+`release.yml` fast-forwards to each released tag (never to unreleased work on `main`); the directory then
+scans the new version and publishes it according to the listing's publish setting.
 
 ## Maintainers
 
