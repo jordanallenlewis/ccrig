@@ -128,7 +128,7 @@ jobs:
 
   directory:
     # the Anthropic plugin directory follows the `release` branch, which only ever points at a released tag,
-    # so the listing never serves unreleased work from main. Fast-forward only; re-running is a no-op.
+    # so the listing never serves unreleased work from main. A derived pointer: forced to each tag, re-running is a no-op.
     name: move the release branch
     needs: [test, mod, verify]
     runs-on: ubuntu-latest
@@ -138,15 +138,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Fast-forward release to this tag
+      - name: Point release at this tag
         shell: bash
-        run: |
-          git fetch origin release 2>/dev/null || true
-          if git rev-parse --verify -q origin/release >/dev/null && ! git merge-base --is-ancestor origin/release "$GITHUB_SHA"; then
-            echo "::error::release is not an ancestor of $GITHUB_REF_NAME; refusing a non-fast-forward move"
-            exit 1
-          fi
-          git push origin "$GITHUB_SHA:refs/heads/release"
+        run: git push --force origin "$GITHUB_SHA:refs/heads/release"
 
   npm:
     name: publish to npm
