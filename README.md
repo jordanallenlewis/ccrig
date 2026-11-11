@@ -1,3 +1,5 @@
+<img src="assets/logo.svg" width="64" height="64" alt="CCRig logo">
+
 # CCRig
 
 [![npm version](https://img.shields.io/npm/v/ccrig.svg)](https://www.npmjs.com/package/ccrig)
