@@ -128,13 +128,13 @@ try {
   fs.mkdirSync(app, { recursive: true });
   for (const f of ['statusline.js', 'CHANGELOG.md']) fs.copyFileSync(path.join(REPO, f), path.join(app, f));
   const js = path.join(app, 'statusline.js');
-  const env = envFor(home, { CCRIG_HOOK_FORM: 'exec' });
+  const env = envFor(home, { CCRIG_HOOK_FORM: 'exec', CCRIG_CC_VERSION: '2.1.287' });
   let r = node([js, '--install'], { env });
   (r.status === 0 ? PASS : FAIL)('exec-form --install', both(r).slice(0, 1500));
   const sp = path.join(home, '.claude', 'settings.json');
   let s = readJson(sp);
   const hooks = allCommands(s).filter((c) => c.ev !== 'statusLine');
-  ((hooks.length === 7 && hooks.every((c) => c.args && sameFile(c.args[0], js) && c.args[1] === '--hook')) ? PASS : FAIL)('exec-form hooks name node and pass the script as args', JSON.stringify(hooks).slice(0, 1500));
+  ((hooks.length === 4 && hooks.every((c) => c.args && sameFile(c.args[0], js) && c.args[1] === '--hook')) ? PASS : FAIL)('exec-form hooks name node and pass the script as args', JSON.stringify(hooks).slice(0, 1500));
   execCommands('exec-form', { hooks: s.hooks }, env);
   r = node([js, '--uninstall'], { env });
   s = readJson(sp);
