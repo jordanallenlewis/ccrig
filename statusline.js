@@ -1273,11 +1273,13 @@ function padCell(s, n) {
 // Project labels (`ccrig --name`, /ccrig:name) live in ~/.ccrig/names/, one small file per project folder,
 // never inside the project: a file there made every named repo read as dirty (`git ●1`).
 function namesDir() { return path.join(HOME, '.ccrig', 'names'); }
-function nameFile(dir) { return path.join(namesDir(), strHash(foldPath(path.resolve(dir))) + '.json'); }
+// the real path when the folder exists, so /var/... and /private/var/... (macOS) name the same project
+function realDir(dir) { const d = path.resolve(dir); try { return fs.realpathSync(d); } catch { return d; } }
+function nameFile(dir) { return path.join(namesDir(), strHash(foldPath(realDir(dir))) + '.json'); }
 function savedName(dir) {
   try {
     const o = parseJsonText(fs.readFileSync(nameFile(dir), 'utf8'));
-    if (isPlainObject(o) && typeof o.dir === 'string' && foldPath(path.resolve(o.dir)) === foldPath(path.resolve(dir))) return typeof o.label === 'string' ? o.label : '';
+    if (isPlainObject(o) && typeof o.dir === 'string' && foldPath(realDir(o.dir)) === foldPath(realDir(dir))) return typeof o.label === 'string' ? o.label : '';
   } catch {}
   return '';
 }

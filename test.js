@@ -3739,10 +3739,15 @@ fs.writeFileSync(COUNTER, `
 const fs = require('fs'), cp = require('child_process');
 const out = { total: 0, fn: {}, path: {}, bytes: {}, spawns: 0 };
 const fds = {};
+let depth = 0; // Node 18 builds readFileSync out of the public openSync/readSync/closeSync: count only the call the code made
 const key = (a) => (typeof a === 'string' || Buffer.isBuffer(a)) ? String(a).replace(/\\\\/g, '/') : (typeof a === 'number' ? (fds[a] || 'fd' + a) : '?');
 for (const n of ['readFileSync', 'writeFileSync', 'statSync', 'lstatSync', 'fstatSync', 'existsSync', 'readdirSync', 'openSync', 'readSync', 'closeSync', 'writeSync', 'mkdirSync', 'unlinkSync', 'renameSync', 'chmodSync', 'realpathSync', 'copyFileSync', 'accessSync', 'appendFileSync']) {
   const orig = fs[n];
   fs[n] = function (...a) {
+    if (depth > 0) return orig.apply(this, a);
+    depth++; try { return counted.apply(this, a); } finally { depth--; }
+  };
+  const counted = function (...a) {
     out.total++; out.fn[n] = (out.fn[n] || 0) + 1;
     const k = n + ' ' + key(a[0]); out.path[k] = (out.path[k] || 0) + 1;
     const r = orig.apply(this, a);
