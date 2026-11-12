@@ -3457,7 +3457,14 @@ test('Windows: only shells running the exact status line command are ended, neve
 // ===========================================================================
 // refined style (the default since 1.9): rule line, meters, layout, number edge cases
 // ===========================================================================
-const R_ENV = (sb, extra = {}) => ({ CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_STYLE: 'refined', ...extra });
+// A reset that isn't today reads as a weekday ("Fri 12:05a"), so a reset a few minutes out turns into a
+// longer label whenever it crosses local midnight, and the layout and clock tests went red from 22:37 UTC
+// on CI. Render in a fixed-offset zone where it is midday right now, so "minutes away" stays today.
+const R_MIDDAY_TZ = () => {
+  const off = ((12 - new Date().getUTCHours() + 36) % 24) - 12; // hours to add to UTC to reach 12:xx
+  return off === 0 ? 'Etc/GMT' : 'Etc/GMT' + (off > 0 ? '-' : '+') + Math.abs(off); // Etc/GMT signs are inverted
+};
+const R_ENV = (sb, extra = {}) => ({ CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_STYLE: 'refined', TZ: R_MIDDAY_TZ(), ...extra });
 const R_NOW = () => Math.floor(Date.now() / 1000);
 const fullInput = (extra = {}) => baseInput({
   session_id: 'rf1', fast_mode: true, cost: { total_cost_usd: 3.5, total_lines_added: 10, total_lines_removed: 2 },
