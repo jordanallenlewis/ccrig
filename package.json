@@ -7,7 +7,7 @@
   "bugs": { "url": "https://github.com/jordanallenlewis/ccrig/issues" },
   "repository": { "type": "git", "url": "git+https://github.com/jordanallenlewis/ccrig.git" },
   "license": "MIT",
-  "author": "Jordan Allen Lewis (https://jordanallenlewis.com)",
+  "author": "Jordan Allen Lewis (https://jordanallenlewis.com/?utm_source=npm&utm_medium=referral&utm_campaign=ccrig-author)",
   "type": "commonjs",
   "bin": { "ccrig": "statusline.js" },
   "files": [
