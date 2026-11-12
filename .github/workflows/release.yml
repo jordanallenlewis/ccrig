@@ -171,3 +171,14 @@ jobs:
             exit 1
           }
           echo "published ccrig@$VER"
+
+  github-packages:
+    # a mirror for the repository and profile pages; npm above stays the install source. Re-running is a no-op.
+    name: mirror to GitHub Packages
+    needs: [test, mod, verify]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/github-packages.yml
+    with:
+      ref: ${{ github.ref_name }}
