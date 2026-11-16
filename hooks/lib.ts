@@ -22,6 +22,8 @@ export type ModState = {
   forecast?: { window: string; etaSec: number; safe: boolean; text: string } | null
   resume?: { armed: boolean; window: string; resetsAt: number | null }
   update?: { latest: string | null; hint: string }
+  // Fable's weekly window from the opt-in background check ("fableLimit": true); Claude Code never reports it
+  fable?: { pct: number; resetsAt?: string } | null
 }
 
 const BOM = String.fromCharCode(0xfeff)
@@ -158,7 +160,27 @@ function validState(x: unknown): ModState | null {
     forecast: s.forecast && typeof s.forecast === 'object' ? (s.forecast as ModState['forecast']) : null,
     resume: s.resume && typeof s.resume === 'object' ? (s.resume as ModState['resume']) : undefined,
     update: s.update && typeof s.update === 'object' ? (s.update as ModState['update']) : undefined,
+    // an older statusline.js sends no fable key: leave it out rather than add a null
+    ...(s.fable === undefined ? {} : { fable: validFable(s.fable) }),
   }
+}
+
+function validFable(x: unknown): ModState['fable'] {
+  if (!x || typeof x !== 'object') return null
+  const f = x as Record<string, unknown>
+  if (typeof f.pct !== 'number' || !Number.isFinite(f.pct)) return null
+  const pct = Math.max(0, Math.min(100, f.pct))
+  return typeof f.resetsAt === 'string' && Number.isFinite(Date.parse(f.resetsAt)) ? { pct, resetsAt: f.resetsAt } : { pct }
+}
+
+// Claude Code's usage plus the Fable window CCRig read itself, as one more rate limit, so the pane,
+// the summary, the spinner, the band alert and the toasts treat it like the others
+export function withFable(usage: Usage | null, s: ModState | null): Usage | null {
+  const f = s?.fable
+  if (!f) return usage
+  const rest = (usage?.rateLimits ?? []).filter((r) => r.kind !== 'fable')
+  const row: RateLimit = f.resetsAt ? { kind: 'fable', percentUsed: f.pct, resetsAt: f.resetsAt } : { kind: 'fable', percentUsed: f.pct }
+  return { ...(usage ?? {}), rateLimits: [...rest, row] }
 }
 
 // ---- formatting --------------------------------------------------------------------------------
@@ -167,6 +189,7 @@ export function windowLabel(kind: string): string {
   if (kind === 'five_hour') return 'session'
   if (kind === 'seven_day') return 'weekly'
   if (kind === 'spend_limit') return 'spend'
+  if (kind === 'fable') return 'fable'
   return kind.replace(/_/g, ' ')
 }
 
@@ -473,8 +496,8 @@ export function classicResult(stdout: string, base: Record<string, unknown> = {}
 // ---- /ccrig ------------------------------------------------------------------------------------
 
 // The CLI commands /ccrig passes through to statusline.js, each with the exact arguments it takes.
-// Install, update and the interactive editor are left out: /plugin installs and updates the mod, and a
-// mod cannot drive a TTY menu. No token starting with "-" ever reaches the CLI, so text typed after
+// Install, the in-place --update and the interactive editor are left out: /plugin installs and updates the
+// mod, and a mod cannot drive a TTY menu. `/ccrig update` only checks, and names the /plugin command. No token starting with "-" ever reaches the CLI, so text typed after
 // /ccrig can never become a flag such as --watch or --hook.
 const BARE = new Set(['status', 'doctor', 'sessions', 'version', 'whatsnew', 'options', 'check-update', 'disarm', 'collapse', 'expand', 'toggle'])
 const CHOICES: Record<string, readonly string[]> = {
@@ -494,6 +517,8 @@ export function cliArgs(sub: string, rest: readonly string[]): { argv: string[] 
   if (CHOICES[sub]) {
     return rest.length === 1 && CHOICES[sub].includes(rest[0]) ? { argv: [sub, rest[0]] } : { error: USAGE[sub] }
   }
+  // `update` reads naturally; under the mod it checks and names the /plugin command that updates
+  if (sub === 'update') return rest.length ? { error: 'usage: /ccrig update  (it takes no arguments)' } : { argv: ['check-update'] }
   if (sub === 'name') {
     const label = rest.join(' ')
     if (!rest.length || rest.some((t) => t.startsWith('-')) || label.length > 18) return { error: USAGE.name }
@@ -516,6 +541,7 @@ export const HELP = [
   '/ccrig mode <m>        minimal | normal | expanded',
   '/ccrig collapse        fold the bar to one line (expand, toggle to open it again)',
   '/ccrig autopilot <m>   off | notify | resume',
-  '/ccrig keep-working <on|off>, name <label>, status, sessions, doctor, options, whatsnew, version, check-update, disarm',
+  '/ccrig update          check for a newer CCRig and say how to install it',
+  '/ccrig keep-working <on|off>, name <label>, status, sessions, doctor, options, whatsnew, version, disarm',
   'The band above the prompt, the spinner readout and the toasts are set in /config (the ccrig rows).',
 ].join('\n')
