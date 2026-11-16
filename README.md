@@ -17,7 +17,7 @@ ctx ━━━━────── 42% │ session ━━━━━━╸──�
 
 Preview it with sample data before installing: `npx ccrig --demo` (add `--cols 80` to size a screenshot). Fold it to one line any time with `/ccrig:toggle`.
 
-One Node file, zero dependencies, and no network calls while it draws: everything comes from the JSON Claude Code already hands the status line. (The only network anywhere is an optional once-a-day update check; `"updateCheck": false` turns it off.)
+One Node file, zero dependencies, and no network calls while it draws: everything comes from the JSON Claude Code already hands the status line. (The only network anywhere is an optional once-a-day update check; `"updateCheck": false` turns it off. If you opt in to the [Fable limit](#fable-weekly-limit), a background check also reads that one number from Anthropic.)
 
 ## Install
 
@@ -82,7 +82,7 @@ It needs Claude Code 2.1.287 or newer, and Node 18 or newer on your PATH for the
 
 - **Runs:** one program, Node (the node your wired CCRig status line names, else `node`), executing the `statusline.js` that ships in the same plugin folder. Never a shell, and text you type after `/ccrig` is matched against fixed commands, never passed as a flag. Resume runs only when you set `"autopilot": "resume"`.
 - **Reads:** the usage figures and session details Claude Code hands the mod (model, usage windows, working folder, session id, transcript tail for the checkpoint), your Claude Code settings only to find CCRig's own wiring, and `~/.ccrig/statusline.config.json`. It reads `HOME` or `USERPROFILE` only to find that file. It reads no API key, token or credential.
-- **Sends:** nothing off your machine. The one network call in CCRig is an unauthenticated once-a-day GET to the npm registry for the latest version number (switch it off with `"updateCheck": false`); under the mod it only points you to `/plugin update`.
+- **Sends:** nothing off your machine. The one network call in CCRig by default is an unauthenticated once-a-day GET to the npm registry for the latest version number (switch it off with `"updateCheck": false`); under the mod it only points you to `/plugin update`. The opt-in Fable limit adds a second one, described next.
 - **Prompts it submits:** with `"autopilot": "resume"` and the terminal open, when the usage window resets CCRig submits one resume prompt, built by its own `statusline.js` from the session checkpoint (the transcript shows CCRig sent it). Nothing else is submitted.
 - **Writes:** only under `$CLAUDE_CONFIG_DIR/guardian/`, `resume-tickets/` and `~/.ccrig/` (checkpoints, tickets, caches, `mod.json`). It writes no Claude Code settings and does not change permission modes.
 - **Hooks:** it listens to session start, turn end (`Stop`), `PreCompact` and rate-limit events. It lets Claude Code's own handling run first, then runs the same guardian script `ccrig init` would wire, only for the guardian features you turned on (checkpoints, resume tickets, keep-working, board lamps). Keep-working is the one that can ask Claude to continue at a turn end; it is off unless you enable it.
@@ -98,6 +98,7 @@ The band is shared, so you can build on it. A mod of your own that lists `ccrig`
 - **Git**: branch, uncommitted count, unpushed/unpulled vs upstream
 - **Billing**: `api` when an API key is billing you per token (`"billing": "always"` under `show` also shows `sub` for a Claude.ai subscription)
 - **Session / weekly usage**: your plan's 5-hour and 7-day windows, each with its reset time
+- **Fable usage** (opt-in, `"fableLimit": true`): Fable's own weekly window, the "Current week (Fable)" row in `/usage`, with its reset time
 - **Forecast**: when you will hit the wall, projected from your recent burn rate
 - **Near-limit warning**: from 90% a window's meter turns red with a `▲`, and adds `· saved` once the guardian has checkpointed your work; at 95% a line of its own names the exact `claude --resume <session-id>` command, saved in a resume ticket too
 
@@ -105,6 +106,18 @@ Running subagents and an update badge appear when relevant; cost and the session
 
 The bar fits the terminal it is in. Related items stay on one line when they can, the meters shorten to `5h` / `7d` and then drop their bars on a narrow terminal, and the limit warning shortens instead of being cut off. Color is reserved for state (green, amber, red), so it reads on light and dark terminals alike, and with `NO_COLOR` set it draws no color at all (the meters still read: a heavy fill on a thin track). `minimal` mode keeps the folder, model and the plan numbers (`ctx 42% │ 5h 63% │ 7d 21%`) on one short line. Prefer the pre-1.9 look with emoji icons and block bars? Set `"style": "classic"` (or `CCRIG_STYLE=classic` for one terminal). `"rule": false` hides the rule line; a `▾` at the start of the first line then marks the section, tinted amber or red near a limit like the rule was.
 
+
+### Fable weekly limit
+
+Fable has its own weekly limit on top of the all-models one. Claude Code does not send it to status lines, so CCRig shows it only if you turn it on in `statusline.config.json`:
+
+```json
+{ "fableLimit": true }
+```
+
+With it on, a background process (never the bar itself) reads the Claude sign-in token Claude Code saved for this profile (`.credentials.json`, or the login keychain on macOS) and asks `https://api.anthropic.com/api/oauth/usage`, the same endpoint `/usage` reads, for the Fable row. It runs at most once a minute (once every 10 minutes after a failure), sends the token only to that host, never follows a redirect, and never refreshes or writes the token. The answer is cached in `$CLAUDE_CONFIG_DIR/.ccrig-fable.json`, and the bar draws `fable ━━━━━━━━── 81% ↺ Tue 11:00p` from that cache. A number over 30 minutes old is hidden rather than shown stale. Near the warn and critical lines the meter and the rule turn amber and red like the others. Auto-resume does not wait for the Fable reset: at that limit Claude Code stops offering Fable, but the session can carry on with another model.
+
+`ccrig --fetch-fable` runs the check by hand, and `ccrig --doctor` shows the last result. An API-key session has no plan limits, so it never makes the call.
 ## The Guardian (on by default)
 
 The status line tells you a limit is coming; the guardian acts on it. It is on out of the box (`ccrig init` wires it; `--no-guardian` installs just the bar). From 90% of a window it checkpoints your work state (todos, last request, git HEAD) and saves a resume ticket, and keeps that checkpoint **continuously fresh** through the danger band, so a resume reflects your latest completed step rather than a stale snapshot. At 95% it sends a desktop ping (and, in `resume` mode, arms auto-resume). And when a turn dies on a usage limit the bar never saw coming (a background agent or another session used the window up, so no render crossed 95%), Claude Code's `StopFailure` hook tells the guardian, which checkpoints, saves the ticket and arms the same auto-resume at the reset Claude Code reports (Claude Code 2.1.78 or newer). It also brings compaction-proof checkpoints, and cross-profile failover if you opt in (`"ledger": true` plus `"autopilotFailover": true`). The shipped default is `notify`: no relaunch, nothing unattended (the only background process is the once-a-day update check).
@@ -190,6 +203,7 @@ source "$(npm root -g)/ccrig/claude-profiles.sh"          # bash / zsh / Git Bas
 | `--sessions` / `--board` / `--status` / `--disarm` | list sessions, watch every session as a traffic light (`--board --watch`; `ccrig board on` / `off` turns it on or off), list or stop armed watchers (every profile) |
 | `--name <label>` | label this project on the board (what `/ccrig:name` runs) |
 | `--update` / `--check-update` / `--whatsnew` / `--dismiss-update` / `--force` | update from npm or in place, check now, show what changed, hide or repair |
+| `--fetch-fable` | read Fable's weekly limit now (with `"fableLimit": true`) |
 | `--demo` / `--selftest` / `--version` | sample render, edge-case checks, version |
 | `--purge` | delete local guardian state (checkpoints, tickets, cache) |
 

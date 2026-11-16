@@ -1,7 +1,7 @@
 {
   "_comment": "Copy this to statusline.config.json in the same folder as statusline.js. Your overrides deep-merge over the built-in defaults, so you only need the keys you actually change. Easiest way to edit: `node statusline.js --config`. 256-color codes: https://www.ditig.com/256-colors-cheat-sheet",
   "mode": "normal",
-  "order": ["profile", "update", "folder", "model", "downgrade", "effort", "flags", "context", "git", "agents", "caveman", "billing", "session", "weekly", "forecast", "resumeHint", "cost", "sessionName"],
+  "order": ["profile", "update", "folder", "model", "downgrade", "effort", "flags", "context", "git", "agents", "caveman", "billing", "session", "weekly", "fable", "forecast", "resumeHint", "cost", "sessionName"],
   "show": {
     "profile": "auto",
     "update": true,
@@ -17,6 +17,7 @@
     "billing": true,
     "session": true,
     "weekly": true,
+    "fable": true,
     "forecast": true,
     "resumeHint": true,
     "cost": false,
@@ -44,6 +45,7 @@
   "forecast": true,
   "ledger": false,
   "downgradeAlert": true,
+  "fableLimit": false,
   "_sessionBoard": "The cross-session board (`--board`). Turn it on and each session publishes its state to a shared folder in your home directory, so --board can show a lamp per session: red waiting on you, yellow working, green just finished, grey gone quiet. `ccrig board on` sets this and wires the lamp hooks (`ccrig board off` takes them out). boardDecayMinutes is how long green lasts; boardNotify is the desktop ping from `--board --watch`.",
   "sessionBoard": false,
   "boardDecayMinutes": 30,
