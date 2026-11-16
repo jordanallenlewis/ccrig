@@ -38,6 +38,37 @@ test('modelTier: opus>sonnet>haiku>unknown, case-insensitive', () => {
   assert.ok(SL.modelTier('Sonnet') > SL.modelTier('Haiku'));
 });
 
+test('modelTier: Fable sits above Opus, so a Fable -> Opus drop is a downgrade', () => {
+  assert.strictEqual(SL.modelTier('Fable 5.2'), 4);
+  assert.strictEqual(SL.modelTier('claude-fable-5-2'), 4);
+  assert.ok(SL.modelTier('Fable') > SL.modelTier('Opus'));
+});
+
+test('parseFableUsage: reads the Fable weekly_scoped row from limits[]', () => {
+  const body = { seven_day: { utilization: 55 }, limits: [
+    { kind: 'weekly_all', group: 'weekly', percent: 55, resets_at: '2026-11-18T07:00:00+00:00', scope: null },
+    { kind: 'weekly_scoped', group: 'weekly', percent: 81, resets_at: '2026-11-18T07:00:00.261237+00:00', scope: { model: { id: null, display_name: 'Fable' }, surface: null } },
+  ] };
+  assert.deepStrictEqual(SL.parseFableUsage(body), { pct: 81, resetsAt: Math.floor(Date.parse('2026-11-18T07:00:00Z') / 1000), name: 'Fable' });
+});
+
+test('parseFableUsage: falls back to seven_day_overage_included, else null', () => {
+  assert.deepStrictEqual(SL.parseFableUsage({ seven_day_overage_included: { utilization: 40, resets_at: 1795000000 } }), { pct: 40, resetsAt: 1795000000, name: 'Fable' });
+  assert.strictEqual(SL.parseFableUsage({ limits: [{ kind: 'weekly_all', percent: 10, scope: null }] }), null, 'no Fable row on this plan');
+  assert.strictEqual(SL.parseFableUsage(null), null);
+  assert.strictEqual(SL.parseFableUsage({ limits: 'junk' }), null);
+  assert.strictEqual(SL.parseFableUsage({ limits: [{ percent: 'x', scope: { model: { display_name: 'Fable' } } }] }), null, 'a non-numeric percent is ignored');
+  assert.strictEqual(SL.parseFableUsage({ limits: [{ percent: 140, scope: { model: { display_name: 'Fable' } } }] }).pct, 100, 'clamped');
+});
+
+test('fableWindow: shows a fresh cache, hides a stale, failed or empty one', () => {
+  const now = Date.now();
+  assert.deepStrictEqual(SL.fableWindow({ fetchedAt: now - 1000, pct: 72, resetsAt: 1795000000 }, now), { pct: 72, reset: 1795000000 });
+  assert.deepStrictEqual(SL.fableWindow({ fetchedAt: now - 31 * 60 * 1000, pct: 72 }, now), { pct: null, reset: null }, 'over 30 minutes old');
+  assert.deepStrictEqual(SL.fableWindow({ checkedAt: now, error: 'offline' }, now), { pct: null, reset: null });
+  assert.deepStrictEqual(SL.fableWindow(null, now), { pct: null, reset: null });
+});
+
 test('parseRemoteVersion: extracts VERSION, null on garbage', () => {
   assert.strictEqual(SL.parseRemoteVersion("const VERSION = '3.4.5';"), '3.4.5');
   assert.strictEqual(SL.parseRemoteVersion("const VERSION  =  '10.20.30' ;"), '10.20.30');

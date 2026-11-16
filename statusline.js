@@ -15,7 +15,8 @@
  * (rate_limits, context_window, effort, fast_mode, thinking), so the RENDER is
  * zero-network (no token, no keychain, no 429s, always fresh). The only network
  * call anywhere is an optional once-a-day update check (updateCheck, off with one
- * flag); the guardian is fully local. Plus: wrapping
+ * flag), plus, only if you opt in with "fableLimit": true, a background read of
+ * Fable's weekly limit from Anthropic's usage endpoint; the guardian is fully local. Plus: wrapping
  * that tracks live terminal resize; effort + inference-mode flags;
  * unpushed/unpulled commits; date-aware reset times; an active-profile badge;
  * one script for many Claude profiles; and an interactive config editor.
@@ -92,7 +93,7 @@ const UPDATE_PUBKEY = '';
 // DEFAULTS: generic, safe for anyone. Override in statusline.config.json
 // (next to this file); your overrides deep-merge over these and survive updates.
 // ===========================================================================
-const DEFAULT_ORDER = ['profile', 'update', 'folder', 'model', 'downgrade', 'effort', 'flags', 'context', 'git', 'agents', 'caveman', 'billing', 'session', 'weekly', 'forecast', 'resumeHint', 'cost', 'sessionName'];
+const DEFAULT_ORDER = ['profile', 'update', 'folder', 'model', 'downgrade', 'effort', 'flags', 'context', 'git', 'agents', 'caveman', 'billing', 'session', 'weekly', 'fable', 'forecast', 'resumeHint', 'cost', 'sessionName'];
 // what survives in minimal mode; the safety/attention segments stay on purpose
 const MINIMAL_KEEP = ['profile', 'update', 'folder', 'model', 'downgrade', 'context', 'git', 'agents', 'forecast', 'resumeHint'];
 const MODES = ['minimal', 'normal', 'expanded'];
@@ -116,6 +117,7 @@ const DEFAULTS = {
     billing: true,      // api when a key bills per token; refined shows sub only with "always" (classic: sub or api)
     session: true,      // 5-hour plan-usage bar + reset time
     weekly: true,       // 7-day plan-usage bar + reset time
+    fable: true,        // Fable's own weekly bar; drawn only with "fableLimit": true (see below)
     forecast: true,     // ⏳ predictive time-to-limit + pace verdict (Feature 3), shown only when it has something to say
     resumeHint: true,   // ⚠ shown only past thresholds.usage.warn: how to pick back up after reset
     cost: false,        // session $ + lines +added/-removed
@@ -163,6 +165,11 @@ const DEFAULTS = {
   // outside your config dir, and cross-account use is a per-user judgement. Opt in with "ledger": true.
   ledger: false,
   downgradeAlert: true,      // ⬇ warn when the model silently downgrades tier mid-session (Opus→Sonnet)
+  // Opt-in: Fable's own weekly limit. Claude Code hands the status line only the 5-hour and all-models
+  // weekly windows, so with this on a detached background check (at most once a minute, never during a
+  // render) reads your Claude sign-in token and asks Anthropic's usage endpoint, the one /usage reads,
+  // for the Fable row, then caches it for the bar. OFF by default: it is CCRig's only authenticated call.
+  fableLimit: false,
   // Cross-session attention board (`--board`): each live render publishes this session's
   // state to a shared dir so `--board` can show every session across your worktrees/profiles.
   // OFF by default (it writes cwd/model/usage outside the config dir, like the ledger).
@@ -452,7 +459,7 @@ function wrapSegments(segs, width) {
 // line when it can, so "weekly" is never stranded on a line of its own. Each segment carries its
 // narrower variants (full -> compact -> tiny), used only when the full form would not fit, and the
 // last resort is a clean '…' cut: no line ever runs past the terminal edge.
-const SEG_GROUP = { context: 'meter', session: 'meter', weekly: 'meter', forecast: 'meter', resumeHint: 'alert' };
+const SEG_GROUP = { context: 'meter', session: 'meter', weekly: 'meter', fable: 'meter', forecast: 'meter', resumeHint: 'alert' };
 function groupOf(name) { return SEG_GROUP[name] || 'id'; }
 // `indent`: cells the first line gives up (the fold glyph when there is no rule line above the bar)
 function layoutItems(items, width, indent) {
@@ -637,7 +644,7 @@ const usageSeg = (label, pct, reset) => {
 // separate alert line that would only repeat it.
 function usageVariants(label, pct, reset, saved) {
   const t = CONFIG.thresholds.usage, warnAt = warnAtOf(t);
-  const short = label === 'session' ? '5h' : '7d';
+  const short = label === 'session' ? '5h' : label === 'weekly' ? '7d' : label;
   // the reset already passed: the window refreshed, and the stale number would only alarm
   if (reset != null && !windowActive(reset)) return [lbl(label + ' ↺ reset'), lbl(short + ' ↺ reset'), lbl(short + ' ↺')];
   const near = pct >= warnAt;
@@ -923,10 +930,11 @@ function agentsSeg(list) {
   if (!n) return '';
   return c(K.agents, (isRefined() ? '' : '🤖 ') + n + (n === 1 ? ' agent' : ' agents'));
 }
-// ⬇ segment: Claude Code silently drops Opus → Sonnet when you approach the Opus cap.
+// ⬇ segment: Claude Code silently drops a tier (Fable → Opus, Opus → Sonnet) when you approach a model's cap.
 // Track the highest model tier seen this session and shout if the current one is lower.
-function modelTier(name) { const n = String(name == null ? '' : name).toLowerCase(); return /opus/.test(n) ? 3 : /sonnet/.test(n) ? 2 : /haiku/.test(n) ? 1 : 0; }
+function modelTier(name) { const n = String(name == null ? '' : name).toLowerCase(); return /fable/.test(n) ? 4 : /opus/.test(n) ? 3 : /sonnet/.test(n) ? 2 : /haiku/.test(n) ? 1 : 0; }
 let DEMO_DOWNGRADE = null; // [fromName, toName] set by --demo
+let DEMO_FABLE = null; // a fake Fable cache record set by --demo
 function downgradeSeg(input, live) {
   if (CONFIG.downgradeAlert === false) return '';
   const down = isRefined() ? '↓ ' : '⬇ ';
@@ -1682,6 +1690,98 @@ function modState(input) {
 // version and caches the result; the render only READS that cache (zero-network).
 // ===========================================================================
 function updateCacheFile() { return path.join(CFG, '.ccbsl-update.json'); }
+
+// ---- Fable weekly limit (opt-in "fableLimit") ----------------------------------------------------
+// Claude Code sends the status line only five_hour and seven_day. Fable's weekly window lives in the
+// usage endpoint's limits[] (a "weekly_scoped" row whose scope.model.display_name is "Fable"), so a
+// detached child fetches it and the render only reads the cache, exactly like the update check.
+const FABLE_EVERY_MS = 60 * 1000;           // how often the background check may run
+const FABLE_BACKOFF_MS = 10 * 60 * 1000;    // after a failure (no token, 401, offline)
+const FABLE_STALE_MS = 30 * 60 * 1000;      // an older number is not shown at all
+const FABLE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
+function fableCacheFile() { return path.join(CFG, '.ccrig-fable.json'); }
+function readFableInfo() { try { return JSON.parse(fs.readFileSync(fableCacheFile(), 'utf8')); } catch { return null; } }
+function fableOn() { return CONFIG.fableLimit === true && !process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN; }
+// the cached Fable window, or nulls when it is off, missing, an error or stale
+function fableWindow(info, now) {
+  const none = { pct: null, reset: null };
+  if (!info || typeof info.fetchedAt !== 'number' || (now || Date.now()) - info.fetchedAt > FABLE_STALE_MS) return none;
+  return { pct: normPct(info.pct), reset: normEpoch(info.resetsAt) };
+}
+function maybeFetchFable(info) {
+  if (!fableOn() || !actAllowed()) return false;
+  const wait = info && info.error ? FABLE_BACKOFF_MS : FABLE_EVERY_MS;
+  if (info && info.checkedAt && (Date.now() - info.checkedAt) < wait) return false;
+  // stamp the attempt first (atomically) so a slow or blocked network never spawns a child per render
+  if (!writeJsonAtomic(fableCacheFile(), Object.assign({}, info || {}, { checkedAt: Date.now() }))) return false;
+  spawnDetached(process.execPath, [__filename, '--fetch-fable'], { env: Object.assign({}, process.env, { NODE_USE_SYSTEM_CA: '1', CCBSL_BG_CHECK: '1' }) });
+  return true;
+}
+// ISO string or epoch (s or ms) -> epoch seconds
+function toEpochSec(v) {
+  if (typeof v === 'number') return normEpoch(v);
+  const t = typeof v === 'string' ? Date.parse(v) : NaN;
+  return Number.isFinite(t) ? Math.floor(t / 1000) : null;
+}
+// pure: the Fable row out of a /api/oauth/usage body, or null when the plan has none
+function parseFableUsage(j) {
+  if (!j || typeof j !== 'object') return null;
+  const rows = Array.isArray(j.limits) ? j.limits : [];
+  const row = rows.find((r) => r && typeof r === 'object' && r.scope && r.scope.model && /\bfable\b/i.test(String(r.scope.model.display_name || '')));
+  if (row && typeof row.percent === 'number' && Number.isFinite(row.percent)) {
+    return { pct: normPct(row.percent), resetsAt: toEpochSec(row.resets_at), name: cleanLabel(String(row.scope.model.display_name), 24) || 'Fable' };
+  }
+  // older bodies carry the Fable window as the top-level seven_day_overage_included
+  const o = j.seven_day_overage_included;
+  if (o && typeof o === 'object' && typeof o.utilization === 'number' && Number.isFinite(o.utilization)) {
+    return { pct: normPct(o.utilization), resetsAt: toEpochSec(o.resets_at), name: 'Fable' };
+  }
+  return null;
+}
+// the Claude.ai sign-in token Claude Code stored for this profile: .credentials.json, or on macOS the
+// login keychain. Read only, never refreshed or written: Claude Code keeps it fresh on its own.
+function readOauthToken() {
+  let raw = null;
+  try { raw = fs.readFileSync(path.join(CFG, '.credentials.json'), 'utf8'); } catch {}
+  if (!raw && process.platform === 'darwin') {
+    try {
+      raw = require('child_process').execFileSync('security', ['find-generic-password', '-s', 'Claude Code-credentials', '-w'],
+        { encoding: 'utf8', timeout: 4000, stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch {}
+  }
+  if (!raw) return { error: 'no Claude sign-in found (an API key has no plan limits)' };
+  let o; try { o = JSON.parse(raw).claudeAiOauth; } catch { return { error: 'could not read the sign-in' }; }
+  if (!o || typeof o.accessToken !== 'string' || !o.accessToken) return { error: 'no Claude sign-in found' };
+  if (typeof o.expiresAt === 'number' && o.expiresAt < Date.now()) return { error: 'sign-in token expired; Claude Code renews it on its next request' };
+  return { token: o.accessToken };
+}
+// --fetch-fable: the detached background check (also runnable by hand; prints the result)
+function runFetchFable() {
+  const prev = readFableInfo() || {};
+  const done = (rec) => {
+    const out = Object.assign({ checkedAt: Date.now() }, rec);
+    if (rec.error && typeof prev.fetchedAt === 'number') Object.assign(out, { fetchedAt: prev.fetchedAt, pct: prev.pct, resetsAt: prev.resetsAt, name: prev.name });
+    writeJsonAtomic(fableCacheFile(), out);
+    if (!process.env.CCBSL_BG_CHECK) {
+      process.stdout.write(rec.error ? 'fable: ' + rec.error + '\n'
+        : rec.none ? 'fable: this plan has no separate Fable limit\n'
+        : 'fable: ' + Math.round(rec.pct) + '% used' + (rec.resetsAt ? ', resets ' + fmtReset(rec.resetsAt) : '') + '\n');
+    }
+    process.exit(rec.error ? 1 : 0);
+  };
+  if (CONFIG.fableLimit !== true) { if (!process.env.CCBSL_BG_CHECK) process.stdout.write('fable: off. Set "fableLimit": true in ' + CONFIG_PATH + ' to turn it on.\n'); process.exit(0); }
+  const test = process.env.CCRIG_USAGE_FILE; // tests: read a saved body from disk, no token, no network
+  const handle = (err, body) => {
+    if (err) return done({ error: /HTTP 401|HTTP 403/.test(String(err.message)) ? 'the usage endpoint refused the sign-in (' + err.message + ')' : 'usage check failed: ' + err.message });
+    let j; try { j = JSON.parse(body); } catch { return done({ error: 'usage endpoint sent something that is not JSON' }); }
+    const f = parseFableUsage(j);
+    return done(f ? Object.assign({ fetchedAt: Date.now() }, f) : { none: true, fetchedAt: null });
+  };
+  if (test) return fs.readFile(test, 'utf8', handle);
+  const t = readOauthToken();
+  if (t.error) return done({ error: t.error });
+  httpGetText(FABLE_USAGE_URL, 0, handle, { headers: { Authorization: 'Bearer ' + t.token, 'anthropic-beta': 'oauth-2025-04-20', Accept: 'application/json' }, noRedirect: true });
+}
 function readUpdateInfo() { try { return JSON.parse(fs.readFileSync(updateCacheFile(), 'utf8')); } catch { return null; } }
 // atomic JSON write (tmp + rename) so a killed writer never leaves half-written JSON
 function writeJsonAtomic(file, obj) {
@@ -1759,13 +1859,13 @@ function noProxy(host) {
     return p === '*' || host === p || (p.startsWith('.') && host.endsWith(p)) || host.endsWith('.' + p);
   });
 }
-function httpGetText(url, depth, cb) {
+function httpGetText(url, depth, cb, opts) {
   if (depth > 5) return cb(new Error('too many redirects'));
   let u;
   try { u = new URL(url); } catch (e) { return cb(e); }
   const isHttps = u.protocol === 'https:';
   const proxy = isHttps ? (process.env.HTTPS_PROXY || process.env.https_proxy) : (process.env.HTTP_PROXY || process.env.http_proxy);
-  const headers = { 'User-Agent': 'ccbsl/' + VERSION, Accept: 'text/plain, */*' };
+  const headers = Object.assign({ 'User-Agent': 'ccbsl/' + VERSION, Accept: 'text/plain, */*' }, (opts && opts.headers) || {});
   const onRes = (res) => {
     // once-guard: res.destroy() (used for the size cap) suppresses 'end', so deliver the
     // result/error exactly once from whichever handler fires first.
@@ -1773,6 +1873,8 @@ function httpGetText(url, depth, cb) {
     const finish = (err, data) => { if (settled) return; settled = true; cb(err, data); };
     if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
       res.resume();
+      // a request carrying a credential never follows a redirect: the token must reach only the host it was meant for
+      if (opts && opts.noRedirect) return finish(new Error('HTTP ' + res.statusCode + ' redirect refused'));
       let nextU; try { nextU = new URL(res.headers.location, url); } catch { return finish(new Error('bad redirect')); }
       // the network layer refuses, not mangles: only http(s), and never an https->http downgrade
       if (!/^https?:$/.test(nextU.protocol)) return finish(new Error('unsupported redirect scheme: ' + nextU.protocol));
@@ -2339,9 +2441,12 @@ function collectItems(input, width, gitOverride) {
   const resetOf = (o) => (o ? normEpoch(o.resets_at) : null);
   const sPct = pctOf(rl.five_hour), wPct = pctOf(rl.seven_day);
   const sReset = resetOf(rl.five_hour), wReset = resetOf(rl.seven_day);
+  const fableInfo = DEMO_FABLE || (fableOn() ? readFableInfo() : null); // the background check's cache, read once
+  const { pct: fPct, reset: fReset } = fableWindow(fableInfo);
   // side effects only on the LIVE render (Claude Code's stdin), never in --demo / --config / --selftest
   if (live) {
     maybeCheckUpdate(updateInfo);                  // once/day background version check (never blocks)
+    maybeFetchFable(fableInfo);                    // opt-in: Fable's weekly window, in the background
     writeBoard(input, sPct, sReset, wPct, wReset, ctx, agentInfo.list.length, agentInfo.size); // attention board (opt-in)
     if (sPct != null || wPct != null) {
       recordSample(input.session_id, sPct, wPct, sReset, wReset); // Feature 3: the burn-rate history (+ resets, for StopFailure)
@@ -2360,6 +2465,7 @@ function collectItems(input, width, gitOverride) {
     : (reset != null && !windowActive(reset)) ? c(K.dim, label + ' ↺now') : usageSeg(label, pct, reset));
   out.session = useSeg('session', sPct, sReset);
   out.weekly = useSeg('weekly', wPct, wReset);
+  out.fable = useSeg('fable', fPct, fReset);
   // first run on a plan: Claude Code sends usage only with a reply, so a fresh bar has no meters. Say so,
   // rather than look broken, until the first reply (or a few KB of transcript) arrives.
   if (R && sPct == null && wPct == null && !process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
@@ -2384,14 +2490,14 @@ function collectItems(input, width, gitOverride) {
   out.sessionName = name ? c(K.dim, dispWidth(name) > 28 ? padCell(name, 28).trimEnd() : name) : '';
 
   // how close the nearest ACTIVE window is to its limit: tints the refined rule line
-  const hot = Math.max(...[[sPct, sReset], [wPct, wReset]].map(([p, r]) => (p != null && windowActive(r) ? p : 0)));
+  const hot = Math.max(...[[sPct, sReset], [wPct, wReset], [fPct, fReset]].map(([p, r]) => (p != null && windowActive(r) ? p : 0)));
   const level = hot >= critAt ? 'critical' : hot >= warnAt ? 'warn' : 'ok';
 
   const order = Array.isArray(CONFIG.order) ? CONFIG.order : DEFAULT_ORDER;
   const mode = CONFIG.mode || 'normal';
   // refined minimal keeps the plan budget (the reason to install) and drops its bars instead: every
   // segment at its smallest form, so it is "5h 63% · 7d 21%", not no usage at all
-  const keep = mode === 'minimal' && R ? MINIMAL_KEEP.concat(['session', 'weekly']) : MINIMAL_KEEP;
+  const keep = mode === 'minimal' && R ? MINIMAL_KEEP.concat(['session', 'weekly', 'fable']) : MINIMAL_KEEP;
   const items = order.filter((n) => {
     if (!out[n] || (Array.isArray(out[n]) && !out[n].length)) return false; // no content -> never show
     if (mode === 'minimal') return keep.includes(n);         // quiet: essentials only (+ the ⚠ hint)
@@ -2402,7 +2508,7 @@ function collectItems(input, width, gitOverride) {
     // the limit alert keeps every form: it is the one line minimal must never cut down to a bare head
     return { name: n, v: mode === 'minimal' && R && groupOf(n) !== 'alert' ? [v[v.length - 1]] : v };
   });
-  return { items, level, stats: { folder, model, ctx, sPct, wPct, sReset, wReset } };
+  return { items, level, stats: { folder, model, ctx, sPct, wPct, sReset, wReset, fPct, fReset } };
 }
 // the segments as plain strings (each at its widest), for the mod and the tests
 function collectSegments(input, width, gitOverride) {
@@ -2428,6 +2534,7 @@ function collapsedSummary(r, width, withFill) {
     stats.ctx != null ? lbl('ctx ') + (stats.ctx >= CONFIG.thresholds.context.yellow ? c(K.red, pctText(stats.ctx)) : pctText(stats.ctx)) : null,
     pct('5h', stats.sPct, stats.sReset),
     pct('7d', stats.wPct, stats.wReset),
+    pct('fable', stats.fPct, stats.fReset),
   ].filter(Boolean);
   const ruleCol = levelTint(level, K.rule);
   const head = isRefined() ? c(K.dim, '▸ ccrig') : c(K.dim, '▸');
@@ -2491,6 +2598,7 @@ const argv = process.argv.slice(2);
 // or touch stdin. Direct execution (`node statusline.js`) runs normally below.
 if (require.main !== module) {
   module.exports = {
+    parseFableUsage, fableWindow, toEpochSec,
     semverGt, modelTier, parseRemoteVersion, parseChangelogTop, inflightAgents,
     computeInflightAgents, latestTodos, latestUserText, dispWidth, glyphWidth, deepMerge,
     truncFolder, fmtReset, resumePromptFromCheckpoint, wrapSegments, bar,
@@ -2511,7 +2619,7 @@ const SUBCOMMANDS = {
   board: '--board', config: '--config', help: '--help', version: '--version',
   status: '--status', disarm: '--disarm', purge: '--purge', options: '--options', whatsnew: '--whatsnew',
   mode: '--mode', autopilot: '--autopilot', 'keep-working': '--keep-working', 'check-update': '--check-update',
-  selftest: '--selftest', name: '--name',
+  selftest: '--selftest', name: '--name', 'fetch-fable': '--fetch-fable',
   collapse: '--collapse', expand: '--expand', toggle: '--toggle',
 };
 if (argv[0] && !argv[0].startsWith('-')) {
@@ -2521,7 +2629,7 @@ if (argv[0] && !argv[0].startsWith('-')) {
 // validate every flag BEFORE any mode runs: a typo in a modifier (--this-profle, --no-gaurdian) must stop
 // the command, not silently widen it to every profile or wire the guardian. (Claude Code passes no args.)
 if (argv.some((a) => a.startsWith('--'))) {
-  const KNOWN = new Set(['--install', '--install-guardian', '--no-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--options', '--config', '--demo', '--selftest', '--version', '--help', '--cols', '--this-profile', '--auto', '--force', '--hook', '--watch', '--name', '--collapse', '--expand', '--toggle']);
+  const KNOWN = new Set(['--install', '--install-guardian', '--no-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--options', '--config', '--demo', '--selftest', '--version', '--help', '--cols', '--this-profile', '--auto', '--force', '--hook', '--watch', '--name', '--collapse', '--expand', '--toggle', '--fetch-fable']);
   const unknown = argv.find((a) => a.startsWith('--') && !KNOWN.has(a));
   if (unknown) { process.stdout.write('unknown flag: ' + unknown + '\nRun  ccrig --help  for the flag list.\n'); process.exit(1); }
   if (argv.includes('--auto') && !argv.includes('--install-guardian')) { process.stdout.write('--auto goes with --install-guardian (ccrig --install-guardian --auto).\n'); process.exit(1); }
@@ -2554,6 +2662,7 @@ function helpText() {
     '  --update             update in place (npm installs: npm install -g ccrig@latest; else git pull or download)',
     '  --force              with --update: apply even when the remote is not newer (repair)',
     '  --check-update       check now whether a newer version is available',
+    '  --fetch-fable        read Fable\'s weekly limit now (needs "fableLimit": true)',
     '  --whatsnew           print the newest changelog section',
     '  --dismiss-update     silence the update badge for the current newest version',
     '  --options            print every current setting and its choices',
@@ -3537,7 +3646,7 @@ function runSessions() {
 // one mode at a time: silently ignoring the second flag misleads the user. This gate sits ABOVE
 // the one-shot dispatch so a combined command (e.g. `--purge --install`) is rejected, not half-run.
 // --hook/--watch are installer-wired internals, never user-typed, so they are exempt.
-const EXCLUSIVE = ['--install', '--install-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--config', '--demo', '--selftest', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--options', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--name', '--collapse', '--expand', '--toggle'];
+const EXCLUSIVE = ['--install', '--install-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--config', '--demo', '--selftest', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--options', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--name', '--collapse', '--expand', '--toggle', '--fetch-fable'];
 const picked = EXCLUSIVE.filter((m) => argv.includes(m));
 if (picked.length > 1) {
   process.stdout.write('pick one of: ' + picked.join(', ') + '\n');
@@ -3573,10 +3682,11 @@ if (argv.includes('--board') && !BOARD_SET) { runBoard(argv.includes('--watch'))
 if (argv.includes('--sessions')) runSessions();
 // a corporate root CA often lives only in the OS store; the background check already trusts it, so a
 // typed --update / --check-update re-runs itself the same way (Node 22.15+ reads NODE_USE_SYSTEM_CA)
-if ((argv.includes('--check-update') || argv.includes('--update')) && !process.env.NODE_USE_SYSTEM_CA) {
+if ((argv.includes('--check-update') || argv.includes('--update') || argv.includes('--fetch-fable')) && !process.env.NODE_USE_SYSTEM_CA) {
   const r = require('child_process').spawnSync(process.execPath, process.argv.slice(1), { stdio: 'inherit', env: Object.assign({}, process.env, { NODE_USE_SYSTEM_CA: '1' }) });
   process.exit(r.status == null ? 1 : r.status);
 }
+if (argv.includes('--fetch-fable')) { runFetchFable(); return; } // async: exits in its callback
 if (argv.includes('--check-update')) { runCheckUpdate(); return; } // async: exits in its callback
 if (argv.includes('--update')) { runUpdate(); return; }             // async: exits in its callback
 if (argv.includes('--whatsnew')) runWhatsnew();
@@ -3620,7 +3730,8 @@ function runOptions() {
   o += '\nmore:\n';
   o += '  claudeBin:            ' + claudeBin() + '   the claude auto-resume relaunches\n';
   o += '  continuousCheckpoint: ' + (CONFIG.continuousCheckpoint !== false) + '   refresh the checkpoint every ~10s near a limit\n';
-  o += '  downgradeAlert:       ' + (CONFIG.downgradeAlert !== false) + '   flag a silent Opus -> Sonnet drop\n';
+  o += '  downgradeAlert:       ' + (CONFIG.downgradeAlert !== false) + '   flag a silent Fable -> Opus or Opus -> Sonnet drop\n';
+  o += '  fableLimit:           ' + (CONFIG.fableLimit === true) + '   show Fable\'s weekly limit (a background call to Anthropic with your sign-in)\n';
   o += '  reinjectOnCompact:    ' + JSON.stringify(CONFIG.reinjectOnCompact) + '   re-include a rules file after a compaction (true = CLAUDE.md)\n';
   o += '  autoUpdate:           ' + (CONFIG.autoUpdate === true) + '   install new releases from the daily check\n';
   o += '  updatePubkey:         ' + (updatePubkey() ? 'pinned (signed updates required)' : 'none (TLS-only)') + '\n';
@@ -4485,6 +4596,16 @@ function runDoctor() {
     }
     info('  done decay: ' + Math.round(boardDecayMs() / 60000) + 'm   blocked ping: ' + (CONFIG.boardNotify === false ? 'off' : 'on'));
   }
+  // Fable weekly limit: report the background check's last result (no network here; reads the cache)
+  if (CONFIG.fableLimit !== true) info('fable limit: off (set "fableLimit": true to show Fable\'s weekly limit)');
+  else {
+    const fi = readFableInfo(), fw = fableWindow(fi);
+    if (!fi || !fi.checkedAt) info('fable limit: on (not checked yet; the next render starts a background check)');
+    else if (fi.error) info('fable limit: on, last check failed: ' + fi.error + (fw.pct != null ? ' (showing ' + Math.round(fw.pct) + '% from earlier)' : ''));
+    else if (fi.none) info('fable limit: on, this plan has no separate Fable limit');
+    else if (fw.pct != null) info('fable limit: on, ' + Math.round(fw.pct) + '% used' + (fw.reset ? ', resets ' + fmtReset(fw.reset) : ''));
+    else info('fable limit: on, the last number is over 30 minutes old');
+  }
   // update system: report the check state + any available version (no network here; reads the cache)
   if (CONFIG.updateCheck === false) info('update check: off');
   else {
@@ -4590,6 +4711,7 @@ if (argv.includes('--demo')) {
   DEMO_UPDATE_LATEST = '2.9.9';        // showcase the ⬆ update badge in the preview
   DEMO_AGENTS = 3;                     // showcase the 🤖 subagents segment
   DEMO_DOWNGRADE = ['Opus 4.8', 'Sonnet 5']; // showcase the ⬇ downgrade alert
+  DEMO_FABLE = { fetchedAt: Date.now(), pct: 72, resetsAt: Math.floor(Date.now() / 1000) + 3 * 86400, name: 'Fable' }; // showcase the fable meter
   const demo = demoInput();
   // seed a short burn history so the ⏳ forecast segment shows in the preview
   try {
