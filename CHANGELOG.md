@@ -11,6 +11,8 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-11-16
+
 ### Changed
 - **Fewer processes per prompt and per turn.** A default install now wires three hooks (Stop, SessionStart, PreCompact) instead of seven. The session board's lamp hooks (UserPromptSubmit, Notification, SessionEnd and a second Stop hook) are wired only while the board is on, and the guardian's Stop hook stamps the done lamp itself, so a prompt starts no CCRig process (it started one, about 40ms of Node startup before Claude saw the prompt) and a turn ends with one instead of two. On Windows a bar-only install keeps a single Stop hook, because that is what notices a broken Git Bash. An `npm update` or `ccrig init` takes the idle lamp hooks out of an older install, and `ccrig --doctor` points them out.
 - **The bar redraws every 5 seconds between messages instead of every 2** (`refreshInterval`; Claude Code still redraws it on every message). An idle session starts Node, and on Windows Git Bash, 60% less often. `ccrig init` or an npm update moves an existing install to 5.
