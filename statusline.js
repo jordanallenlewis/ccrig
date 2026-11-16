@@ -1682,7 +1682,15 @@ function modState(input) {
     forecast: f ? { window: f.window, etaSec: Math.round(f.etaSec), safe: f.safe, text: f.text } : null,
     resume: { armed, window: armed ? cp.window || '' : '', resetsAt: armed ? cp.resets_at : null },
     update: { latest, hint: latest ? MOD_UPDATE_CMD : '' },
+    fable: fableState(),
   };
+}
+// the Fable window for the mod's pane, toasts and band alert (null when off, stale or unknown)
+function fableState() {
+  if (!fableOn()) return null;
+  const fw = fableWindow(readFableInfo());
+  if (fw.pct == null) return null;
+  return fw.reset ? { pct: fw.pct, resetsAt: new Date(fw.reset * 1000).toISOString() } : { pct: fw.pct };
 }
 
 // ===========================================================================

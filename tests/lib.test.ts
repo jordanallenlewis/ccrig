@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import {
   alertFor, alertKey, ansiToSpans, classicResult, cliArgs, configFrom, crossings, detectWiring,
   displayModel, fmtReset, nativeSegments, nodeFromSettings, packLines, parseRigOutput, plainText,
-  resumeCommand, splitArgs, statusInput, summaryLine, thresholdsFrom, xterm256, DEFAULT_THRESHOLDS,
+  resumeCommand, splitArgs, statusInput, summaryLine, thresholdsFrom, withFable, xterm256, DEFAULT_THRESHOLDS,
 } from '../hooks/lib.ts'
 
 const NOW = Date.UTC(2026, 9, 1, 15, 0, 0)
@@ -148,7 +148,7 @@ test('cliArgs passes only the arguments each command takes, and never a flag', (
   for (const [sub, rest] of [
     ['mode', ['--watch', 'x']], ['mode', []], ['mode', ['minimal', 'extra']], ['status', ['--purge']],
     ['autopilot', ['on']], ['name', ['-x']], ['name', ['--hook', 'stop']], ['name', []],
-    ['name', ['a-label-much-longer-than-eighteen']], ['install', []], ['update', []], ['purge', []],
+    ['name', ['a-label-much-longer-than-eighteen']], ['install', []], ['purge', []],
   ] as const) {
     expect('error' in cliArgs(sub, rest)).toBe(true)
   }
@@ -220,3 +220,27 @@ test('parseRigOutput keeps the lines statusline.js laid out, and their width', (
   expect(parseRigOutput(JSON.stringify({ segments: ['a'], widths: [1], lines: ['x'] }))!.lines).toBe(null)
 })
 
+
+test('the Fable window from the render state joins the usage windows', () => {
+  const state = { thresholds: { green: 50, yellow: 80, warn: 90, critical: 95 }, autopilot: 'notify', keepWorking: false, sessionBoard: false, fable: { pct: 92, resetsAt: IN_3D } }
+  const parsed = parseRigOutput(JSON.stringify({ v: '1.10.0', segments: [], widths: [], state }))!.state!
+  expect(parsed.fable).toEqual({ pct: 92, resetsAt: IN_3D })
+  // junk is dropped, an out-of-range number clamped
+  expect(parseRigOutput(JSON.stringify({ segments: [], state: { ...state, fable: { pct: 'x' } } }))!.state!.fable).toBe(null)
+  expect(parseRigOutput(JSON.stringify({ segments: [], state: { ...state, fable: { pct: 140 } } }))!.state!.fable).toEqual({ pct: 100 })
+
+  const usage = { rateLimits: [{ kind: 'five_hour', percentUsed: 10, resetsAt: IN_2H }] }
+  const u = withFable(usage, parsed)!
+  expect(u.rateLimits!.map((r) => r.kind)).toEqual(['five_hour', 'fable'])
+  expect(withFable(usage, { ...parsed, fable: null })).toBe(usage)
+  expect(withFable(null, parsed)!.rateLimits).toEqual([{ kind: 'fable', percentUsed: 92, resetsAt: IN_3D }])
+  // past the warn line it is the alert, and the summary names it
+  expect(alertFor(u, DEFAULT_THRESHOLDS, NOW)!.kind).toBe('fable')
+  expect(summaryLine('claude-fable-5-2', u, NOW)).toContain('fable 92%')
+  expect(crossings({ fable: 80 }, u, DEFAULT_THRESHOLDS, NOW).map((a) => a.kind)).toEqual(['fable'])
+})
+
+test('/ccrig update checks for a newer CCRig', () => {
+  expect(cliArgs('update', [])).toEqual({ argv: ['check-update'] })
+  expect('error' in cliArgs('update', ['now'])).toBe(true)
+})

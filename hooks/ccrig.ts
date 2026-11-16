@@ -15,7 +15,7 @@ import {
   CHANGES_BAR, COLOR, HELP, alertFor, alertKey, ansiToSpans, classicResult, cliArgs, configFrom,
   crossings, detectWiring, fmtReset, liveLimits, nativeSegments, nodeFromSettings, packLines,
   parseRigOutput, plainText, resumeCommand, splitArgs, statusInput, summaryLine, usageSeg,
-  windowLabel, xterm256,
+  windowLabel, withFable, xterm256,
 } from './lib.ts'
 
 const USAGE_PANE = 'ccrig-usage'
@@ -72,6 +72,12 @@ function cur(): ModState {
   return rigState ?? fileState
 }
 
+// what the pane, summary, spinner, band and toasts show: Claude Code's windows plus Fable when it is on.
+// The in-place resume reads the bare `usage`: Fable's limit leaves the session usable on another model.
+function shown(): Usage | null {
+  return withFable(usage, cur())
+}
+
 // the mod owns the render (and so the guardian's render-side work) when no CCRig status line is wired
 function ownsRender(): boolean {
   return draws && !wiring.statusLine
@@ -103,14 +109,15 @@ function modEnv(): Record<string, string> {
 
 // the usage window the spinner names: the one past the warn line, else the 5-hour window
 function spinnerLimit(now: number): RateLimit | null {
-  const live = liveLimits(usage, now)
-  const alert = alertFor(usage, cur().thresholds, now)
+  const live = liveLimits(shown(), now)
+  const alert = alertFor(shown(), cur().thresholds, now)
   if (alert) return live.find((r) => r.kind === alert.kind) ?? null
   return live.find((r) => r.kind === 'five_hour') ?? live[0] ?? null
 }
 
 function alertText(kind: string, pct: number, resetsAt: string | undefined, now: number): string {
   const reset = fmtReset(resetsAt, now)
+  if (kind === 'fable') return '⚠ fable ' + Math.round(pct) + '% used' + (reset ? ', resets ' + reset : '') + '. When it runs out, /model picks another model and the session carries on.'
   return '⚠ ' + windowLabel(kind) + ' ' + Math.round(pct) + '% used' + (reset ? ', resets ' + reset : '') +
     '. Pick up later with: ' + resumeCommand(sessionId)
 }
@@ -354,7 +361,7 @@ function usagePane($, e) {
       : []
     rows.push(line('ctx', [...ctx.spans, ...detail]))
   }
-  const live = liveLimits(usage, now)
+  const live = liveLimits(shown(), now)
   for (const r of live) rows.push(line('w-' + r.kind, usageSeg(r, cur().thresholds, now, barWidth).spans))
   if (!live.length) rows.push(Text({ color: dim, children: ['No plan usage yet. It appears after the first reply on a Pro or Max plan.'] }))
   const f = cur().forecast
@@ -432,13 +439,13 @@ export function register(on, options: { band?: string; spinner?: boolean; alerts
     if (draws) {
       const now = await $.clock.now()
       if (toasts) {
-        for (const a of crossings(lastPct, usage, cur().thresholds, now)) $.ui.toast(alertText(a.kind, a.pct, a.resetsAt, now), { timeoutMs: 8000 })
+        for (const a of crossings(lastPct, shown(), cur().thresholds, now)) $.ui.toast(alertText(a.kind, a.pct, a.resetsAt, now), { timeoutMs: 8000 })
       }
       scheduleResume($, now)
       void refreshRig($)
       $.ui.invalidate('ui.render')
     }
-    lastPct = Object.fromEntries((e.rateLimits ?? []).map((r) => [r.kind, r.percentUsed]))
+    lastPct = Object.fromEntries((shown()?.rateLimits ?? []).map((r) => [r.kind, r.percentUsed]))
     return next(e)
   })
 
@@ -513,7 +520,7 @@ export function register(on, options: { band?: string; spinner?: boolean; alerts
     columns = e.props.bodyColumns || columns
     const now = Date.now()
     const showRig = showRigInBand()
-    const alert = alertFor(usage, cur().thresholds, now)
+    const alert = alertFor(shown(), cur().thresholds, now)
     const showAlert = !!alert && alertKey(alert) !== hidden
     if (!showRig && !showAlert) return next(e)
 
@@ -525,7 +532,7 @@ export function register(on, options: { band?: string; spinner?: boolean; alerts
       let lines: Span[][]
       if (rig && rigLines && rigCols === columns) lines = rigLines
       else {
-        lines = packLines(rig ?? nativeSegments(model, usage, cur().thresholds, now), Math.max(20, columns - 1))
+        lines = packLines(rig ?? nativeSegments(model, shown(), cur().thresholds, now), Math.max(20, columns - 1))
         if (rig && rigLines && rigCols !== columns && !rendering) void refreshRig($)
       }
       lines.forEach((spans, i) => {
@@ -534,7 +541,9 @@ export function register(on, options: { band?: string; spinner?: boolean; alerts
     }
     if (showAlert && alert) {
       const reset = fmtReset(alert.resetsAt, now)
-      const resume = resumeCommand(sessionId)
+      // Fable's limit ends only Fable: the way on is another model, not a resume at the reset
+      const fable = alert.kind === 'fable'
+      const resume = fable ? 'until then, /model picks another model' : resumeCommand(sessionId)
       children.push(Box({
         key: 'alert',
         flexDirection: 'row',
@@ -543,7 +552,7 @@ export function register(on, options: { band?: string; spinner?: boolean; alerts
         children: [
           Text({ color: xterm256(COLOR.red), bold: true, children: ['⚠ ' + alert.label + ' ' + Math.round(alert.pct) + '%'] }),
           Text({ color: xterm256(COLOR.dim), children: [(reset ? 'resets ' + reset + ' · ' : '') + resume] }),
-          Button({
+          fable ? null : Button({
             key: 'alert-copy',
             label: 'Copy',
             onPress: async () => {
@@ -559,7 +568,7 @@ export function register(on, options: { band?: string; spinner?: boolean; alerts
               $.ui.invalidate('ui.render')
             },
           }),
-        ],
+        ].filter(Boolean),
       }))
     }
     // keep what other mods draw in the band, under ours
@@ -609,7 +618,7 @@ export function register(on, options: { band?: string; spinner?: boolean; alerts
 
   on('command.run', { command: 'ccrig' }, async ($, e) => {
     const [sub = '', ...rest] = splitArgs(e.args)
-    if (!sub) return { text: summaryLine(model, usage, Date.now()) }
+    if (!sub) return { text: summaryLine(model, shown(), Date.now()) }
     if (sub === 'help' || sub === '--help' || sub === '-h') return { text: HELP }
     if (sub === 'usage') {
       await $.ui.open({ id: USAGE_PANE, title: 'CCRig usage', focus: true, closeOnEscape: true })
