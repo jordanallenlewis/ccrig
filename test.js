@@ -2808,8 +2808,12 @@ test('REGRESSION: installed commands put an unquoted program first on Windows (P
   const sb = sandbox();
   const pre = path.join(sb.dir, 'win32.js');
   fs.writeFileSync(pre, "Object.defineProperty(process, 'platform', { value: 'win32' });\n");
-  const r = spawnSync(NODE, ['-r', pre, SCRIPT, '--install'], { encoding: 'utf8', env: { ...process.env, CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, USERPROFILE: sb.home, CCBSL_NO_ACT: '1', TMPDIR: TESTTMP, CCRIG_HOOK_FORM: 'shell' } });
+  // cwd is the sandbox: on a faked win32, os.tmpdir() falls back to SystemRoot + '\\temp' (relative
+  // 'undefined\\temp' off Windows) when TEMP and TMP are unset, so a leak lands where we can see it
+  const r = spawnSync(NODE, ['-r', pre, SCRIPT, '--install'], { cwd: sb.dir, encoding: 'utf8', env: { ...process.env, CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, USERPROFILE: sb.home, CCBSL_NO_ACT: '1', TMPDIR: TESTTMP, TEMP: TESTTMP, TMP: TESTTMP, CCRIG_HOOK_FORM: 'shell' } });
   assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+  // TEST-01: every temp write stays under the suite's own tmp root
+  assert.deepStrictEqual(fs.readdirSync(sb.dir).sort(), ['home', 'win32.js'], 'nothing new in the working directory');
   const j = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
   const cmds = [j.statusLine.command];
   for (const groups of Object.values(j.hooks)) for (const g of groups) for (const h of g.hooks) cmds.push(h.command);
