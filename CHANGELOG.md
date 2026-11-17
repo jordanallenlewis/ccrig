@@ -11,6 +11,9 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+### Fixed
+- `npm test` no longer leaves an `undefined\temp` folder in the checkout on Linux and macOS. One test fakes Windows to check the installed commands, but it set only `TMPDIR`. With `TEMP`, `TMP` and `SystemRoot` unset, Node returned the relative path `undefined\temp`, and the cache folder was made inside whatever folder the test ran from. The test now sets `TEMP` and `TMP` as well, runs in its own sandbox, and fails if anything new appears there.
+
 ## [1.10.0] - 2026-11-16
 
 ### Changed
