@@ -170,7 +170,7 @@ test('statusInput builds the JSON statusline.js reads', () => {
     workspace: { current_dir: '/w/app', project_dir: '/w' },
     model: { id: 'claude-opus-5-5[1m]', display_name: 'Opus 5.5' },
     version: '2.1.287',
-    rate_limits: { five_hour: { used_percentage: 63, resets_at: Math.floor(Date.parse('2026-10-01T17:00:00.000Z') / 1000) } },
+    rate_limits: { five_hour: { used_percentage: 63, resets_at: Math.floor(Date.parse('2026-10-01T17:00:00.000Z') / 1000) }, spend_limit: { used_percentage: 10 } },
     transcript_path: '/t.jsonl',
     effort: { level: 'high' },
     context_window: { context_window_size: 1000000, used_percentage: 42, total_input_tokens: 420000 },

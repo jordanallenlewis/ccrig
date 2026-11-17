@@ -448,7 +448,8 @@ export function statusInput(d: {
 }): Record<string, unknown> {
   const rate: Record<string, { used_percentage: number; resets_at?: number }> = {}
   for (const r of d.usage?.rateLimits ?? []) {
-    if (r.kind !== 'five_hour' && r.kind !== 'seven_day') continue
+    // the windows Claude Code hands a status line; the spend limit comes from a Claude apps gateway
+    if (r.kind !== 'five_hour' && r.kind !== 'seven_day' && r.kind !== 'spend_limit') continue
     if (typeof r.percentUsed !== 'number') continue
     const t = r.resetsAt ? Date.parse(r.resetsAt) : NaN
     rate[r.kind] = Number.isFinite(t)

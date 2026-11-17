@@ -93,7 +93,7 @@ const UPDATE_PUBKEY = '';
 // DEFAULTS: generic, safe for anyone. Override in statusline.config.json
 // (next to this file); your overrides deep-merge over these and survive updates.
 // ===========================================================================
-const DEFAULT_ORDER = ['profile', 'update', 'folder', 'model', 'downgrade', 'effort', 'flags', 'context', 'git', 'agents', 'caveman', 'billing', 'session', 'weekly', 'fable', 'forecast', 'resumeHint', 'cost', 'sessionName'];
+const DEFAULT_ORDER = ['profile', 'update', 'folder', 'model', 'downgrade', 'effort', 'flags', 'context', 'git', 'agents', 'caveman', 'billing', 'session', 'weekly', 'fable', 'spend', 'forecast', 'resumeHint', 'cost', 'sessionName'];
 // what survives in minimal mode; the safety/attention segments stay on purpose
 const MINIMAL_KEEP = ['profile', 'update', 'folder', 'model', 'downgrade', 'context', 'git', 'agents', 'forecast', 'resumeHint'];
 const MODES = ['minimal', 'normal', 'expanded'];
@@ -118,6 +118,7 @@ const DEFAULTS = {
     session: true,      // 5-hour plan-usage bar + reset time
     weekly: true,       // 7-day plan-usage bar + reset time
     fable: true,        // Fable's own weekly bar; drawn only with "fableLimit": true (see below)
+    spend: true,        // spend-limit bar + reset (and $ used / $ limit) behind a Claude apps gateway with a spend limit
     forecast: true,     // ⏳ predictive time-to-limit + pace verdict (Feature 3), shown only when it has something to say
     resumeHint: true,   // ⚠ shown only past thresholds.usage.warn: how to pick back up after reset
     cost: false,        // session $ + lines +added/-removed
@@ -459,7 +460,7 @@ function wrapSegments(segs, width) {
 // line when it can, so "weekly" is never stranded on a line of its own. Each segment carries its
 // narrower variants (full -> compact -> tiny), used only when the full form would not fit, and the
 // last resort is a clean '…' cut: no line ever runs past the terminal edge.
-const SEG_GROUP = { context: 'meter', session: 'meter', weekly: 'meter', fable: 'meter', forecast: 'meter', resumeHint: 'alert' };
+const SEG_GROUP = { context: 'meter', session: 'meter', weekly: 'meter', fable: 'meter', spend: 'meter', forecast: 'meter', resumeHint: 'alert' };
 function groupOf(name) { return SEG_GROUP[name] || 'id'; }
 // `indent`: cells the first line gives up (the fold glyph when there is no rule line above the bar)
 function layoutItems(items, width, indent) {
@@ -632,17 +633,17 @@ function localeHour24(locale) {
   try { const hc = new Intl.DateTimeFormat(locale, { hour: 'numeric' }).resolvedOptions().hourCycle; return hc === 'h23' || hc === 'h24'; } catch { return false; }
 }
 function warnAtOf(t) { return t.warn != null ? t.warn : 90; }
-const usageSeg = (label, pct, reset) => {
+const usageSeg = (label, pct, reset, extra) => {
   const t = CONFIG.thresholds.usage;
   const near = pct >= warnAtOf(t) && windowActive(reset); // a passed reset means the window refreshed: no warning
   const lbl = near ? cBold(K.red, '⚠ ' + label) : c(K.dim, label);
   const val = near ? cBold(K.red, Math.round(pct) + '%') : c(K.dim, Math.round(pct) + '%');
-  return `${lbl} ${bar(pct, 8, t, warnAtOf(t))} ${val}` + (reset ? c(K.dim, ' ↺' + fmtReset(reset)) : '');
+  return `${lbl} ${bar(pct, 8, t, warnAtOf(t))} ${val}` + (reset ? c(K.dim, ' ↺' + fmtReset(reset)) : '') + (extra ? c(K.dim, ' ' + extra) : '');
 };
 // refined usage meter, widest first: "session ━━━━╸───── 42% ↺ 3:10p" ... "5h 42%". `saved`: this is the
 // window the guardian is checkpointing near its limit, which the meter says (" · saved") instead of a
-// separate alert line that would only repeat it.
-function usageVariants(label, pct, reset, saved) {
+// separate alert line that would only repeat it. `extra`: a note for the widest form only ("$480 / $500").
+function usageVariants(label, pct, reset, saved, extra) {
   const t = CONFIG.thresholds.usage, warnAt = warnAtOf(t);
   const short = label === 'session' ? '5h' : label === 'weekly' ? '7d' : label;
   // the reset already passed: the window refreshed, and the stale number would only alarm
@@ -653,7 +654,22 @@ function usageVariants(label, pct, reset, saved) {
   const R = reset ? lbl(' ↺ ' + fmtReset(reset)) : '';
   const S = near && saved ? lbl(' · saved') : '';
   const col = levelColor(pct, t, warnAt);
-  return [`${L(label)} ${meter(pct, 10, col)} ${P}${R}${S}`, `${L(short)} ${meter(pct, 6, col)} ${P}${R}${S}`, `${L(short)} ${P}${R}`, `${L(short)} ${P}`];
+  const m = Math.min(100, pct); // a spend limit can run past 100%: the meter is full, the number says how far
+  const X = extra ? lbl(' · ' + extra) : '';
+  return [`${L(label)} ${meter(m, 10, col)} ${P}${R}${S}${X}`, `${L(short)} ${meter(m, 6, col)} ${P}${R}${S}`, `${L(short)} ${P}${R}`, `${L(short)} ${P}`];
+}
+// Behind a Claude apps gateway with a spend limit, Claude Code sends rate_limits.spend_limit: used_percentage
+// (0 to 100, above 100 once over) and resets_at with every reply, and used_usd / limit_usd / period about every
+// five minutes, so those may be missing. pure: { pct, reset, usd } with nulls for what is absent; pct is NOT
+// clamped at 100, so an overspend reads as one.
+function spendWindow(o) {
+  const none = { pct: null, reset: null, usd: '' };
+  if (!o || typeof o !== 'object' || typeof o.used_percentage !== 'number' || !Number.isFinite(o.used_percentage)) return none;
+  // rounded down, to the cent under $1,000, so $499.70 of $500 never reads as $500 / $500
+  const money = (v) => (v >= 1000 ? '$' + Math.floor(v) : Number.isInteger(v) ? '$' + v : '$' + (Math.floor(v * 100) / 100).toFixed(2));
+  const ok = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  const usd = ok(o.used_usd) && ok(o.limit_usd) ? money(o.used_usd) + ' / ' + money(o.limit_usd) : '';
+  return { pct: Math.min(9999, Math.max(0, o.used_percentage)), reset: normEpoch(o.resets_at), usd }; // 9999: a readable ceiling
 }
 // At >= thresholds.usage.critical (default 95%), drop a resume ticket: a tiny file
 // with the exact command to reopen THIS session after the limit resets. Claude Code
@@ -1700,8 +1716,8 @@ function fableState() {
 function updateCacheFile() { return path.join(CFG, '.ccbsl-update.json'); }
 
 // ---- Fable weekly limit (opt-in "fableLimit") ----------------------------------------------------
-// Claude Code sends the status line only five_hour and seven_day. Fable's weekly window lives in the
-// usage endpoint's limits[] (a "weekly_scoped" row whose scope.model.display_name is "Fable"), so a
+// Claude Code sends the status line five_hour, seven_day and (behind a gateway) spend_limit, not Fable's
+// weekly window. That one lives in the usage endpoint's limits[] (a "weekly_scoped" row whose scope.model.display_name is "Fable"), so a
 // detached child fetches it and the render only reads the cache, exactly like the update check.
 const FABLE_EVERY_MS = 60 * 1000;           // how often the background check may run
 const FABLE_BACKOFF_MS = 10 * 60 * 1000;    // after a failure (no token, 401, offline)
@@ -2451,6 +2467,7 @@ function collectItems(input, width, gitOverride) {
   const sReset = resetOf(rl.five_hour), wReset = resetOf(rl.seven_day);
   const fableInfo = DEMO_FABLE || (fableOn() ? readFableInfo() : null); // the background check's cache, read once
   const { pct: fPct, reset: fReset } = fableWindow(fableInfo);
+  const { pct: xPct, reset: xReset, usd: xUsd } = spendWindow(rl.spend_limit);
   // side effects only on the LIVE render (Claude Code's stdin), never in --demo / --config / --selftest
   if (live) {
     maybeCheckUpdate(updateInfo);                  // once/day background version check (never blocks)
@@ -2469,14 +2486,15 @@ function collectItems(input, width, gitOverride) {
   const saves = cfgAutopilot() !== 'off' && typeof input.session_id === 'string' && SID_RE.test(input.session_id);
   const savedWin = saves && !anyCrit ? (inBand(sPct, sReset) ? 'session' : inBand(wPct, wReset) ? 'weekly' : '') : '';
   // a window whose reset already passed has refreshed; its last number is stale, so it never alarms
-  const useSeg = (label, pct, reset) => (pct == null ? '' : R ? usageVariants(label, pct, reset, savedWin === label)
-    : (reset != null && !windowActive(reset)) ? c(K.dim, label + ' ↺now') : usageSeg(label, pct, reset));
+  const useSeg = (label, pct, reset, extra) => (pct == null ? '' : R ? usageVariants(label, pct, reset, savedWin === label, extra)
+    : (reset != null && !windowActive(reset)) ? c(K.dim, label + ' ↺now') : usageSeg(label, pct, reset, extra));
   out.session = useSeg('session', sPct, sReset);
   out.weekly = useSeg('weekly', wPct, wReset);
   out.fable = useSeg('fable', fPct, fReset);
+  out.spend = useSeg('spend', xPct, xReset, xUsd);
   // first run on a plan: Claude Code sends usage only with a reply, so a fresh bar has no meters. Say so,
   // rather than look broken, until the first reply (or a few KB of transcript) arrives.
-  if (R && sPct == null && wPct == null && !process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
+  if (R && sPct == null && wPct == null && xPct == null && !process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
     let small = true;
     try { small = !input.transcript_path || fs.statSync(input.transcript_path).size < 4096; } catch {}
     if (small) out.session = [lbl('plan usage appears after the first reply'), lbl('usage after 1st reply')];
@@ -2498,14 +2516,14 @@ function collectItems(input, width, gitOverride) {
   out.sessionName = name ? c(K.dim, dispWidth(name) > 28 ? padCell(name, 28).trimEnd() : name) : '';
 
   // how close the nearest ACTIVE window is to its limit: tints the refined rule line
-  const hot = Math.max(...[[sPct, sReset], [wPct, wReset], [fPct, fReset]].map(([p, r]) => (p != null && windowActive(r) ? p : 0)));
+  const hot = Math.max(...[[sPct, sReset], [wPct, wReset], [fPct, fReset], [xPct, xReset]].map(([p, r]) => (p != null && windowActive(r) ? p : 0)));
   const level = hot >= critAt ? 'critical' : hot >= warnAt ? 'warn' : 'ok';
 
   const order = Array.isArray(CONFIG.order) ? CONFIG.order : DEFAULT_ORDER;
   const mode = CONFIG.mode || 'normal';
   // refined minimal keeps the plan budget (the reason to install) and drops its bars instead: every
   // segment at its smallest form, so it is "5h 63% · 7d 21%", not no usage at all
-  const keep = mode === 'minimal' && R ? MINIMAL_KEEP.concat(['session', 'weekly', 'fable']) : MINIMAL_KEEP;
+  const keep = mode === 'minimal' && R ? MINIMAL_KEEP.concat(['session', 'weekly', 'fable', 'spend']) : MINIMAL_KEEP;
   const items = order.filter((n) => {
     if (!out[n] || (Array.isArray(out[n]) && !out[n].length)) return false; // no content -> never show
     if (mode === 'minimal') return keep.includes(n);         // quiet: essentials only (+ the ⚠ hint)
@@ -2516,7 +2534,7 @@ function collectItems(input, width, gitOverride) {
     // the limit alert keeps every form: it is the one line minimal must never cut down to a bare head
     return { name: n, v: mode === 'minimal' && R && groupOf(n) !== 'alert' ? [v[v.length - 1]] : v };
   });
-  return { items, level, stats: { folder, model, ctx, sPct, wPct, sReset, wReset, fPct, fReset } };
+  return { items, level, stats: { folder, model, ctx, sPct, wPct, sReset, wReset, fPct, fReset, xPct, xReset } };
 }
 // the segments as plain strings (each at its widest), for the mod and the tests
 function collectSegments(input, width, gitOverride) {
@@ -2543,6 +2561,7 @@ function collapsedSummary(r, width, withFill) {
     pct('5h', stats.sPct, stats.sReset),
     pct('7d', stats.wPct, stats.wReset),
     pct('fable', stats.fPct, stats.fReset),
+    pct('spend', stats.xPct, stats.xReset),
   ].filter(Boolean);
   const ruleCol = levelTint(level, K.rule);
   const head = isRefined() ? c(K.dim, '▸ ccrig') : c(K.dim, '▸');
@@ -2606,7 +2625,7 @@ const argv = process.argv.slice(2);
 // or touch stdin. Direct execution (`node statusline.js`) runs normally below.
 if (require.main !== module) {
   module.exports = {
-    parseFableUsage, fableWindow, toEpochSec,
+    parseFableUsage, fableWindow, spendWindow, toEpochSec,
     semverGt, modelTier, parseRemoteVersion, parseChangelogTop, inflightAgents,
     computeInflightAgents, latestTodos, latestUserText, dispWidth, glyphWidth, deepMerge,
     truncFolder, fmtReset, resumePromptFromCheckpoint, wrapSegments, bar,

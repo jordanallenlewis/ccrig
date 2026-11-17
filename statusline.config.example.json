@@ -1,7 +1,7 @@
 {
   "_comment": "Copy this to statusline.config.json in the same folder as statusline.js. Your overrides deep-merge over the built-in defaults, so you only need the keys you actually change. Easiest way to edit: `node statusline.js --config`. 256-color codes: https://www.ditig.com/256-colors-cheat-sheet",
   "mode": "normal",
-  "order": ["profile", "update", "folder", "model", "downgrade", "effort", "flags", "context", "git", "agents", "caveman", "billing", "session", "weekly", "fable", "forecast", "resumeHint", "cost", "sessionName"],
+  "order": ["profile", "update", "folder", "model", "downgrade", "effort", "flags", "context", "git", "agents", "caveman", "billing", "session", "weekly", "fable", "spend", "forecast", "resumeHint", "cost", "sessionName"],
   "show": {
     "profile": "auto",
     "update": true,
@@ -18,6 +18,7 @@
     "session": true,
     "weekly": true,
     "fable": true,
+    "spend": true,
     "forecast": true,
     "resumeHint": true,
     "cost": false,
