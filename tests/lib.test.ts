@@ -4,7 +4,7 @@ import {
   alertFor, alertKey, ansiToSpans, classicResult, cliArgs, configFrom, crossings, detectWiring,
   displayModel, fmtReset, nativeSegments, nodeFromSettings, packLines, parseRigOutput, plainText,
   resumeCommand, splitArgs, statusInput, summaryLine, thresholdsFrom, withFable, xterm256, DEFAULT_THRESHOLDS,
-} from '../hooks/lib.ts'
+} from '../hooks/lib'
 
 const NOW = Date.UTC(2026, 9, 1, 15, 0, 0)
 const IN_2H = new Date(NOW + 2 * 3600 * 1000).toISOString()

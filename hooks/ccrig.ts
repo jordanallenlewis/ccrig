@@ -9,14 +9,15 @@
 // statusline.js makes every CCRig decision; this module draws, routes events and runs commands. The
 // npm install and the mod share one renderer, one guardian and one config file
 // (~/.ccrig/statusline.config.json). Interactive sessions draw; a claude -p or SDK run only hooks.
+import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
-import type { Span, Seg, Usage, RateLimit, ModState } from './lib.ts'
+import type { Span, Seg, Usage, RateLimit, ModState } from './lib'
 import {
   CHANGES_BAR, COLOR, HELP, alertFor, alertKey, ansiToSpans, classicResult, cliArgs, configFrom,
   crossings, detectWiring, fmtReset, liveLimits, nativeSegments, nodeFromSettings, packLines,
   parseRigOutput, plainText, resumeCommand, splitArgs, statusInput, summaryLine, usageSeg,
   windowLabel, withFable, xterm256,
-} from './lib.ts'
+} from './lib'
 
 const USAGE_PANE = 'ccrig-usage'
 const BOARD_PANE = 'ccrig-board'
@@ -134,7 +135,7 @@ function noNodeText(what: string): string {
 // none does, back off for five minutes in a terminal, and for the session in the Desktop app.
 let nodeBin = ''
 let noNodeUntil = 0
-async function runCcrig($, args: string[], init: { stdin?: string; env?: Record<string, string>; timeoutMs?: number; cwd?: string }) {
+async function runCcrig($: EngineInterface, args: string[], init: { stdin?: string; env?: Record<string, string>; timeoutMs?: number; cwd?: string }) {
   if (Date.now() < noNodeUntil) throw new Error('node is not available')
   const tries = nodeBin ? [nodeBin] : [...new Set([settingsNode, 'node', 'node.exe'].filter(Boolean) as string[])]
   let last: unknown
@@ -152,7 +153,7 @@ async function runCcrig($, args: string[], init: { stdin?: string; env?: Record<
   throw last
 }
 
-async function loadConfig($) {
+async function loadConfig($: EngineInterface) {
   const home = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) || ''
   let text = ''
   if (home) {
@@ -166,7 +167,7 @@ async function loadConfig($) {
   fileState = configFrom(text)
 }
 
-async function learnSession($) {
+async function learnSession($: EngineInterface) {
   try { sessionId = await $.session.id() } catch {}
   try { cwd = await $.session.cwd() } catch {}
   try { projectDir = await $.session.root() } catch {}
@@ -186,7 +187,7 @@ async function learnSession($) {
 
 // Render the CCRig segments with statusline.js. One render at a time; a request that lands mid-render
 // runs once more after it, with the newest figures.
-async function refreshRig($) {
+async function refreshRig($: EngineInterface) {
   if (!wantRig()) return
   if (rendering) {
     renderAgain = true
@@ -217,7 +218,7 @@ async function refreshRig($) {
   $.ui.invalidate('ui.render')
 }
 
-async function refreshBoard($) {
+async function refreshBoard($: EngineInterface) {
   try {
     const out = await runCcrig($, ['--board'], { env: { CCRIG_HOST: 'mod', NO_COLOR: '1' }, timeoutMs: 15000 })
     boardLines = (out.stdout || out.stderr || '').replace(/\s+$/, '').split('\n').map(ansiToSpans)
@@ -228,32 +229,33 @@ async function refreshBoard($) {
 }
 
 // Run a validated CCRig CLI command and hand back its output as the command's reply.
-async function cli($, argv: string[]) {
+async function cli($: EngineInterface, argv: string[]) {
+  const cmd = argv[0] ?? ''
   let out
   try {
     out = await runCcrig($, argv, {
       env: { CCRIG_HOST: 'mod', NO_COLOR: '1' },
       timeoutMs: 60000,
       // a session label belongs to the project, wherever in it the session runs
-      cwd: argv[0] === 'name' ? projectDir || cwd || undefined : undefined,
+      cwd: cmd === 'name' ? projectDir || cwd || undefined : undefined,
     })
   } catch {
-    return { text: noNodeText(argv[0]) }
+    return { text: noNodeText(cmd) }
   }
-  if (CHANGES_BAR.has(argv[0])) {
+  if (CHANGES_BAR.has(cmd)) {
     await loadConfig($)
-    if (rigState && argv[0] === 'autopilot') rigState = { ...rigState, autopilot: argv[1] }
-    if (argv[0] === 'autopilot' && argv[1] !== 'resume') cancelResume()
+    if (rigState && cmd === 'autopilot') rigState = { ...rigState, autopilot: argv[1] ?? rigState.autopilot }
+    if (cmd === 'autopilot' && argv[1] !== 'resume') cancelResume()
     void refreshRig($)
   }
   const text = plainText([out.stdout, out.stderr].filter(Boolean).join('\n').trim())
-  return { text: text || '/ccrig ' + argv[0] + ': done' }
+  return { text: text || '/ccrig ' + cmd + ': done' }
 }
 
 // Run one of CCRig's settings hooks with the event's JSON and fold its answer into what the settings
 // hooks decided. The callers check that settings.json does not already run the slug.
-async function forward($, slug: string, e, base, timeoutMs = 20000) {
-  const result = base && typeof base === 'object' ? base : {}
+async function forward($: EngineInterface, slug: string, e: unknown, base: unknown, timeoutMs = 20000) {
+  const result = base && typeof base === 'object' ? (base as Record<string, unknown>) : {}
   try {
     const out = await runCcrig($, ['--hook', slug], { stdin: JSON.stringify(e), env: { CCRIG_HOST: 'mod' }, timeoutMs })
     return classicResult(out.stdout, result)
@@ -276,7 +278,7 @@ function cancelResume() {
   resumeTries = 0
 }
 
-function scheduleResume($, now: number) {
+function scheduleResume($: EngineInterface, now: number) {
   if (!ownsRender() || cur().autopilot !== 'resume') {
     cancelResume()
     return
@@ -291,7 +293,7 @@ function scheduleResume($, now: number) {
   resumeTimer = $.clock.after(Math.max(0, at - now), () => { void fireResume($) })
 }
 
-async function fireResume($) {
+async function fireResume($: EngineInterface) {
   resumeTimer = null
   if (!ownsRender() || cur().autopilot !== 'resume') return cancelResume()
   const now = await $.clock.now()
@@ -337,13 +339,13 @@ function spanProps(s: Span, extra: Record<string, unknown> = {}) {
   return props
 }
 
-function noteHookInput(e) {
+function noteHookInput(e: { session_id?: unknown; transcript_path?: unknown; cwd?: unknown }) {
   if (typeof e?.session_id === 'string' && e.session_id) sessionId = e.session_id
   if (typeof e?.transcript_path === 'string' && e.transcript_path) transcriptPath = e.transcript_path
   if (typeof e?.cwd === 'string' && e.cwd) cwd = e.cwd
 }
 
-function usagePane($, e) {
+function usagePane($: EngineInterface, e: RenderInput<'Pane'>) {
   const { Box, Text, Button } = $.ui.resolve(e)
   const now = Date.now()
   const barWidth = Math.max(10, Math.min(30, (e.props.bodyColumns || 60) - 40))
@@ -390,7 +392,7 @@ function usagePane($, e) {
   return Box({ flexDirection: 'column', children: rows })
 }
 
-function boardPane($, e) {
+function boardPane($: EngineInterface, e: RenderInput<'Pane'>) {
   const { Box, Text } = $.ui.resolve(e)
   const lines = boardLines.length ? boardLines : [[{ text: 'Reading the board...' }]]
   return Box({
@@ -404,7 +406,7 @@ function boardPane($, e) {
   })
 }
 
-export function register(on, options: { band?: string; spinner?: boolean; alerts?: boolean } = {}) {
+export const register: Register = (on, options = {}) => {
   band = BAND_MODES.includes(String(options?.band)) ? String(options.band) : 'auto'
   spinner = options?.spinner !== false
   toasts = options?.alerts !== false
@@ -428,7 +430,7 @@ export function register(on, options: { band?: string; spinner?: boolean; alerts
         immediate: true,
       })
     } catch (err) {
-      $.ui.log('could not add /ccrig: ' + String(err?.message ?? err), { to: 'debug' })
+      $.ui.log('could not add /ccrig: ' + String(err instanceof Error ? err.message : err), { to: 'debug' })
     }
     return next(e)
   })
@@ -599,8 +601,7 @@ export function register(on, options: { band?: string; spinner?: boolean; alerts
 
   // the /ccrig:* markdown commands an npm `ccrig init` wrote cost a Claude turn each; this /ccrig does not
   on('command.describe', { command: /^ccrig:/ }, async ($, e, next) => {
-    const r = await next(e)
-    return { ...(r && typeof r === 'object' ? r : {}), isHidden: true }
+    return { ...(await next(e)), isHidden: true }
   })
 
   // a change to a ccrig row in /config applies at once
