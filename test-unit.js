@@ -61,6 +61,21 @@ test('parseFableUsage: falls back to seven_day_overage_included, else null', () 
   assert.strictEqual(SL.parseFableUsage({ limits: [{ percent: 140, scope: { model: { display_name: 'Fable' } } }] }).pct, 100, 'clamped');
 });
 
+test('spendWindow: percent and reset always, dollars only with both amounts, never clamped at 100', () => {
+  assert.deepStrictEqual(SL.spendWindow({ used_percentage: 62.8, resets_at: 1795000000, used_usd: 314.12, limit_usd: 500, period: 'monthly' }), { pct: 62.8, reset: 1795000000, usd: '$314.12 / $500' });
+  assert.deepStrictEqual(SL.spendWindow({ used_percentage: 5, resets_at: 1795000000, used_usd: 2.5, limit_usd: 50 }), { pct: 5, reset: 1795000000, usd: '$2.50 / $50' });
+  assert.deepStrictEqual(SL.spendWindow({ used_percentage: 63, resets_at: 1795000000 }), { pct: 63, reset: 1795000000, usd: '' }, 'dollars lag the percentage');
+  assert.strictEqual(SL.spendWindow({ used_percentage: 63, used_usd: 314 }).usd, '', 'no limit, no dollars');
+  assert.strictEqual(SL.spendWindow({ used_percentage: 112 }).pct, 112, 'over the limit stays over');
+  assert.strictEqual(SL.spendWindow({ used_percentage: 99.6, used_usd: 499.7, limit_usd: 500 }).usd, '$499.70 / $500', 'never rounds up to the limit');
+  assert.strictEqual(SL.spendWindow({ used_percentage: 99.9, used_usd: 99.999, limit_usd: 100 }).usd, '$99.99 / $100');
+  assert.strictEqual(SL.spendWindow({ used_percentage: 50, used_usd: 1234.56, limit_usd: 2500 }).usd, '$1234 / $2500', 'whole dollars from $1,000');
+  assert.strictEqual(SL.spendWindow({ used_percentage: 1e21 }).pct, 9999, 'an absurd number stays readable');
+  assert.strictEqual(SL.spendWindow({ used_percentage: -5 }).pct, 0);
+  assert.strictEqual(SL.spendWindow({ used_percentage: 50, resets_at: 1795000000000 }).reset, 1795000000, 'a millisecond epoch is read as seconds');
+  for (const bad of [null, undefined, 'x', {}, { used_percentage: 'high' }, { used_percentage: NaN }]) assert.deepStrictEqual(SL.spendWindow(bad), { pct: null, reset: null, usd: '' });
+});
+
 test('fableWindow: shows a fresh cache, hides a stale, failed or empty one', () => {
   const now = Date.now();
   assert.deepStrictEqual(SL.fableWindow({ fetchedAt: now - 1000, pct: 72, resetsAt: 1795000000 }, now), { pct: 72, reset: 1795000000 });

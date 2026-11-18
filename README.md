@@ -98,6 +98,7 @@ The band is shared, so you can build on it. A mod of your own that lists `ccrig`
 - **Git**: branch, uncommitted count, unpushed/unpulled vs upstream
 - **Billing**: `api` when an API key is billing you per token (`"billing": "always"` under `show` also shows `sub` for a Claude.ai subscription)
 - **Session / weekly usage**: your plan's 5-hour and 7-day windows, each with its reset time
+- **Spend limit**: behind a Claude apps gateway that sets one, how much of it you have used, when it resets, and your spend in dollars once Claude Code has it (`spend ━━━━━━╸─── 63% ↺ 12/1 12:00a · $314.12 / $500`). It turns red with a `▲` from 90% like the other windows, and past the limit it shows the real number, such as `112%`. The guardian does not save a checkpoint or a resume ticket for it
 - **Fable usage** (opt-in, `"fableLimit": true`): Fable's own weekly window, the "Current week (Fable)" row in `/usage`, with its reset time
 - **Forecast**: when you will hit the wall, projected from your recent burn rate
 - **Near-limit warning**: from 90% a window's meter turns red with a `▲`, and adds `· saved` once the guardian has checkpointed your work; at 95% a line of its own names the exact `claude --resume <session-id>` command, saved in a resume ticket too
