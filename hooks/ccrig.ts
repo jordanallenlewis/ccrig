@@ -484,7 +484,7 @@ export function register(on, options: { band?: string; spinner?: boolean; alerts
   // a turn that died on a usage limit: the guardian checkpoints and, with autopilot "resume", arms the
   // resume even when no render saw usage climb (a background agent used the window up). The render after
   // it reports the armed resume, which the band and the in-place resume pick up.
-  on('classic.StopFailure', { error_type: ['rate_limit'] }, async ($, e, next) => {
+  on('classic.StopFailure', { error: ['rate_limit'] }, async ($, e, next) => {
     noteHookInput(e)
     const base = await next(e)
     if (wired('stop-failure') || cur().autopilot === 'off') return base

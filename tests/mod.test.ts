@@ -430,14 +430,14 @@ test('Stop goes to the guardian when ccrig init did not wire it, and keep-workin
 })
 
 test('a turn that died on a usage limit goes to the guardian, unless ccrig init wired it or autopilot is off', async ($, on) => {
-  const sf = (sid = 'sess-1') => ({ hook_event_name: 'StopFailure', session_id: sid, transcript_path: '/t', cwd: '/w', error_type: 'rate_limit', error_message: 'Rate limit exceeded', reset_after_seconds: 600 })
+  const sf = (sid = 'sess-1') => ({ session_id: sid, transcript_path: '/t', cwd: '/w', error: 'rate_limit' as const, error_details: '429 Too Many Requests', last_assistant_message: 'API Error: Rate limit reached' })
   const { seen } = setup(on, { config: '{"autopilot":"resume"}' })
   on('classic.StopFailure', () => ({}))
   await start($)
   await $.classic.StopFailure(sf('sess-7'))
   const hook = seen.runs.find((r) => r.argv.includes('--hook'))
   expect(hook!.argv.slice(-2)).toEqual(['--hook', 'stop-failure'])
-  expect(JSON.parse(hook!.init.stdin!)).toMatchObject({ session_id: 'sess-7', error_type: 'rate_limit', reset_after_seconds: 600 })
+  expect(JSON.parse(hook!.init.stdin!)).toMatchObject({ session_id: 'sess-7', error: 'rate_limit', error_details: '429 Too Many Requests' })
 })
 
 test('StopFailure is left to a wired guardian, and does nothing with autopilot off', async ($, on) => {
@@ -445,15 +445,23 @@ test('StopFailure is left to a wired guardian, and does nothing with autopilot o
   const a = setup(on, { settings: wiredSf, config: '{"autopilot":"resume"}' })
   on('classic.StopFailure', () => ({}))
   await start($)
-  await $.classic.StopFailure({ hook_event_name: 'StopFailure', session_id: 's', transcript_path: '/t', cwd: '/w', error_type: 'rate_limit' })
+  await $.classic.StopFailure({ session_id: 's', transcript_path: '/t', cwd: '/w', error: 'rate_limit' })
   expect(hookRuns(a.seen)).toEqual([])
+})
+
+test('a turn that died on another API error is not a usage limit', async ($, on) => {
+  const { seen } = setup(on, { config: '{"autopilot":"resume"}' })
+  on('classic.StopFailure', () => ({}))
+  await start($)
+  await $.classic.StopFailure({ session_id: 's', transcript_path: '/t', cwd: '/w', error: 'server_error' })
+  expect(hookRuns(seen)).toEqual([])
 })
 
 test('StopFailure with autopilot off runs nothing', async ($, on) => {
   const { seen } = setup(on, { config: '{"autopilot":"off"}' })
   on('classic.StopFailure', () => ({}))
   await start($)
-  await $.classic.StopFailure({ hook_event_name: 'StopFailure', session_id: 's', transcript_path: '/t', cwd: '/w', error_type: 'rate_limit' })
+  await $.classic.StopFailure({ session_id: 's', transcript_path: '/t', cwd: '/w', error: 'rate_limit' })
   expect(hookRuns(seen)).toEqual([])
 })
 
