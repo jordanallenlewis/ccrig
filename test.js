@@ -4039,3 +4039,60 @@ test('first run: a plan bar with no usage yet says when it appears; an API key o
   const classic = strip(render({ model: { display_name: 'Opus 5.5' }, workspace: { current_dir: '/tmp/p' } }, { env: { ...env, CCRIG_STYLE: 'classic' } }).out);
   assert.ok(!/first reply/.test(classic), 'classic unchanged');
 });
+
+// Behind a Claude apps gateway with a spend limit, Claude Code sends rate_limits.spend_limit (2.1.251+):
+// used_percentage and resets_at always, used_usd / limit_usd / period only some of the time (2.1.284+).
+const spendInput = (spend, extra = {}) => ({ model: { display_name: 'Opus 5.5' }, workspace: { current_dir: '/tmp/p' }, session_id: 'sp1', rate_limits: { spend_limit: spend, ...extra } });
+test('REGRESSION: a spend limit alone draws a spend meter, not "usage after 1st reply"', () => {
+  const sb = sandbox();
+  const now = R_NOW();
+  const raw = render(spendInput({ used_percentage: 96, resets_at: now + 9 * 86400, used_usd: 480, limit_usd: 500, period: 'monthly' }), { env: R_ENV(sb), cols: '200' }).out;
+  const out = strip(raw);
+  assert.ok(!/first reply/.test(out), 'a spend window is usage: ' + out);
+  assert.match(out, /▲ spend ━+╸?─* 96% ↺ \S+ \S+ · \$480 \/ \$500/, 'meter, reset and dollars: ' + out);
+  assert.ok(raw.split('\n')[0].includes('38;5;167m'), 'the rule turns red at critical');
+});
+
+test('spend limit: drawn beside the 5-hour and weekly windows', () => {
+  const sb = sandbox();
+  const now = R_NOW();
+  const out = strip(render(spendInput({ used_percentage: 40, resets_at: now + 20 * 86400 }, {
+    five_hour: { used_percentage: 30, resets_at: now + 3600 }, seven_day: { used_percentage: 20, resets_at: now + 3 * 86400 },
+  }), { env: R_ENV(sb), cols: '220' }).out);
+  assert.match(out, /session ━+╸?─* 30%/);
+  assert.match(out, /weekly ━+╸?─* 20%/);
+  assert.match(out, /spend ━+╸?─* 40%/);
+  assert.ok(!/▲ spend/.test(out), 'no warning at 40%');
+});
+
+test('spend limit: no dollar fields yet shows the percentage only; over 100% says so', () => {
+  const sb = sandbox();
+  const now = R_NOW();
+  const pctOnly = strip(render(spendInput({ used_percentage: 62.8, resets_at: now + 9 * 86400 }), { env: R_ENV(sb), cols: '200' }).out);
+  assert.match(pctOnly, /spend ━+╸?─* 63%/);
+  assert.ok(!/\$/.test(pctOnly), 'no dollars until the gateway sends them: ' + pctOnly);
+  const halfDollar = strip(render(spendInput({ used_percentage: 62.8, resets_at: now + 9 * 86400, used_usd: 314.12 }), { env: R_ENV(sb), cols: '200' }).out);
+  assert.ok(!/\$/.test(halfDollar), 'a spend without its limit is not shown: ' + halfDollar);
+  const over = strip(render(spendInput({ used_percentage: 112, resets_at: now + 9 * 86400, used_usd: 560, limit_usd: 500 }), { env: R_ENV(sb), cols: '200' }).out);
+  assert.match(over, /▲ spend ━{10} 112%/, 'over the limit shows the real number on a full meter: ' + over);
+  assert.match(over, /\$560 \/ \$500/);
+  const cents = strip(render(spendInput({ used_percentage: 5, resets_at: now + 9 * 86400, used_usd: 2.5, limit_usd: 50 }), { env: R_ENV(sb), cols: '200' }).out);
+  assert.match(cents, /\$2\.50 \/ \$50/, 'small amounts keep their cents: ' + cents);
+});
+
+test('spend limit: a passed reset reads "reset" and never warns; classic and collapsed show it too', () => {
+  const sb = sandbox();
+  const now = R_NOW();
+  const old = strip(render(spendInput({ used_percentage: 99, resets_at: now - 60 }), { env: R_ENV(sb), cols: '200' }).out);
+  assert.match(old, /spend ↺ reset/);
+  assert.ok(!/▲/.test(old), 'a refreshed window never alarms: ' + old);
+  const classic = strip(render(spendInput({ used_percentage: 96, resets_at: now + 9 * 86400, used_usd: 480, limit_usd: 500 }), { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, cols: '200' }).out);
+  assert.match(classic, /⚠ spend █+░* 96%/, 'classic: ' + classic);
+  const script = scriptCopy(sb.dir, { collapsed: true });
+  const folded = strip(render(spendInput({ used_percentage: 63, resets_at: now + 9 * 86400 }), { env: R_ENV(sb), script, cols: '200' }).out);
+  assert.match(folded, /spend 63%/, 'collapsed: ' + folded);
+  const minimal = strip(render(spendInput({ used_percentage: 63, resets_at: now + 9 * 86400 }), { env: R_ENV(sb), script: scriptCopy(sb.dir, { mode: 'minimal' }), cols: '200' }).out);
+  assert.match(minimal, /spend 63%/, 'minimal keeps the plan budget: ' + minimal);
+  const hidden = strip(render(spendInput({ used_percentage: 63, resets_at: now + 9 * 86400 }), { env: R_ENV(sb), script: scriptCopy(sb.dir, { show: { spend: false } }), cols: '200' }).out);
+  assert.ok(!/spend/.test(hidden), '"spend": false hides it: ' + hidden);
+});
