@@ -1,6 +1,11 @@
 // Event-level tests for the CCRig mod: raise what Claude Code would raise, stub what it would answer,
 // and check what the mod drew, said or ran. Run with `claude plugin test`.
+import type { On, RenderSurface } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
+
+// the test environment has timers; the hooks module's type library leaves them out
+declare const setTimeout: (fn: () => void, ms: number) => unknown
 
 const HOUR = 3600 * 1000
 
@@ -21,7 +26,7 @@ const RIG = JSON.stringify({
 })
 
 type Opts = {
-  settings?: unknown
+  settings?: Record<string, unknown>
   config?: string
   rig?: string | null
   hookOut?: string | ((argv: string[]) => string)
@@ -32,8 +37,11 @@ type Opts = {
 }
 type Run = { argv: string[]; init: { stdin?: string; env?: Record<string, string>; timeoutMs?: number; cwd?: string } }
 
+// what process.run answers for a command that exited cleanly
+const ran = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+
 // Stub every mods API call the mod makes, and record what it did
-function setup(on, o: Opts = {}) {
+function setup(on: On, o: Opts = {}) {
   const seen = {
     runs: [] as Run[],
     toasts: [] as string[],
@@ -53,7 +61,7 @@ function setup(on, o: Opts = {}) {
   on('session.root', () => ({ value: '/work' }))
   on('session.model', () => ({ value: 'claude-opus-5-5[1m]' }))
   on('session.version', () => ({ value: { version: '2.1.287', base: '2.1.287', builtAt: '' } }))
-  on('session.usage', () => ({ value: { context: { window: 1000000, percent: 12, tokens: 120000 }, rateLimits: [] } }))
+  on('session.usage', () => ({ value: { context: { window: 1000000, percent: 12, tokens: 120000 }, rateLimits: [], startedAt: Date.now() } }))
   on('settings.read', () => ({ value: o.settings ?? {} }))
   on('env.get', ($, e) => ({ value: e.name === 'HOME' ? '/home/me' : undefined }))
   on('fs.exists', ($, e) => ({ value: o.config != null && String(e.path).split('\\').join('/').endsWith('/.ccrig/statusline.config.json') }))
@@ -65,17 +73,17 @@ function setup(on, o: Opts = {}) {
     if (o.noNode || (o.noBareNode && argv[0] === 'node')) return { deny: 'spawn ' + argv[0] + ' ENOENT' }
     if (argv.includes('--hook')) {
       const out = typeof o.hookOut === 'function' ? o.hookOut(argv) : o.hookOut ?? ''
-      return { value: { exitCode: 0, stdout: out, stderr: '' } }
+      return ran(out)
     }
     if (argv.length === 2) {
       if (o.rig === null) return { deny: 'node is not on PATH' }
-      return { value: { exitCode: 0, stdout: o.rig ?? RIG, stderr: '' } }
+      return ran(o.rig ?? RIG)
     }
-    return { value: { exitCode: 0, stdout: o.cli ?? 'ok\n', stderr: '' } }
+    return ran(o.cli ?? 'ok\n')
   })
   on('command.register', ($, e) => {
     seen.registered.push(e)
-    return { value: undefined }
+    return { value: { command: e.name } }
   })
   on('ui.toast', ($, e) => {
     seen.toasts.push(e.text)
@@ -102,16 +110,17 @@ function setup(on, o: Opts = {}) {
   return { seen, clock }
 }
 
-const settle = () => new Promise((r) => setTimeout(r, 25))
-const renders = (seen) => seen.runs.filter((r) => r.argv.length === 2).length
-const hookRuns = (seen) => seen.runs.filter((r) => r.argv.includes('--hook')).map((r) => r.argv[r.argv.length - 1])
+type Seen = ReturnType<typeof setup>['seen']
+const settle = () => new Promise<void>((r) => setTimeout(r, 25))
+const renders = (seen: Seen) => seen.runs.filter((r) => r.argv.length === 2).length
+const hookRuns = (seen: Seen) => seen.runs.filter((r) => r.argv.includes('--hook')).map((r) => r.argv[r.argv.length - 1])
 
-async function start($, surface: string | null = 'terminal', isInteractive = true) {
+async function start($: Engine, surface: RenderSurface | null = 'terminal', isInteractive = true) {
   await $.session.start({ surface, isInteractive, cwd: '/work' })
   await settle()
 }
 
-function measure($, pct: number, kind = 'five_hour', resetsAt = new Date(Date.now() + 2 * HOUR).toISOString()) {
+function measure($: Engine, pct: number, kind = 'five_hour', resetsAt = new Date(Date.now() + 2 * HOUR).toISOString()) {
   return $.session.measure({
     context: { window: 1000000, percent: 42, tokens: 420000 },
     rateLimits: [{ kind, percentUsed: pct, resetsAt }],
@@ -122,12 +131,15 @@ function measure($, pct: number, kind = 'five_hour', resetsAt = new Date(Date.no
 
 const stopEvent = (sid = 's') => ({ hook_event_name: 'Stop', session_id: sid, transcript_path: '/t', cwd: '/w', stop_hook_active: false })
 
+// /ccrig as typed in the prompt
+const ccrig = (args: string) => ({ command: 'ccrig', args, origin: { kind: 'composer' } as const, presentation: { isFullscreen: false, columns: 100 } })
+
 const BAND = {
   plugin: 'ccrig',
   component: 'AbovePrompt',
   requestId: 'band',
   viewport: { columns: 100, rows: 30 },
-  props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 100, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 100, scroll: { offset: 0, bodyRows: 10 }, view: {} },
 } as const
 
 // ---- commands -----------------------------------------------------------------------------------
@@ -137,14 +149,14 @@ test('registers /ccrig at session start, runnable mid-turn', async ($, on) => {
   await start($)
   expect(seen.registered.length).toBe(1)
   expect(seen.registered[0]).toMatchObject({ name: 'ccrig', immediate: true })
-  const help = await $.command.run({ command: 'ccrig', args: 'help' })
+  const help = await $.command.run(ccrig('help'))
   expect(help.text).toContain('/ccrig usage')
 })
 
 test('/ccrig mode passes through to the CLI and shares the npm config path', async ($, on) => {
   const { seen } = setup(on, { cli: '\x1b[1mmode: minimal\x1b[0m (applies on the next render)\n' })
   await start($)
-  const answer = await $.command.run({ command: 'ccrig', args: 'mode minimal' })
+  const answer = await $.command.run(ccrig('mode minimal'))
   expect(answer.text).toBe('mode: minimal (applies on the next render)')
   const cli = seen.runs.find((r) => r.argv.includes('mode'))
   expect(cli!.argv.slice(-2)).toEqual(['mode', 'minimal'])
@@ -156,10 +168,10 @@ test('/ccrig never passes a flag through to the CLI', async ($, on) => {
   await start($)
   const before = seen.runs.length
   for (const args of ['mode --watch abc', 'status --purge', 'name --hook stop', 'autopilot on', 'mode']) {
-    const answer = await $.command.run({ command: 'ccrig', args })
+    const answer = await $.command.run(ccrig(args))
     expect(answer.text).toMatch(/^usage: \/ccrig /)
   }
-  const answer = await $.command.run({ command: 'ccrig', args: 'uninstall' })
+  const answer = await $.command.run(ccrig('uninstall'))
   expect(answer.text).toMatch(/^No \/ccrig uninstall\./)
   expect(seen.runs.length).toBe(before)
 })
@@ -167,7 +179,7 @@ test('/ccrig never passes a flag through to the CLI', async ($, on) => {
 test('/ccrig name runs at the project root', async ($, on) => {
   const { seen } = setup(on)
   await start($)
-  await $.command.run({ command: 'ccrig', args: 'name auth work' })
+  await $.command.run(ccrig('name auth work'))
   const run = seen.runs.find((r) => r.argv.includes('name'))
   expect(run!.argv.slice(-3)).toEqual(['name', 'auth', 'work'])
   expect(run!.init.cwd).toBe('/work')
@@ -177,7 +189,7 @@ test('/ccrig alone sums up the session', async ($, on) => {
   setup(on, { settings: WIRED })
   await start($)
   await measure($, 63)
-  const answer = await $.command.run({ command: 'ccrig', args: '' })
+  const answer = await $.command.run(ccrig(''))
   expect(answer.text).toMatch(/^Opus 5\.5 · ctx 42% · session 63% \(resets .+\) · \$1\.25$/)
 })
 
@@ -186,7 +198,7 @@ test('/ccrig usage opens a pane with the bars, the pace line and a copy button',
   const { seen } = setup(on, { rig: JSON.stringify({ v: '1.8.0', segments: [], widths: [], state }) })
   await start($)
   await measure($, 63)
-  const answer = await $.command.run({ command: 'ccrig', args: 'usage' })
+  const answer = await $.command.run(ccrig('usage'))
   expect(answer).toEqual({})
   expect(seen.opened).toContain('ccrig-usage')
   for (const surface of ['terminal', 'desktop'] as const) {
@@ -234,8 +246,8 @@ test('a VS Code session draws nothing and starts no timer', async ($, on) => {
 test('the Desktop app without process.run: one attempt, then a Desktop reply', async ($, on) => {
   const { seen } = setup(on, { noNode: true })
   await start($, 'desktop', true)
-  const status = await $.command.run({ command: 'ccrig', args: 'status' })
-  const board = await $.command.run({ command: 'ccrig', args: 'board' })
+  const status = await $.command.run(ccrig('status'))
+  const board = await $.command.run(ccrig('board'))
   expect(seen.runs.length).toBe(2)
   expect(seen.runs.map((r) => r.argv[0])).toEqual(['node', 'node.exe'])
   expect(status.text).toContain('Desktop app')
@@ -251,7 +263,7 @@ test('on Windows the mod finds node.exe when a bare node does not start, and sti
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: 'my-app' })).toBeDefined()
   await ui.unmount()
-  await $.command.run({ command: 'ccrig', args: 'status' })
+  await $.command.run(ccrig('status'))
   const bins = seen.runs.map((r) => r.argv[0])
   expect(bins.slice(0, 2)).toEqual(['node', 'node.exe'])
   expect(bins.slice(2).every((b) => b === 'node.exe')).toBe(true)
@@ -384,7 +396,7 @@ test('cadence: one render at start, one a minute, one per measure, none per turn
   await measure($, 40)
   await settle()
   expect(renders(seen)).toBe(3)
-  await $.turn.complete({ turnId: 't', answer: 'ok', durationMs: 10, isAborted: false, usage: null })
+  await $.turn.complete({ turnId: 't', answer: 'ok', durationMs: 10, isAborted: false, reason: 'answer' })
   await settle()
   expect(renders(seen)).toBe(3)
 })
@@ -398,8 +410,8 @@ test('a /config change to the band applies at once, and the node from settings i
   await $.config.set({ key: 'ccrig.band', value: 'always', previous: 'auto', provider: { plugin: 'ccrig', tier: 'user' }, origin: { kind: 'composer' } })
   await settle()
   expect(renders(seen)).toBe(1)
-  expect(seen.runs[0].argv[0]).toBe('C:/Program Files/nodejs/node.exe')
-  expect(seen.runs[0].init.env).toMatchObject({ CCRIG_PURE: '1' })
+  expect(seen.runs[0]?.argv[0]).toBe('C:/Program Files/nodejs/node.exe')
+  expect(seen.runs[0]?.init.env).toMatchObject({ CCRIG_PURE: '1' })
   await $.config.set({ key: 'ccrig.band', value: 'off', previous: 'always', provider: { plugin: 'ccrig', tier: 'user' }, origin: { kind: 'composer' } })
   await measure($, 97)
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
@@ -410,9 +422,9 @@ test('a /config change to the band applies at once, and the node from settings i
 test('the /ccrig:* markdown commands are hidden from the menu, others are not', async ($, on) => {
   setup(on)
   on('command.describe', ($, e) => ({ description: e.description, isHidden: e.isHidden }))
-  const legacy = await $.command.describe({ command: 'ccrig:doctor', description: 'x', isHidden: false, immediate: false })
+  const legacy = await $.command.describe({ command: 'ccrig:doctor', description: 'x', isHidden: false, immediate: false, provider: { plugin: 'ccrig', tier: 'user' } })
   expect(legacy.isHidden).toBe(true)
-  const other = await $.command.describe({ command: 'review', description: 'y', isHidden: false, immediate: false })
+  const other = await $.command.describe({ command: 'review', description: 'y', isHidden: false, immediate: false, provider: { plugin: 'ccrig', tier: 'user' } })
   expect(other.isHidden).toBe(false)
 })
 
@@ -495,9 +507,9 @@ test('autopilot off: PreCompact checkpoints nothing, a resume still gets its con
   on('classic.PreCompact', () => ({}))
   on('classic.SessionStart', () => ({}))
   await start($)
-  await $.classic.PreCompact({ hook_event_name: 'PreCompact', session_id: 's', transcript_path: '/t', cwd: '/w', trigger: 'auto' })
+  await $.classic.PreCompact({ session_id: 's', transcript_path: '/t', cwd: '/w', trigger: 'auto', custom_instructions: null })
   expect(hookRuns(seen)).toEqual([])
-  const result = await $.classic.SessionStart({ hook_event_name: 'SessionStart', session_id: 's', transcript_path: '/t', cwd: '/w', source: 'resume' })
+  const result = await $.classic.SessionStart({ session_id: 's', transcript_path: '/t', cwd: '/w', source: 'resume' })
   expect(result.additionalContext).toEqual(['You hit the limit at step 3.'])
   expect(hookRuns(seen)).toEqual(['session-start'])
 })
@@ -508,7 +520,7 @@ test('after /clear the band renders the new session', async ($, on) => {
   on('classic.SessionStart', () => ({}))
   await start($)
   sid = 'sess-2'
-  await $.classic.SessionStart({ hook_event_name: 'SessionStart', session_id: 'sess-2', transcript_path: '/t2', cwd: '/work2', source: 'clear' })
+  await $.classic.SessionStart({ session_id: 'sess-2', transcript_path: '/t2', cwd: '/work2', source: 'clear' })
   await settle()
   const last = seen.runs.filter((r) => r.argv.length === 2).at(-1)
   expect(JSON.parse(last!.init.stdin!)).toMatchObject({ session_id: 'sess-2', transcript_path: '/t2' })
@@ -522,7 +534,7 @@ test('SessionEnd runs the board cleanup first, with a short timeout', async ($, 
     return {}
   })
   await start($)
-  await $.classic.SessionEnd({ hook_event_name: 'SessionEnd', session_id: 's', transcript_path: '/t', cwd: '/w', reason: 'prompt_input_exit' })
+  await $.classic.SessionEnd({ session_id: 's', transcript_path: '/t', cwd: '/w', reason: 'prompt_input_exit' })
   const ends = seen.order.filter((x) => x === 'core' || x.includes('--hook session-end'))
   expect(ends).toEqual(['run:--hook session-end', 'core'])
   const run = seen.runs.find((r) => r.argv.includes('session-end'))
@@ -565,7 +577,7 @@ test('/ccrig autopilot notify cancels a pending resume', async ($, on) => {
   const { seen, clock } = setup(on, { config: '{"autopilot":"resume"}', hookOut: '{"prompt":"x"}' })
   await start($)
   await measure($, 96)
-  await $.command.run({ command: 'ccrig', args: 'autopilot notify' })
+  await $.command.run(ccrig('autopilot notify'))
   await clock.advance(2 * HOUR + 30000)
   await settle()
   expect(hookRuns(seen)).not.toContain('mod-resume')
@@ -576,6 +588,6 @@ test('closing the terminal with autopilot on resume hands the resume to the watc
   const { seen } = setup(on, { config: '{"autopilot":"resume"}' })
   on('classic.SessionEnd', () => ({}))
   await start($)
-  await $.classic.SessionEnd({ hook_event_name: 'SessionEnd', session_id: 'sess-1', transcript_path: '/t', cwd: '/w', reason: 'prompt_input_exit' })
+  await $.classic.SessionEnd({ session_id: 'sess-1', transcript_path: '/t', cwd: '/w', reason: 'prompt_input_exit' })
   expect(hookRuns(seen)).toEqual(['mod-exit'])
 })
