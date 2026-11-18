@@ -47,7 +47,7 @@ export function xterm256(n: number): string {
   if (n < 232) {
     const level = [0, 95, 135, 175, 215, 255]
     const i = n - 16
-    return '#' + hex(level[Math.floor(i / 36)]) + hex(level[Math.floor(i / 6) % 6]) + hex(level[i % 6])
+    return '#' + hex(level[Math.floor(i / 36)] ?? 0) + hex(level[Math.floor(i / 6) % 6] ?? 0) + hex(level[i % 6] ?? 0)
   }
   const v = 8 + (n - 232) * 10
   return '#' + hex(v) + hex(v) + hex(v)
@@ -77,17 +77,19 @@ export function ansiToSpans(s: string): Span[] {
   while ((m = re.exec(s))) {
     push(s.slice(last, m.index))
     last = re.lastIndex
-    const codes = m[1] === '' ? [0] : m[1].split(';').map(Number)
+    const params = m[1] ?? ''
+    const codes = params === '' ? [0] : params.split(';').map(Number)
     for (let i = 0; i < codes.length; i++) {
       const k = codes[i]
+      if (k === undefined) break
       if (k === 0) { color = undefined; bold = false }
       else if (k === 1) bold = true
       else if (k === 22) bold = false
       else if (k === 39) color = undefined
-      else if (k === 38 && codes[i + 1] === 5) { color = xterm256(codes[i + 2]); i += 2 }
+      else if (k === 38 && codes[i + 1] === 5) { color = xterm256(codes[i + 2] ?? -1); i += 2 }
       else if (k === 38 && codes[i + 1] === 2) {
         const hex = (v: number) => Math.max(0, Math.min(255, v | 0)).toString(16).padStart(2, '0')
-        color = '#' + hex(codes[i + 2]) + hex(codes[i + 3]) + hex(codes[i + 4]); i += 4
+        color = '#' + hex(codes[i + 2] ?? 0) + hex(codes[i + 3] ?? 0) + hex(codes[i + 4] ?? 0); i += 4
       } else if (k >= 30 && k <= 37) color = xterm256(k - 30)
       else if (k >= 90 && k <= 97) color = xterm256(k - 82)
     }
@@ -215,7 +217,10 @@ export function fmtReset(resetsAt: string | undefined, nowMs: number): string {
 // "claude-opus-5-5[1m]" reads as "Opus 5.5"; anything else is shown as given, minus the window tag
 export function displayModel(model: string): string {
   const m = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?/i.exec(model || '')
-  if (m) return m[1][0].toUpperCase() + m[1].slice(1) + ' ' + m[2] + (m[3] ? '.' + m[3] : '')
+  if (m) {
+    const [, family = '', major = '', minor] = m
+    return family.charAt(0).toUpperCase() + family.slice(1) + ' ' + major + (minor ? '.' + minor : '')
+  }
   return String(model || '').replace(/\s*\[1m\]/i, '').replace(/\s*\(1M context\)/i, '').trim()
 }
 
@@ -413,7 +418,7 @@ export function detectWiring(settings: unknown): { statusLine: boolean; hooks: s
   const hooks = new Set<string>()
   for (const cmd of ourHookCommands(s)) {
     const m = /--hook\s+([a-z-]+)/.exec(cmd)
-    if (m) hooks.add(m[1])
+    if (m?.[1]) hooks.add(m[1])
   }
   return { statusLine, hooks: [...hooks].sort() }
 }
@@ -515,14 +520,16 @@ export const USAGE: Record<string, string> = {
 
 export function cliArgs(sub: string, rest: readonly string[]): { argv: string[] } | { error: string } {
   if (BARE.has(sub)) return rest.length ? { error: 'usage: /ccrig ' + sub + '  (it takes no arguments)' } : { argv: [sub] }
-  if (CHOICES[sub]) {
-    return rest.length === 1 && CHOICES[sub].includes(rest[0]) ? { argv: [sub, rest[0]] } : { error: USAGE[sub] }
+  const choices = CHOICES[sub]
+  if (choices) {
+    const pick = rest[0]
+    return rest.length === 1 && pick !== undefined && choices.includes(pick) ? { argv: [sub, pick] } : { error: USAGE[sub] ?? '' }
   }
   // `update` reads naturally; under the mod it checks and names the /plugin command that updates
   if (sub === 'update') return rest.length ? { error: 'usage: /ccrig update  (it takes no arguments)' } : { argv: ['check-update'] }
   if (sub === 'name') {
     const label = rest.join(' ')
-    if (!rest.length || rest.some((t) => t.startsWith('-')) || label.length > 18) return { error: USAGE.name }
+    if (!rest.length || rest.some((t) => t.startsWith('-')) || label.length > 18) return { error: USAGE.name ?? '' }
     return { argv: ['name', ...rest] }
   }
   return { error: 'No /ccrig ' + sub + '.' }
