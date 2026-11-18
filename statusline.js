@@ -2632,7 +2632,7 @@ if (require.main !== module) {
     fetchText, httpGetText, VERSION,
     DEFAULTS, DEFAULT_ORDER, MODES, helpText, watcherCmdMatches, notifySpec, maybeCheckUpdate,
     cleanLabel, padCell, sessionLabel, lampSupersedes, lampFor, lampPings, winLaunch, parseJsonText, profileLabelOf,
-    NOTIFY_MATCHER, burnSlope, parseResetText, limitFromFailure, resumeShell, resumeCmdLine, ambiguousMode, localeHour24, humanText,
+    NOTIFY_MATCHER, isUsageLimitFailure, burnSlope, parseResetText, limitFromFailure, resumeShell, resumeCmdLine, ambiguousMode, localeHour24, humanText,
     _setAmbiguous: (m) => { AMBIG_WIDE = m === 'wide'; },
   };
   return;
@@ -3079,9 +3079,25 @@ function takePauseNote() {
 // and, with autopilot "resume", the same auto-resume a critical render arms. Only a session that has drawn
 // the bar (its renders record usage samples) is relaunched: a claude -p script or an SDK run that hits a
 // limit gets the ticket, never an unattended relaunch, and so does the guardian's own relaunch.
+// Claude Code names the error kind `error` ("rate_limit", "server_error", ...); `error_type` is read too, as a fallback.
+function stopFailureKind(input) { return input && (typeof input.error === 'string' ? input.error : input.error_type); }
+// Claude Code files more than a usage limit under error "rate_limit": a temporary 429 ("not your usage limit"),
+// "high load", missing usage credits, a spend limit. Only a real plan usage limit may checkpoint and arm a
+// resume. The error text says "You've hit your session limit"; failing that, the last render must have seen the
+// window near full. Pure: `lastPct` is the fuller of the session's last two readings (null when none).
+function isUsageLimitFailure(input, lastPct) {
+  const det = input.error_details;
+  const text = [input.error_message, typeof det === 'string' ? det : '', input.last_assistant_message].filter((x) => typeof x === 'string').join(' ');
+  if (/not your (usage )?limit|high load|credits|spend limit|temporarily/i.test(text)) return false;
+  if (/\b(?:hit|reached)\s+your\b[^.\n]*\blimit\b|\b(?:session|weekly|5[- ]?hour|7[- ]?day)\s+limit\b/i.test(text)) return true;
+  return typeof lastPct === 'number' && lastPct >= warnAtOf(CONFIG.thresholds.usage);
+}
 function runHookStopFailure(input) {
   const sid = input && input.session_id;
-  if (!input || input.error_type !== 'rate_limit' || typeof sid !== 'string' || !SID_RE.test(sid) || cfgAutopilot() === 'off') return emitHook({});
+  if (!input || stopFailureKind(input) !== 'rate_limit' || typeof sid !== 'string' || !SID_RE.test(sid) || cfgAutopilot() === 'off') return emitHook({});
+  let lastPct = null;
+  try { const ls = sampleLines(sid); const l = ls.length ? JSON.parse(ls[ls.length - 1]) : null; if (l) lastPct = Math.max(Number(l.s) || 0, Number(l.w) || 0); } catch {}
+  if (!isUsageLimitFailure(input, lastPct)) return emitHook({});
   const lim = limitFromFailure(input, nowSec());
   if (CONFIG.resumeTickets !== false) writeResumeTicket(input, 100, lim.which, lim.reset, true);
   const drewBar = sampleLines(sid).length > 0;
@@ -3094,13 +3110,14 @@ function runHookStopFailure(input) {
   armAutopilot(input, lim.which, 100, lim.reset);
   emitHook({});
 }
-// Which window ran out and when it resets, from (in order): Claude Code's reset_after_seconds, the reset
-// written in the error text ("resets 12:30pm (America/Los_Angeles)", "resets in 2h 5m"), and the reset this
+// Which window ran out and when it resets, from (in order): reset_after_seconds (not in Claude Code's documented payload, read if sent), the reset
+// written in the error text (error_details, or last_assistant_message, the error as the conversation shows it:
+// "resets 12:30pm (America/Los_Angeles)", "resets in 2h 5m"), and the reset this
 // session's last render saw. The window: named in the text, else the one the samples show nearer full,
 // else by how far away the reset is. A reset more than 8 days out, or in the past, is not trusted.
 function limitFromFailure(input, now) {
   const det = input.error_details;
-  const msg = [input.error_message, typeof det === 'string' ? det : (det ? JSON.stringify(det) : '')].filter((x) => typeof x === 'string').join(' ');
+  const msg = [input.error_message, typeof det === 'string' ? det : (det ? JSON.stringify(det) : ''), input.last_assistant_message].filter((x) => typeof x === 'string').join(' ');
   let which = /\b(weekly|week|7[- ]?day)\b/i.test(msg) ? 'weekly' : /\b(session|5[- ]?hour)\b/i.test(msg) ? 'session' : '';
   const ok = (t) => (typeof t === 'number' && Number.isFinite(t) && t > now && t <= now + 8 * 86400 ? Math.round(t) : null);
   const ra = Number(input.reset_after_seconds);

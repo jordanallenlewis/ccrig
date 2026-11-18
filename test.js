@@ -3933,8 +3933,32 @@ test('--sessions labels a session from its first request when its tail is only t
 // StopFailure: a turn that died on a usage limit the bar never saw coming
 // ===========================================================================
 const SF_NOW = () => Math.floor(Date.now() / 1000);
+// the shape Claude Code sends (hooks reference, "StopFailure input"): error, error_details, last_assistant_message
 const sfInput = (sid, extra = {}) => ({ hook_event_name: 'StopFailure', session_id: sid, transcript_path: '', cwd: '/tmp/proj',
-  error_type: 'rate_limit', error_message: 'Rate limit exceeded', ...extra });
+  error: 'rate_limit', error_details: '429 Too Many Requests', last_assistant_message: "You've hit your session limit · resets in 1h", ...extra });
+
+test('REGRESSION: StopFailure reads the error kind from `error`, the field Claude Code sends', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { autopilot: 'resume' });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  render(baseInput({ session_id: 'sf7', rate_limits: { five_hour: { used_percentage: 95, resets_at: SF_NOW() + 3000 } } }), { env, script });
+  // the docs' sample, word for word apart from the ids
+  const docs = { session_id: 'sf7', transcript_path: '', cwd: '/tmp/proj', hook_event_name: 'StopFailure', error: 'rate_limit',
+    error_details: '429 Too Many Requests', last_assistant_message: 'API Error: Rate limit reached' };
+  assert.strictEqual(run(['--hook', 'stop-failure'], { stdin: JSON.stringify(docs), env, script }).code, 0);
+  assert.ok(fs.existsSync(path.join(sb.cfg, 'resume-tickets', 'sf7.md')), 'resume ticket written');
+  assert.ok(fs.existsSync(path.join(sb.cfg, 'guardian', 'sf7.watch')), 'auto-resume armed at the reset the last render saw');
+    // a plain 429 with the bar nowhere near full is not a usage limit
+  const far = sandbox(); const farEnv = { CLAUDE_CONFIG_DIR: far.cfg, HOME: far.home };
+  render(baseInput({ session_id: 'sf8', rate_limits: { five_hour: { used_percentage: 20, resets_at: SF_NOW() + 3000 } } }), { env: farEnv, script: scriptCopy(far.dir, { autopilot: 'resume' }) });
+  run(['--hook', 'stop-failure'], { stdin: JSON.stringify({ ...docs, session_id: 'sf8' }), env: farEnv, script: scriptCopy(far.dir, { autopilot: 'resume' }) });
+  assert.ok(!fs.existsSync(path.join(far.cfg, 'resume-tickets', 'sf8.md')), 'the docs sample at 20% is not a usage limit');
+  // the limit message Claude Code shows is the error text: its reset is read from there
+  const SL = require(SCRIPT);
+  const now = Math.floor(Date.UTC(2026, 9, 2, 19, 31) / 1000);
+  const lim = SL.limitFromFailure({ session_id: 'nope-2', error: 'rate_limit', last_assistant_message: "You've hit your weekly limit · resets in 2h 5m" }, now);
+  assert.deepStrictEqual(lim, { which: 'weekly', reset: now + 2 * 3600 + 300 });
+});
 
 test('StopFailure: wired with the guardian only on a Claude Code that has it (2.1.78+), and removed on uninstall', () => {
   const sb = sandbox();
@@ -3977,7 +4001,7 @@ test('StopFailure: without reset_after_seconds, the reset comes from the message
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
   const seen = SF_NOW() + 2 * 3600;
   render(baseInput({ session_id: 'sf3', rate_limits: { five_hour: { used_percentage: 70, resets_at: seen } } }), { env, script });
-  run(['--hook', 'stop-failure'], { stdin: JSON.stringify(sfInput('sf3', { error_message: 'Rate limit exceeded' })), env, script });
+  run(['--hook', 'stop-failure'], { stdin: JSON.stringify(sfInput('sf3', { last_assistant_message: "You've hit your session limit" })), env, script });
   const cp = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'guardian', 'sf3.checkpoint.json'), 'utf8'));
   assert.strictEqual(cp.resets_at, seen, 'fell back to the reset the last render saw');
   const SL = require(SCRIPT);
@@ -3988,6 +4012,26 @@ test('StopFailure: without reset_after_seconds, the reset comes from the message
   assert.strictEqual(SL.parseResetText('resets in 2h 5m', now), now + 2 * 3600 + 300);
   assert.strictEqual(SL.parseResetText('Rate limit exceeded', now), null);
   assert.strictEqual(SL.limitFromFailure({ session_id: 'nope-1', error_message: 'weekly limit reached' }, now).which, 'weekly');
+});
+
+test('REGRESSION: error "rate_limit" that is not a plan usage limit arms nothing', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { autopilot: 'resume' });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const texts = [
+    'Server is temporarily limiting requests (not your usage limit)',
+    'Opus is experiencing high load, please use /model to switch to Sonnet',
+    'Usage credits required for 1M context',
+    'spend limit reached · resets Dec 1',
+  ];
+  texts.forEach((t, i) => {
+    const sid = 'nl' + i;
+    render(baseInput({ session_id: sid, rate_limits: { five_hour: { used_percentage: 20, resets_at: SF_NOW() + 14400 } } }), { env, script });
+    run(['--hook', 'stop-failure'], { stdin: JSON.stringify(sfInput(sid, { last_assistant_message: t })), env, script });
+    assert.ok(!fs.existsSync(path.join(sb.cfg, 'resume-tickets', sid + '.md')), 'no ticket: ' + t);
+    assert.ok(!fs.existsSync(path.join(sb.cfg, 'guardian', sid + '.watch')), 'no armed resume: ' + t);
+    assert.ok(!fs.existsSync(path.join(sb.cfg, 'guardian', sid + '.checkpoint.json')), 'no checkpoint: ' + t);
+  });
 });
 
 test('StopFailure: a session that never drew the bar (claude -p, SDK) gets the ticket but no relaunch; other errors and autopilot off do nothing', () => {
@@ -4002,8 +4046,8 @@ test('StopFailure: a session that never drew the bar (claude -p, SDK) gets the t
   render(baseInput({ session_id: 'sf4', rate_limits: { five_hour: { used_percentage: 40, resets_at: SF_NOW() + 3000 } } }), { env, script });
   run(['--hook', 'stop-failure'], { stdin: JSON.stringify(sfInput('sf4', { reset_after_seconds: 3600 })), env: { ...env, CCBSL_UNATTENDED: '1' }, script });
   assert.ok(!fs.existsSync(path.join(sb.cfg, 'guardian', 'sf4.watch')), 'no relaunch loop');
-  run(['--hook', 'stop-failure'], { stdin: JSON.stringify(sfInput('sf5', { error_type: 'overloaded' })), env, script });
-  assert.ok(!fs.existsSync(path.join(sb.cfg, 'resume-tickets', 'sf5.md')), 'overloaded is not a usage limit');
+  run(['--hook', 'stop-failure'], { stdin: JSON.stringify(sfInput('sf5', { error: 'server_error' })), env, script });
+  assert.ok(!fs.existsSync(path.join(sb.cfg, 'resume-tickets', 'sf5.md')), 'server_error is not a usage limit');
   const off = scriptCopy(sandbox().dir, { autopilot: 'off' });
   run(['--hook', 'stop-failure'], { stdin: JSON.stringify(sfInput('sf6', { reset_after_seconds: 60 })), env, script: off });
   assert.ok(!fs.existsSync(path.join(sb.cfg, 'resume-tickets', 'sf6.md')), 'autopilot off: nothing');
