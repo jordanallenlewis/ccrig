@@ -554,3 +554,76 @@ test('localeHour24: which locales write a 24-hour clock', () => {
   assert.strictEqual(SL.localeHour24('en-GB'), true);
   assert.strictEqual(SL.localeHour24('en-US'), false);
 });
+
+// ---------------------------------------------------------------------------
+// ccrig doctor --report: the summary a user pastes into a public issue must not carry their paths or ids.
+// The sample is a status line payload in the shape Claude Code sends (session_id, transcript_path, cwd).
+test('maskReport: hides the home folder, profile names, project folders and session ids', () => {
+  const home = '/home/alice', sid = '2f6c0a3e-8b1d-4c9a-9e57-0d3b6a1f42c7';
+  const payload = {
+    session_id: sid,
+    transcript_path: home + '/.claude-acme/projects/-home-alice-secret-app/' + sid + '.jsonl',
+    cwd: home + '/secret-app',
+    workspace: { current_dir: home + '/secret-app', project_dir: home + '/secret-app' },
+  };
+  const text = [
+    'CCRig v1.10.1 doctor',
+    '  script:  /Users/alice/lib/node_modules/ccrig/statusline.js',
+    '  profile: ' + home + '/.claude-acme',
+    '  FAIL  path(s) in the statusLine command do not exist: ' + home + '/.nvm/versions/node/v20.1.0/bin/node',
+    JSON.stringify(payload),
+  ].join('\n');
+  const out = SL.maskReport(text + '\n  info  statusLine points at a different script: node ' + home + '/secret-app/bar.js', { home, cfg: home + '/.claude-acme', cwd: home + '/secret-app', user: 'alice' });
+  for (const leak of ['alice', 'acme', 'secret-app', sid, home]) assert.ok(!out.includes(leak), leak + ' leaked:\n' + out);
+  assert.match(out, /profile: <profile dir>/);
+  assert.match(out, /~\/\.nvm\/versions\/node\/v20\.1\.0\/bin\/node/, 'the rest of a path under home stays readable');
+  assert.match(out, /projects\/<project>\/<id>\.jsonl/);
+  assert.match(out, /node <cwd>\/bar\.js/, 'the folder it ran from is masked');
+  assert.match(out, /\/Users\/<user>\/lib/, 'the user name as a home folder in another spelling is masked');
+  assert.match(out, /CCRig v1\.10\.1 doctor/, 'text that is not personal stays as it was');
+});
+
+test('maskReport: Windows paths in either slash style, any letter case', () => {
+  const home = 'C:\\Users\\Alice';
+  const text = 'script: C:\\Users\\Alice\\AppData\\Roaming\\npm\\node_modules\\ccrig\\statusline.js\n' +
+    'cmd: "c:/users/alice/.claude-work/x.js"\nprofile: C:\\Users\\Alice\\.claude';
+  const out = SL.maskReport(text, { home, cfg: home + '\\.claude', user: 'Alice' });
+  assert.ok(!/alice|work/i.test(out), 'nothing personal left:\n' + out);
+  assert.match(out, /script: ~\\AppData\\Roaming\\npm/);
+  assert.match(out, /profile: ~\\\.claude$/m, 'the default profile dir is only home-masked');
+});
+
+test('maskReport: a home folder that is the start of another name is left alone', () => {
+  const out = SL.maskReport('/home/al/x and /home/alex/y', { home: '/home/al' });
+  assert.strictEqual(out, '~/x and /home/alex/y');
+  assert.strictEqual(SL.maskReport('plain text', {}), 'plain text', 'no context: unchanged');
+});
+
+test('reportSampleLine: says which usage windows Claude Code last sent, and when', () => {
+  const now = 1_800_000_000;
+  assert.match(SL.reportSampleLine({ t: now - 180, s: 41.5, w: 12 }, now), /3m ago; session window sent, weekly window sent/);
+  assert.match(SL.reportSampleLine({ t: now - 60, s: 41.5, w: null }, now), /session window sent, weekly window missing/);
+  assert.match(SL.reportSampleLine(null, now), /none saved/);
+  assert.match(SL.reportSampleLine({ s: 3 }, now), /none saved/, 'no time: treated as none');
+  assert.ok(!/41\.5|12/.test(SL.reportSampleLine({ t: now - 180, s: 41.5, w: 12 }, now)), 'no usage numbers in the report');
+});
+
+test('maskReport: Git Bash, WSL and 8.3 spellings of a Windows home, and a cwd above home', () => {
+  const home = 'C:\\Users\\John Smith';
+  const text = 'a /c/Users/John Smith/x\nb /mnt/c/Users/John Smith/y\nc C:\\Users\\JOHNSM~1\\AppData\\z\nd C:\\Users\\John Smith\\w';
+  const out = SL.maskReport(text, { home, cfg: home + '\\.claude', cwd: 'C:\\Users', user: 'jsmith' });
+  assert.ok(!/john|smith|JOHNSM/i.test(out), 'nothing personal left:\n' + out);
+  assert.match(out, /^a ~\/x$/m);
+  assert.match(out, /^b ~\/y$/m);
+  assert.match(out, /^c <cwd>\\<user>\\AppData/m);
+  assert.match(out, /^d ~\\w$/m, 'home is masked before the shorter cwd above it');
+});
+
+test('maskReport: a user named like a tool does not mask the tool, and CCRig\'s own folders stay readable', () => {
+  const out = SL.maskReport('/usr/local/bin/node\nC:\\Program Files\\Git\\bin\\bash.exe\n/home/node/.claude-rig-sessions\n/home/node/.claude-usage-ledger/x',
+    { home: '/home/node', user: 'node' });
+  assert.match(out, /^\/usr\/local\/bin\/node$/m);
+  assert.match(SL.maskReport('C:\\Program Files\\Git\\bin\\bash.exe', { home: 'C:\\Users\\Git', user: 'Git' }), /Program Files\\Git\\bin/);
+  assert.match(out, /^~\/\.claude-rig-sessions$/m);
+  assert.match(out, /^~\/\.claude-usage-ledger\/x$/m);
+});

@@ -1267,6 +1267,60 @@ test('--doctor reports guardian hook status', () => {
   assert.match(r.out, /guardian hooks wired/);
 });
 
+test('--doctor --report prints a masked summary to paste into an issue, and writes nothing', () => {
+  const sb = sandbox();
+  const cfg = path.join(sb.home, '.claude-acme');
+  fs.mkdirSync(cfg, { recursive: true });
+  const env = { CLAUDE_CONFIG_DIR: cfg, HOME: sb.home };
+  run(['--install'], { env });
+  // a live render, as Claude Code sends it: saves the Claude Code version and a usage sample
+  const sid = '7d1e4b2a-3c5f-4e6a-8b9c-0a1b2c3d4e5f';
+  const now = Math.floor(Date.now() / 1000);
+  render(baseInput({ session_id: sid, transcript_path: path.join(cfg, 'projects', '-x-secret-app', sid + '.jsonl'),
+    rate_limits: { five_hour: { used_percentage: 37, resets_at: now + 3600 }, seven_day: { used_percentage: 12, resets_at: now + 86400 } } }), { env });
+  const listing = (d) => { const out = []; const walk = (x) => { for (const f of fs.readdirSync(x)) { const p = path.join(x, f); out.push(p + ':' + fs.statSync(p).mtimeMs); if (fs.statSync(p).isDirectory()) walk(p); } }; walk(d); return out.sort().join('\n'); };
+  const before = listing(sb.home);
+  const r = run(['doctor', '--report'], { env });
+  assert.strictEqual(r.code, 0, r.out);
+  assert.strictEqual(listing(sb.home), before, 'the report writes nothing');
+  assert.match(r.out, /```text\n[\s\S]*\n```/, 'one fenced block to copy');
+  assert.match(r.out, /ccrig \d+\.\d+\.\d+ \(standalone install\)/);
+  assert.match(r.out, /\nClaude Code (\d+\.\d+\.\d+|not found \(.*--version printed no version\))\n/);
+  assert.match(r.out, /session window sent, weekly window sent/);
+  assert.match(r.out, /statusLine is configured/, 'the doctor checks are in it');
+  for (const leak of [sb.home, sb.home.replace(/\\/g, '/'), 'acme', sid, 'secret-app']) assert.ok(!r.out.includes(leak), leak + ' leaked:\n' + r.out);
+  assert.ok(!/\b37\b|\b12%/.test(r.out), 'no usage numbers');
+});
+
+test('--doctor --report: the Claude Code version from the CLI, another status line hidden, the demo sample not counted', { skip: process.platform === 'win32' && 'POSIX stub' }, () => {
+  const sb = sandbox();
+  const stub = path.join(sb.dir, 'claude-stub');
+  fs.writeFileSync(stub, '#!/bin/sh\necho "2.1.999 (Claude Code)"\n');
+  fs.chmodSync(stub, 0o755);
+  const script = scriptCopy(sb.dir, { claudeBin: stub, fableLimit: true });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: 'TOKEN=abc123 /srv/client-x/sl.sh' } }));
+  fs.writeFileSync(path.join(sb.cfg, '.ccrig-fable.json'), JSON.stringify({ checkedAt: Date.now(), fetchedAt: Date.now(), pct: 63, resetsAt: Math.floor(Date.now() / 1000) + 86400, name: 'Fable' }));
+  const tmp = fs.mkdtempSync(path.join(sb.dir, 't'));
+  const r0 = run(['--demo'], { env: { ...env, TMPDIR: tmp, TEMP: tmp, TMP: tmp }, script });
+  assert.strictEqual(r0.code, 0);
+  const r = run(['--doctor', '--report'], { env: { ...env, TMPDIR: tmp, TEMP: tmp, TMP: tmp }, script });
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /\nClaude Code 2\.1\.999\n/);
+  assert.match(r.out, /a different command \(not shown in a report\)/);
+  for (const leak of ['abc123', 'client-x']) assert.ok(!r.out.includes(leak), leak + ' leaked');
+  assert.match(r.out, /usage data: none saved yet/, 'the --demo sample is not data from Claude Code');
+  assert.match(r.out, /fable limit: on, a recent number is saved/);
+  assert.ok(!/\b63\s*%/.test(r.out), 'no Fable percentage in a report');
+  assert.match(r.out, /config keys set: claudeBin, fableLimit \(values not shown\)/);
+});
+
+test('--report needs --doctor', () => {
+  const r = run(['--report']);
+  assert.strictEqual(r.code, 1);
+  assert.match(r.out, /--report goes with --doctor/);
+});
+
 test('--options prints the guardian block', () => {
   const r = run(['--options']);
   assert.match(r.out, /guardian/);
