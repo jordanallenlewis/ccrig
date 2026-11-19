@@ -11,6 +11,8 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+## [1.10.1] - 2026-11-19
+
 ### Changed
 - The README says plainly that Claude Code sends status lines no per-model weekly limit, so the opt-in Fable bar is the only way to see that window on the bar, and adds a short "At a glance" list: Node 18 or newer, no dependencies, no network while drawing, which processes CCRig starts and when, colors at your own thresholds, and a reversible install. The Guardian section no longer says the update check is the only background process in `notify` mode: a desktop ping also starts one near a limit.
 
