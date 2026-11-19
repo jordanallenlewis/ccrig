@@ -4508,8 +4508,10 @@ function checkCmdPaths(cmd) {
   return { checked: toks.length, missing };
 }
 // ---- doctor: diagnose the failure modes users actually hit ----
-// out: collect the lines instead of printing them, and return the number of problems (for --report)
-function runDoctor(out) {
+// out: collect the lines instead of printing them, and return the number of problems. report: the run behind
+// --report, which changes nothing (no shells ended, no paused bar restored) and leaves out values a pasted
+// report should not carry (another status line's command, the config parser's quote, Fable numbers and errors).
+function runDoctor(out, report) {
   const w = out || ((t) => process.stdout.write(t));
   let fails = 0;
   const ok = (m) => w('  ok    ' + m + '\n');
@@ -4546,10 +4548,10 @@ function runDoctor(out) {
     else if (!cmd) bad('statusLine is not configured', installKind() === 'mod' ? 'install with npm (npm install -g ccrig && ccrig init), or let the mod draw the bar' : 'run: node "' + __filename + '" --install');
     else {
       ok('statusLine is configured');
-      if (!isOurCmd(cmd)) info('statusLine points at a different script: ' + cmd);
+      if (!isOurCmd(cmd)) info(report ? 'statusLine points at a different command (not shown in a report)' : 'statusLine points at a different script: ' + cmd);
       // check the absolute paths (node binary AND script); an UNQUOTED dead path is caught too
       const slp = checkCmdPaths(cmd);
-      if (slp.missing.length) bad('path(s) in the statusLine command do not exist: ' + slp.missing.join(', ') + ' (moved? node upgrade?)', 're-run: node "' + __filename + '" --install');
+      if (slp.missing.length) bad('path(s) in the statusLine command do not exist: ' + (report && !isOurCmd(cmd) ? '(another command, not shown)' : slp.missing.join(', ')) + ' (moved? node upgrade?)', 're-run: node "' + __filename + '" --install');
       else if (slp.checked) ok('command paths exist (' + slp.checked + ' checked)');
       else info('no absolute paths in the command to check');
       if (sl.refreshInterval) ok('refreshInterval: ' + sl.refreshInterval + 's'); else info('refreshInterval not set: bars update only on session events');
@@ -4557,7 +4559,7 @@ function runDoctor(out) {
   }
   if (fs.existsSync(CONFIG_PATH)) {
     try { parseJsonText(fs.readFileSync(CONFIG_PATH, 'utf8')); ok('statusline.config.json parses'); }
-    catch (e) { bad('statusline.config.json is invalid JSON (' + e.message + '); defaults are in use', 'fix it or delete it'); }
+    catch (e) { bad('statusline.config.json is invalid JSON' + (report ? '' : ' (' + e.message + ')') + '; defaults are in use', 'fix it or delete it'); }
   } else info('no statusline.config.json: defaults in use (customize with --config)');
   if (findBin('git')) ok('git found'); else info('git not found: the git segment stays hidden');
   info('box-drawing glyphs counted ' + (AMBIG_WIDE ? '2 cells wide' : '1 cell wide') + ' (ambiguousWidth: ' + CONFIG.ambiguousWidth + (process.env.CCRIG_AMBIGUOUS ? ', CCRIG_AMBIGUOUS=' + process.env.CCRIG_AMBIGUOUS : '') + ')' + (AMBIG_WIDE ? '' : '; if lines run past the edge in a Japanese, Chinese or Korean terminal, set it to "wide"'));
@@ -4572,10 +4574,11 @@ function runDoctor(out) {
       bad('Git Bash ' + h.why + ' (' + h.bash + '). Claude Code runs every status line through it, so each refresh would leave a stuck bash.exe; CCRig pauses its bar until Git Bash works again',
         'reboot; if it persists, repair or reinstall Git for Windows, or ask IT whether security software is blocking it');
     }
-    const ended = h.bash ? endPids(stuckCcrigShells()) : 0;
+    const ended = h.bash && !report ? endPids(stuckCcrigShells()) : 0;
     if (ended) info('ended ' + ended + ' stuck ' + plural(ended, 'shell') + ' (bash.exe) left by earlier refreshes');
     const p = readPaused();
-    if (p && h.ok) { if (restoreStatusLine(p)) ok('Git Bash works again, so the paused status line is back on'); }
+    if (p && h.ok && report) info('Git Bash works again; ccrig --doctor turns the paused status line back on');
+    else if (p && h.ok) { if (restoreStatusLine(p)) ok('Git Bash works again, so the paused status line is back on'); }
     else if (p) info('status line paused since ' + new Date(p.at).toLocaleString() + '; it comes back by itself once Git Bash works (or run --install)');
     if (h.bash && raw.state === 'ok') {
       const hk = isPlainObject(raw.value.hooks) ? raw.value.hooks : {};
@@ -4650,9 +4653,9 @@ function runDoctor(out) {
   else {
     const fi = readFableInfo(), fw = fableWindow(fi);
     if (!fi || !fi.checkedAt) info('fable limit: on (not checked yet; the next render starts a background check)');
-    else if (fi.error) info('fable limit: on, last check failed: ' + fi.error + (fw.pct != null ? ' (showing ' + Math.round(fw.pct) + '% from earlier)' : ''));
+    else if (fi.error) info('fable limit: on, last check failed' + (report ? '' : ': ' + fi.error + (fw.pct != null ? ' (showing ' + Math.round(fw.pct) + '% from earlier)' : '')));
     else if (fi.none) info('fable limit: on, this plan has no separate Fable limit');
-    else if (fw.pct != null) info('fable limit: on, ' + Math.round(fw.pct) + '% used' + (fw.reset ? ', resets ' + fmtReset(fw.reset) : ''));
+    else if (fw.pct != null) info('fable limit: on, ' + (report ? 'a recent number is saved' : Math.round(fw.pct) + '% used' + (fw.reset ? ', resets ' + fmtReset(fw.reset) : '')));
     else info('fable limit: on, the last number is over 30 minutes old');
   }
   // update system: report the check state + any available version (no network here; reads the cache)
@@ -4685,28 +4688,37 @@ function runDoctor(out) {
 }
 
 // ---- doctor --report: a summary to paste into a bug report. It prints, and that is all: no network, no file. ----
-// pure: hide what a pasted report must not carry. ctx: { home, cfg, cwd, user }. The folder it was run from
-// becomes <cwd> (when it is not home), the home folder becomes ~, a profile dir that is not the default becomes <profile dir>, .claude-<name> becomes .claude-<profile>, a
-// transcript's project folder (projects/<cwd>) becomes projects/<project>, any uuid (session ids) becomes <id>,
-// and the user name as a folder name becomes <user>. A path is matched in either slash style and any case
-// (Windows), and only as a whole folder name, so /home/al never eats the start of /home/alex.
+// pure: hide what a pasted report must not carry. ctx: { home, cfg, cwd, user }. The home folder becomes ~,
+// a profile dir that is not the default becomes <profile dir>, the folder it ran from becomes <cwd> (longest
+// path first, so a cwd above home never splits it), .claude-<name> becomes .claude-<profile>, a transcript's
+// project folder (projects/<cwd>) becomes projects/<project>, any uuid (session ids) becomes <id>, and the user
+// name after home/ or Users/ becomes <user>. Paths match in either slash style, any letter case, and the Git
+// Bash, WSL and Cygwin spellings of a drive path; only as a whole folder name, so /home/al keeps /home/alex.
 function maskReport(text, ctx = {}) {
   const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const END = '(?=$|[\\\\/]|[^A-Za-z0-9._-])';
-  const swap = (s, p, to) => {
-    if (typeof p !== 'string' || p.length < 4) return s;
-    for (const v of [...new Set([p, p.replace(/\\/g, '/'), p.replace(/\//g, '\\')])]) s = s.replace(new RegExp(esc(v) + END, 'gi'), to);
-    return s;
+  const trim = (p) => (typeof p === 'string' ? p.replace(/[\\/]+$/, '') : '');
+  const norm = (p) => p.replace(/\\/g, '/').toLowerCase();
+  const forms = (p) => {
+    const out = [p, p.replace(/\\/g, '/'), p.replace(/\//g, '\\')];
+    const m = /^([A-Za-z]):[\\/](.*)$/.exec(p);
+    if (m) { const rest = m[2].replace(/\\/g, '/'); for (const pre of ['/', '/mnt/', '/cygdrive/']) out.push(pre + m[1] + '/' + rest); }
+    return out;
   };
+  const home = trim(ctx.home), cfg = trim(ctx.cfg), cwd = trim(ctx.cwd);
+  const swaps = [];
+  if (home.length > 3) swaps.push([home, '~']);
+  if (cfg.length > 3 && norm(cfg) !== norm(home) + '/.claude') swaps.push([cfg, '<profile dir>']);
+  if (cwd.length > 3 && norm(cwd) !== norm(home)) swaps.push([cwd, '<cwd>']);
+  const all = swaps.flatMap(([p, to]) => [...new Set(forms(p))].map((v) => [v, to])).sort((x, y) => y[0].length - x[0].length);
   let s = String(text == null ? '' : text);
-  const norm = (p) => (typeof p === 'string' ? p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() : '');
-  if (ctx.cwd && norm(ctx.cwd) !== norm(ctx.home)) s = swap(s, ctx.cwd, '<cwd>');
-  if (ctx.cfg && norm(ctx.cfg) !== norm(ctx.home) + '/.claude') s = swap(s, ctx.cfg, '<profile dir>');
-  s = swap(s, ctx.home, '~');
-  s = s.replace(/\.claude-[^\s\\/'"`),;:]+/g, '.claude-<profile>');
+  s = s.replace(/((?:^|[\\/])Users[\\/])[^\\/\s'"`]*~\d+/gi, '$1<user>'); // 8.3 short names (C:\Users\JOHNSM~1), before a cwd above home cuts the path
+  for (const [v, to] of all) s = s.replace(new RegExp(esc(v) + END, 'gi'), to);
+  s = s.replace(/\.claude-(?!(?:rig-sessions|usage-ledger)(?![^\s\\/'"`),;:]))[^\s\\/'"`),;:]+/g, '.claude-<profile>');
   s = s.replace(/(projects[\\/])[^\\/\s'"`]+/g, '$1<project>');
   s = s.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '<id>');
-  if (typeof ctx.user === 'string' && ctx.user.length > 1) s = s.replace(new RegExp('([\\\\/])' + esc(ctx.user) + END, 'gi'), '$1<user>');
+  const names = [...new Set([ctx.user, home.replace(/\\/g, '/').split('/').pop()].filter((n) => typeof n === 'string' && n.length > 1))];
+  for (const n of names) s = s.replace(new RegExp('((?:^|[\\\\/])(?:home|Users)[\\\\/])' + esc(n) + END, 'gi'), '$1<user>');
   return s;
 }
 // pure: the newest usage sample (the forecast's history) as one line: which windows Claude Code sent, and
@@ -4716,22 +4728,41 @@ function reportSampleLine(smp, nowSec) {
   const has = (v) => (typeof v === 'number' ? 'sent' : 'missing');
   return 'usage data: last saved ' + ageText((nowSec - smp.t) * 1000) + '; session window ' + has(smp.s) + ', weekly window ' + has(smp.w);
 }
+// the newest saved usage sample, read without creating anything (the cache dir rules of cacheDir()), and never
+// the one --demo writes, which would read as real data from Claude Code
 function newestSample() {
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  const demo = 'ccbsl-usage-' + strHash('ccbsl-demo') + '.jsonl';
   let best = null;
-  try {
-    const d = cacheDir();
-    for (const f of fs.readdirSync(d)) {
-      if (!f.startsWith('ccbsl-usage-') || !f.endsWith('.jsonl')) continue;
-      try { const p = path.join(d, f), m = fs.statSync(p).mtimeMs; if (!best || m > best.m) best = { p, m }; } catch {}
-    }
-  } catch {}
+  for (const d of [path.join(os.tmpdir(), 'ccrig-' + (uid == null ? 'user' : uid)), path.join(CFG, '.cache')]) {
+    try {
+      const st = fs.lstatSync(d);
+      if (!st.isDirectory() || st.isSymbolicLink() || (uid != null && st.uid !== uid)) continue;
+      for (const f of fs.readdirSync(d)) {
+        if (!f.startsWith('ccbsl-usage-') || !f.endsWith('.jsonl') || f === demo) continue;
+        try { const p = path.join(d, f), m = fs.statSync(p).mtimeMs; if (!best || m > best.m) best = { p, m }; } catch {}
+      }
+    } catch {}
+  }
   if (!best) return null;
   try { const ls = fs.readFileSync(best.p, 'utf8').split('\n').filter(Boolean); return parseJsonText(ls[ls.length - 1]); } catch { return null; }
 }
+// Claude Code's version for the report: on Windows what the bar last saw (or the CLI); elsewhere the CLI
+// itself, started directly with no shell
+function reportCcVersion() {
+  if (process.platform === 'win32') return ccVersion();
+  const b = claudeBin(), bin = path.isAbsolute(b) ? b : findBin(b);
+  if (!bin) return null;
+  try {
+    const r = require('child_process').spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] });
+    const m = /(\d+\.\d+\.\d+)/.exec(String(r.stdout || ''));
+    return m ? m[1] : null;
+  } catch { return null; }
+}
 function runReport() {
   const doc = [];
-  try { runDoctor((t) => doc.push(t)); } catch (e) { doc.push('doctor crashed: ' + e.message + '\n'); }
-  let cc = null; try { cc = ccVersion(); } catch {}             // what the bar last saw (Windows), else claude --version
+  try { runDoctor((t) => doc.push(t), true); } catch (e) { doc.push('doctor crashed: ' + e.message + '\n'); }
+  let cc = null; try { cc = reportCcVersion(); } catch {}
   const mm = modMarker();
   let keys = 'none (defaults in use)';
   try {

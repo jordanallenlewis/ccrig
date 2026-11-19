@@ -1292,6 +1292,29 @@ test('--doctor --report prints a masked summary to paste into an issue, and writ
   assert.ok(!/\b37\b|\b12%/.test(r.out), 'no usage numbers');
 });
 
+test('--doctor --report: the Claude Code version from the CLI, another status line hidden, the demo sample not counted', { skip: process.platform === 'win32' && 'POSIX stub' }, () => {
+  const sb = sandbox();
+  const stub = path.join(sb.dir, 'claude-stub');
+  fs.writeFileSync(stub, '#!/bin/sh\necho "2.1.999 (Claude Code)"\n');
+  fs.chmodSync(stub, 0o755);
+  const script = scriptCopy(sb.dir, { claudeBin: stub, fableLimit: true });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: 'TOKEN=abc123 /srv/client-x/sl.sh' } }));
+  fs.writeFileSync(path.join(sb.cfg, '.ccrig-fable.json'), JSON.stringify({ checkedAt: Date.now(), fetchedAt: Date.now(), pct: 63, resetsAt: Math.floor(Date.now() / 1000) + 86400, name: 'Fable' }));
+  const tmp = fs.mkdtempSync(path.join(sb.dir, 't'));
+  const r0 = run(['--demo'], { env: { ...env, TMPDIR: tmp, TEMP: tmp, TMP: tmp }, script });
+  assert.strictEqual(r0.code, 0);
+  const r = run(['--doctor', '--report'], { env: { ...env, TMPDIR: tmp, TEMP: tmp, TMP: tmp }, script });
+  assert.strictEqual(r.code, 0, r.out);
+  assert.match(r.out, /\nClaude Code 2\.1\.999\n/);
+  assert.match(r.out, /a different command \(not shown in a report\)/);
+  for (const leak of ['abc123', 'client-x']) assert.ok(!r.out.includes(leak), leak + ' leaked');
+  assert.match(r.out, /usage data: none saved yet/, 'the --demo sample is not data from Claude Code');
+  assert.match(r.out, /fable limit: on, a recent number is saved/);
+  assert.ok(!/63/.test(r.out), 'no Fable percentage in a report');
+  assert.match(r.out, /config keys set: claudeBin, fableLimit \(values not shown\)/);
+});
+
 test('--report needs --doctor', () => {
   const r = run(['--report']);
   assert.strictEqual(r.code, 1);
