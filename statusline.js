@@ -2332,7 +2332,7 @@ function profileSeg() {
   return isRefined() ? c(col, '●') + ' ' + c(col, label) : c(col, '👤 ' + label);
 }
 
-// billing path: `rate_limits` is sent ONLY to Claude.ai subscribers (Pro/Max);
+// billing path: `rate_limits.five_hour`/`seven_day` are sent ONLY to Claude.ai subscribers (Pro, Max, Ultra);
 // an API key means pay-per-token. Unknown (e.g. before the first response) → hide.
 // Refined: the segment's job is to say when a key is billing you per token, so it shows `api` in the
 // plain text color (a key is not a hazard), and `sub` only with "billing": "always" (on every render it
@@ -4580,9 +4580,10 @@ function runDoctor() {
       if (shellForm) info('CCRig hooks run through Git Bash; ' + (v && !semverGt(EXEC_HOOKS_SINCE, v) ? 're-run --install so they start node directly' : 'Claude Code ' + EXEC_HOOKS_SINCE + ' or newer can run them without it'));
     }
   }
-  // subscription-only features: rate_limits is only in stdin for Claude.ai Pro/Max
-  if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) info('API key detected: usage bars, forecast, and auto-resume are subscription-only (they need rate_limits, which Claude Code sends only to Pro/Max); you still get context/git/cost/model');
-  else info('usage bars/forecast/auto-resume need a Claude.ai Pro/Max subscription (rate_limits in stdin); if they stay blank on a subscription, the stdin schema may have changed');
+  // subscription-only features: Claude Code puts rate_limits in stdin only for Claude.ai Pro, Max and Ultra
+  // (session/weekly windows) or behind a Claude apps gateway with a spend limit (spend_limit), after the first reply
+  if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) info('API key detected: session/weekly bars, forecast, and auto-resume need a Claude.ai Pro, Max or Ultra plan; behind a Claude apps gateway with a spend limit you get the spend bar; you still get context/git/cost/model');
+  else info('session/weekly bars, forecast, and auto-resume need a Claude.ai Pro, Max or Ultra plan (rate_limits in stdin, after the first reply); behind a Claude apps gateway with a spend limit you get the spend bar; if they stay blank on one of those, the stdin schema may have changed');
   // guardian: report which lifecycle hooks are wired, and whether claude is reachable for auto-resume
   if (raw.state === 'ok') {
     const hooks = isPlainObject(raw.value.hooks) ? raw.value.hooks : {};

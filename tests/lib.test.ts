@@ -211,6 +211,7 @@ test('the native line and the summary use Claude Code figures', () => {
   expect(text[3]).toBe('$0.50')
   expect(summaryLine('claude-opus-5-5', usage, NOW)).toMatch(/^Opus 5\.5 · ctx 42% · session 63% \(resets .+\) · \$0\.50$/)
   expect(summaryLine('', null, NOW)).toContain('no plan usage yet')
+  expect(summaryLine('', null, NOW)).toContain('Pro, Max or Ultra plan, or behind a Claude apps gateway with a spend limit')
 })
 
 test('small helpers', () => {

@@ -11,6 +11,9 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+### Fixed
+- `ccrig --doctor`, the README and the mod's usage pane now name the plans Claude Code sends usage limits to: Pro, Max and Ultra. They said "Pro/Max", so an Ultra subscriber whose bars were still blank read it as "your plan is not supported". The doctor also says that behind a Claude apps gateway with a spend limit you get the spend bar.
+
 ## [1.10.1] - 2026-11-19
 
 ### Changed

@@ -1244,6 +1244,20 @@ test('--autopilot and --keep-working setters write config and reject junk', () =
   assert.strictEqual(run(['--keep-working', 'maybe'], { env, script }).code, 1);
 });
 
+test('REGRESSION: --doctor names the plans Claude Code sends rate_limits to (Pro, Max and Ultra, or a gateway spend limit)', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  run(['--install'], { env });
+  for (const extra of [{}, { ANTHROPIC_API_KEY: 'sk-test' }]) {
+    const r = run(['--doctor'], { env: { ...env, ...extra } });
+    assert.match(r.out, /Pro, Max or Ultra/, 'doctor names Ultra');
+    assert.match(r.out, /gateway with a spend limit/, 'doctor names the gateway spend limit');
+    assert.strictEqual(/API key detected/.test(r.out), Boolean(extra.ANTHROPIC_API_KEY), 'the API key branch runs only with a key');
+    assert.ok(!/Pro\/Max|Pro or Max/.test(r.out), 'no "Pro/Max" left');
+  }
+  assert.ok(!/Pro\/Max|Pro or Max/.test(fs.readFileSync(path.join(__dirname, 'README.md'), 'utf8')), 'README: no "Pro/Max" left');
+});
+
 test('--doctor reports guardian hook status', () => {
   const sb = sandbox();
   const script = scriptCopy(sb.dir);
