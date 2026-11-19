@@ -13,7 +13,7 @@ import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
 import type { Span, Seg, Usage, RateLimit, ModState } from './lib'
 import {
-  CHANGES_BAR, COLOR, HELP, alertFor, alertKey, ansiToSpans, classicResult, cliArgs, configFrom,
+  CHANGES_BAR, COLOR, HELP, USAGE_PLANS, alertFor, alertKey, ansiToSpans, classicResult, cliArgs, configFrom,
   crossings, detectWiring, fmtReset, liveLimits, nativeSegments, nodeFromSettings, packLines,
   parseRigOutput, plainText, resumeCommand, splitArgs, statusInput, summaryLine, usageSeg,
   windowLabel, withFable, xterm256,
@@ -365,7 +365,7 @@ function usagePane($: EngineInterface, e: RenderInput<'Pane'>) {
   }
   const live = liveLimits(shown(), now)
   for (const r of live) rows.push(line('w-' + r.kind, usageSeg(r, cur().thresholds, now, barWidth).spans))
-  if (!live.length) rows.push(Text({ color: dim, children: ['No plan usage yet. It appears after the first reply on a Pro or Max plan.'] }))
+  if (!live.length) rows.push(Text({ color: dim, children: ['No plan usage yet. It appears after the first reply on ' + USAGE_PLANS + '.'] }))
   const f = cur().forecast
   if (f && f.text) rows.push(Text({ color: xterm256(f.safe ? COLOR.green : COLOR.yellow), children: ['pace: ' + f.text] }))
   if (usage?.cost && typeof usage.cost.usd === 'number') {

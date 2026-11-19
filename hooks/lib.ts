@@ -297,6 +297,9 @@ export function nativeSegments(model: string, usage: Usage | null, t: Thresholds
 }
 
 // one plain line for /ccrig with no arguments
+// who Claude Code sends rate_limits to (its status line docs): subscribers, or a gateway that sets a spend limit
+export const USAGE_PLANS = 'a Pro, Max or Ultra plan, or behind a Claude apps gateway with a spend limit'
+
 export function summaryLine(model: string, usage: Usage | null, nowMs: number): string {
   const parts: string[] = []
   const name = displayModel(model)
@@ -308,7 +311,7 @@ export function summaryLine(model: string, usage: Usage | null, nowMs: number): 
     parts.push(windowLabel(r.kind) + ' ' + Math.round(r.percentUsed) + '%' + (reset ? ' (resets ' + reset + ')' : ''))
   }
   if (usage?.cost && typeof usage.cost.usd === 'number') parts.push('$' + usage.cost.usd.toFixed(2))
-  if (!liveLimits(usage, nowMs).length) parts.push('no plan usage yet (it appears after the first reply on a Pro or Max plan)')
+  if (!liveLimits(usage, nowMs).length) parts.push('no plan usage yet (it appears after the first reply on ' + USAGE_PLANS + ')')
   return parts.join(' · ')
 }
 
