@@ -154,6 +154,16 @@ test('cliArgs passes only the arguments each command takes, and never a flag', (
   }
 })
 
+test('REGRESSION: cliArgs treats built-in object names as unknown commands', () => {
+  // CHOICES and USAGE were plain objects, so `constructor` found Object and `toString` found a function
+  for (const [sub, rest] of [
+    ['constructor', []], ['constructor', ['x']], ['toString', []], ['toString', ['x']],
+    ['hasOwnProperty', ['x']], ['valueOf', []], ['__proto__', []], ['__proto__', ['x']],
+  ] as const) {
+    expect(cliArgs(sub, rest)).toEqual({ error: 'No /ccrig ' + sub + '.' })
+  }
+})
+
 test('statusInput builds the JSON statusline.js reads', () => {
   const input = statusInput({
     sessionId: 'abc-1', transcriptPath: '/t.jsonl', cwd: '/w/app', projectDir: '/w', model: 'claude-opus-5-5[1m]',
