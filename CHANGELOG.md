@@ -11,6 +11,9 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+### Added
+- `ccrig doctor --report` prints a summary to paste into a bug report: the CCRig, Node, OS and Claude Code versions, the terminal, whether the mod is active, which config keys are set (names only), whether Claude Code's last usage data had the session and weekly windows (not the percentages), and every doctor check. Your home folder, user name, profile names, project folders and session ids are masked, and so are another tool's status line command, the Fable numbers and the config parser's quote. It reads your setup, asks `claude --version`, and prints: it sends nothing, writes no file, and unlike `--doctor` it changes nothing on Windows (no stuck shells ended, no paused bar turned back on).
+
 ### Fixed
 - `ccrig --doctor`, the README and the mod's usage pane now name the plans Claude Code sends usage limits to: Pro, Max and Ultra. They said "Pro/Max", so an Ultra subscriber whose bars were still blank read it as "your plan is not supported". The doctor also says that behind a Claude apps gateway with a spend limit you get the spend bar.
 
