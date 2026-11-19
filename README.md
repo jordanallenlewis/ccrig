@@ -99,7 +99,7 @@ The band is shared, so you can build on it. A mod of your own that lists `ccrig`
 - **Billing**: `api` when an API key is billing you per token (`"billing": "always"` under `show` also shows `sub` for a Claude.ai subscription)
 - **Session / weekly usage**: your plan's 5-hour and 7-day windows, each with its reset time
 - **Spend limit**: behind a Claude apps gateway that sets one, how much of it you have used, when it resets, and your spend in dollars once Claude Code has it (`spend ━━━━━━╸─── 63% ↺ 12/1 12:00a · $314.12 / $500`). It turns red with a `▲` from 90% like the other windows, and past the limit it shows the real number, such as `112%`. The guardian does not save a checkpoint or a resume ticket for it
-- **Fable usage** (opt-in, `"fableLimit": true`): Fable's own weekly window, the "Current week (Fable)" row in `/usage`, with its reset time
+- **Fable usage** (opt-in, `"fableLimit": true`): Fable's own weekly window, the "Current week (Fable)" row in `/usage`, with its reset time. Claude Code sends status lines no per-model weekly limit, so this is the only way to have it on the bar ([how it works](#fable-weekly-limit))
 - **Forecast**: when you will hit the wall, projected from your recent burn rate
 - **Near-limit warning**: from 90% a window's meter turns red with a `▲`, and adds `· saved` once the guardian has checkpointed your work; at 95% a line of its own names the exact `claude --resume <session-id>` command, saved in a resume ticket too
 
@@ -110,7 +110,7 @@ The bar fits the terminal it is in. Related items stay on one line when they can
 
 ### Fable weekly limit
 
-Fable has its own weekly limit on top of the all-models one. Claude Code does not send it to status lines, so CCRig shows it only if you turn it on in `statusline.config.json`:
+Fable has its own weekly limit on top of the all-models one. Claude Code sends status lines the 5-hour and 7-day windows (and a spend limit behind a gateway), but no per-model weekly limit, so CCRig shows Fable's only if you turn it on in `statusline.config.json`:
 
 ```json
 { "fableLimit": true }
@@ -119,9 +119,18 @@ Fable has its own weekly limit on top of the all-models one. Claude Code does no
 With it on, a background process (never the bar itself) reads the Claude sign-in token Claude Code saved for this profile (`.credentials.json`, or the login keychain on macOS) and asks `https://api.anthropic.com/api/oauth/usage`, the same endpoint `/usage` reads, for the Fable row. It runs at most once a minute (once every 10 minutes after a failure), sends the token only to that host, never follows a redirect, and never refreshes or writes the token. The answer is cached in `$CLAUDE_CONFIG_DIR/.ccrig-fable.json`, and the bar draws `fable ━━━━━━━━── 81% ↺ Tue 11:00p` from that cache. A number over 30 minutes old is hidden rather than shown stale. Near the warn and critical lines the meter and the rule turn amber and red like the others. Auto-resume does not wait for the Fable reset: at that limit Claude Code stops offering Fable, but the session can carry on with another model.
 
 `ccrig --fetch-fable` runs the check by hand, and `ccrig --doctor` shows the last result. An API-key session has no plan limits, so it never makes the call.
+
+### At a glance
+
+- **Node 18 or newer**, one file, no dependencies.
+- **No network while it draws.** The bar reads the JSON Claude Code hands it and files on your machine.
+- **Light on a busy machine.** Git runs at most once every 10 seconds (`gitCacheMs`), and a redraw in between starts no process. Anything else CCRig starts has a reason you can name: the once-a-day update check, the Fable check when you turn it on, a desktop ping near a limit, and the auto-resume watcher in `resume` mode. A test counts the process starts and file system calls of a warm redraw, and fails if it starts a process or goes over its file budget.
+- **Colors at your thresholds.** By default a usage meter turns amber past 50% and red at 90% (the `warn` line, where the guardian also saves your work), and the context meter amber past 50% and red at 70%. Set your own under `thresholds` in `statusline.config.json`.
+- **Reversible.** `ccrig init` backs up each `settings.json` before it changes it, and `ccrig --uninstall` removes everything it wired.
+
 ## The Guardian (on by default)
 
-The status line tells you a limit is coming; the guardian acts on it. It is on out of the box (`ccrig init` wires it; `--no-guardian` installs just the bar). From 90% of a window it checkpoints your work state (todos, last request, git HEAD) and saves a resume ticket, and keeps that checkpoint **continuously fresh** through the danger band, so a resume reflects your latest completed step rather than a stale snapshot. At 95% it sends a desktop ping (and, in `resume` mode, arms auto-resume). And when a turn dies on a usage limit the bar never saw coming (a background agent or another session used the window up, so no render crossed 95%), Claude Code's `StopFailure` hook tells the guardian, which checkpoints, saves the ticket and arms the same auto-resume at the reset Claude Code reports (Claude Code 2.1.78 or newer). It also brings compaction-proof checkpoints, and cross-profile failover if you opt in (`"ledger": true` plus `"autopilotFailover": true`). The shipped default is `notify`: no relaunch, nothing unattended (the only background process is the once-a-day update check).
+The status line tells you a limit is coming; the guardian acts on it. It is on out of the box (`ccrig init` wires it; `--no-guardian` installs just the bar). From 90% of a window it checkpoints your work state (todos, last request, git HEAD) and saves a resume ticket, and keeps that checkpoint **continuously fresh** through the danger band, so a resume reflects your latest completed step rather than a stale snapshot. At 95% it sends a desktop ping (and, in `resume` mode, arms auto-resume). And when a turn dies on a usage limit the bar never saw coming (a background agent or another session used the window up, so no render crossed 95%), Claude Code's `StopFailure` hook tells the guardian, which checkpoints, saves the ticket and arms the same auto-resume at the reset Claude Code reports (Claude Code 2.1.78 or newer). It also brings compaction-proof checkpoints, and cross-profile failover if you opt in (`"ledger": true` plus `"autopilotFailover": true`). The shipped default is `notify`: no relaunch, nothing unattended, and no watcher waiting in the background.
 
 Turn on hands-free auto-resume and a small detached watcher waits out the reset (surviving laptop sleep) and relaunches the exact session with `claude --resume <id> -p`, continuing at the next step instead of redoing finished work:
 

@@ -11,6 +11,9 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+### Changed
+- The README says plainly that Claude Code sends status lines no per-model weekly limit, so the opt-in Fable bar is the only way to see that window on the bar, and adds a short "At a glance" list: Node 18 or newer, no dependencies, no network while drawing, which processes CCRig starts and when, colors at your own thresholds, and a reversible install. The Guardian section no longer says the update check is the only background process in `notify` mode: a desktop ping also starts one near a limit.
+
 ### Fixed
 - **The mod passes Claude Code's stricter checks again.** From Claude Code 2.1.325 `claude plugin validate --strict` type-checks the mod's code and counts each TypeScript error as a warning, and ours had 156, so the check could not move past 2.1.287. The mod's code and tests are now typed against Claude Code's own declarations, with the same behavior, and CI checks the mod against 2.1.327. The mod still needs Claude Code 2.1.287 or newer.
 - **The guardian now catches a turn that ends on a usage limit.** Claude Code's `StopFailure` hook names the error kind in a field called `error`, but CCRig read `error_type`, so the hook stopped at once: no checkpoint, no resume ticket and no auto-resume when a limit ended a turn the bar had not seen coming. The mod matched on the same wrong field. Both now read `error`. The reset time is also read from the error text Claude Code shows (`last_assistant_message`). Claude Code files other failures under the same `rate_limit` value (a temporary 429 that says it is not your usage limit, high load, missing usage credits, a spend limit), so the guardian acts only when the error text says you hit a session or weekly limit, or the last bar it drew was already at your warn line.
