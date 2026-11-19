@@ -67,10 +67,10 @@ jobs:
           node-version: '22'
       - name: Validate the marketplace, the plugin and the hooks module
         run: |
-          npx -y @anthropic-ai/claude-code@2.1.327 plugin validate . --strict
-          npx -y @anthropic-ai/claude-code@2.1.327 plugin validate .claude-plugin/plugin.json --strict
+          npx -y @anthropic-ai/claude-code@2.1.328 plugin validate . --strict
+          npx -y @anthropic-ai/claude-code@2.1.328 plugin validate .claude-plugin/plugin.json --strict
       - name: Mod tests
-        run: npx -y @anthropic-ai/claude-code@2.1.327 plugin test
+        run: npx -y @anthropic-ai/claude-code@2.1.328 plugin test
 
   verify:
     # the tag is a real release: on main, and every manifest (npm, plugin, marketplace pin) names this version
