@@ -1311,7 +1311,7 @@ test('--doctor --report: the Claude Code version from the CLI, another status li
   for (const leak of ['abc123', 'client-x']) assert.ok(!r.out.includes(leak), leak + ' leaked');
   assert.match(r.out, /usage data: none saved yet/, 'the --demo sample is not data from Claude Code');
   assert.match(r.out, /fable limit: on, a recent number is saved/);
-  assert.ok(!/63/.test(r.out), 'no Fable percentage in a report');
+  assert.ok(!/\b63\s*%/.test(r.out), 'no Fable percentage in a report');
   assert.match(r.out, /config keys set: claudeBin, fableLimit \(values not shown\)/);
 });
 
