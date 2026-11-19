@@ -506,30 +506,31 @@ export function classicResult(stdout: string, base: Record<string, unknown> = {}
 // mod, and a mod cannot drive a TTY menu. `/ccrig update` only checks, and names the /plugin command. No token starting with "-" ever reaches the CLI, so text typed after
 // /ccrig can never become a flag such as --watch or --hook.
 const BARE = new Set(['status', 'doctor', 'sessions', 'version', 'whatsnew', 'options', 'check-update', 'disarm', 'collapse', 'expand', 'toggle'])
-const CHOICES: Record<string, readonly string[]> = {
-  mode: ['minimal', 'normal', 'expanded'],
-  autopilot: ['off', 'notify', 'resume'],
-  'keep-working': ['on', 'off'],
-}
-export const USAGE: Record<string, string> = {
-  mode: 'usage: /ccrig mode <minimal|normal|expanded>',
-  autopilot: 'usage: /ccrig autopilot <off|notify|resume>',
-  'keep-working': 'usage: /ccrig keep-working <on|off>',
-  name: 'usage: /ccrig name <label>  (up to 18 characters)',
-}
+// Maps, not plain objects: a plain object also answers for `constructor`, `toString` and `__proto__`.
+const CHOICES: ReadonlyMap<string, readonly string[]> = new Map([
+  ['mode', ['minimal', 'normal', 'expanded']],
+  ['autopilot', ['off', 'notify', 'resume']],
+  ['keep-working', ['on', 'off']],
+])
+export const USAGE: ReadonlyMap<string, string> = new Map([
+  ['mode', 'usage: /ccrig mode <minimal|normal|expanded>'],
+  ['autopilot', 'usage: /ccrig autopilot <off|notify|resume>'],
+  ['keep-working', 'usage: /ccrig keep-working <on|off>'],
+  ['name', 'usage: /ccrig name <label>  (up to 18 characters)'],
+])
 
 export function cliArgs(sub: string, rest: readonly string[]): { argv: string[] } | { error: string } {
   if (BARE.has(sub)) return rest.length ? { error: 'usage: /ccrig ' + sub + '  (it takes no arguments)' } : { argv: [sub] }
-  const choices = CHOICES[sub]
+  const choices = CHOICES.get(sub)
   if (choices) {
     const pick = rest[0]
-    return rest.length === 1 && pick !== undefined && choices.includes(pick) ? { argv: [sub, pick] } : { error: USAGE[sub] ?? '' }
+    return rest.length === 1 && pick !== undefined && choices.includes(pick) ? { argv: [sub, pick] } : { error: USAGE.get(sub) ?? '' }
   }
   // `update` reads naturally; under the mod it checks and names the /plugin command that updates
   if (sub === 'update') return rest.length ? { error: 'usage: /ccrig update  (it takes no arguments)' } : { argv: ['check-update'] }
   if (sub === 'name') {
     const label = rest.join(' ')
-    if (!rest.length || rest.some((t) => t.startsWith('-')) || label.length > 18) return { error: USAGE.name ?? '' }
+    if (!rest.length || rest.some((t) => t.startsWith('-')) || label.length > 18) return { error: USAGE.get('name') ?? '' }
     return { argv: ['name', ...rest] }
   }
   return { error: 'No /ccrig ' + sub + '.' }
