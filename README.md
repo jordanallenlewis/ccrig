@@ -34,7 +34,7 @@ ccrig init
 | [the Claude Code mod](#or-install-it-as-a-claude-code-mod) | toasts before a limit, usage on the spinner, `/ccrig` with no Claude turn, resume in the same window | you also want those, or want no npm and no `settings.json` edits |
 | [the single file](#install) (below) | the same as npm | you do not use npm |
 
-The npm install and the mod work together without doubling anything up. Update later with `npm install -g ccrig@latest` (or set `"autoUpdate": true` and CCRig installs new releases itself, in the background), and run `ccrig --doctor` if anything looks off. Want just the bar? `ccrig init --no-guardian`.
+The npm install and the mod work together without doubling anything up. Update later with `npm install -g ccrig@latest` (or set `"autoUpdate": true` and CCRig installs new releases itself, in the background), and run `ccrig --doctor` if anything looks off (`ccrig doctor --report` prints a summary to paste into an issue). Want just the bar? `ccrig init --no-guardian`.
 
 No npm? Grab the single file. It needs Node 18 or newer on your PATH (the native Claude Code installer does not include Node). It goes in its own folder, so it never overwrites a `~/.claude/statusline.js` of your own.
 
@@ -206,7 +206,7 @@ source "$(npm root -g)/ccrig/claude-profiles.sh"          # bash / zsh / Git Bas
 | `ccrig init` (`--install`) | wire the bar + guardian into every profile (`--this-profile` for just one; `--no-guardian` for bar only) |
 | `--install-guardian` (`--auto`) | (re)wire the guardian + keep-working; `--auto` turns on hands-free auto-resume |
 | `--uninstall` / `--uninstall-guardian` | remove the status line and guardian, or only the guardian |
-| `--doctor` | diagnose a broken or missing setup |
+| `--doctor` (`--report`) | diagnose a broken or missing setup; `ccrig doctor --report` prints a masked summary to paste into a bug report |
 | `--mode` / `--config` / `--options` | display density, interactive editor, list every setting |
 | `ccrig collapse` / `expand` / `toggle` (`--collapse` / `--expand` / `--toggle`) | fold the CCRig section to one summary line, or open it again; `/ccrig:toggle` does it from inside a session |
 | `--autopilot` / `--keep-working` | limit behavior and keep-working, from the shell |

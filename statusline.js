@@ -2625,7 +2625,7 @@ const argv = process.argv.slice(2);
 // or touch stdin. Direct execution (`node statusline.js`) runs normally below.
 if (require.main !== module) {
   module.exports = {
-    parseFableUsage, fableWindow, spendWindow, toEpochSec,
+    parseFableUsage, fableWindow, spendWindow, toEpochSec, maskReport, reportSampleLine,
     semverGt, modelTier, parseRemoteVersion, parseChangelogTop, inflightAgents,
     computeInflightAgents, latestTodos, latestUserText, dispWidth, glyphWidth, deepMerge,
     truncFolder, fmtReset, resumePromptFromCheckpoint, wrapSegments, bar,
@@ -2656,10 +2656,11 @@ if (argv[0] && !argv[0].startsWith('-')) {
 // validate every flag BEFORE any mode runs: a typo in a modifier (--this-profle, --no-gaurdian) must stop
 // the command, not silently widen it to every profile or wire the guardian. (Claude Code passes no args.)
 if (argv.some((a) => a.startsWith('--'))) {
-  const KNOWN = new Set(['--install', '--install-guardian', '--no-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--options', '--config', '--demo', '--selftest', '--version', '--help', '--cols', '--this-profile', '--auto', '--force', '--hook', '--watch', '--name', '--collapse', '--expand', '--toggle', '--fetch-fable']);
+  const KNOWN = new Set(['--install', '--install-guardian', '--no-guardian', '--uninstall', '--uninstall-guardian', '--doctor', '--mode', '--autopilot', '--keep-working', '--board', '--sessions', '--status', '--disarm', '--purge', '--update', '--check-update', '--whatsnew', '--dismiss-update', '--options', '--config', '--demo', '--selftest', '--version', '--help', '--cols', '--this-profile', '--auto', '--force', '--hook', '--watch', '--name', '--collapse', '--expand', '--toggle', '--fetch-fable', '--report']);
   const unknown = argv.find((a) => a.startsWith('--') && !KNOWN.has(a));
   if (unknown) { process.stdout.write('unknown flag: ' + unknown + '\nRun  ccrig --help  for the flag list.\n'); process.exit(1); }
   if (argv.includes('--auto') && !argv.includes('--install-guardian')) { process.stdout.write('--auto goes with --install-guardian (ccrig --install-guardian --auto).\n'); process.exit(1); }
+  if (argv.includes('--report') && !argv.includes('--doctor')) { process.stdout.write('--report goes with --doctor (ccrig doctor --report).\n'); process.exit(1); }
 }
 
 function helpText() {
@@ -2675,6 +2676,7 @@ function helpText() {
     '  --uninstall-guardian remove only the guardian hooks; keep the status line (all profiles)',
     '  --this-profile       with any install/uninstall command: scope it to the active profile only',
     '  --doctor             diagnose a broken or missing status line + guardian',
+    '  --report             with --doctor: print a summary to paste into a bug report (paths and ids masked)',
     '  --mode <m>           set display density: minimal | normal | expanded',
     '  --collapse / --expand / --toggle   fold the CCRig section to one summary line, or open it again',
     '  --autopilot <m>      limit behaviour: off | notify | resume',
@@ -4506,13 +4508,15 @@ function checkCmdPaths(cmd) {
   return { checked: toks.length, missing };
 }
 // ---- doctor: diagnose the failure modes users actually hit ----
-function runDoctor() {
+// out: collect the lines instead of printing them, and return the number of problems (for --report)
+function runDoctor(out) {
+  const w = out || ((t) => process.stdout.write(t));
   let fails = 0;
-  const ok = (m) => process.stdout.write('  ok    ' + m + '\n');
-  const bad = (m, fix) => { fails++; process.stdout.write('  FAIL  ' + m + (fix ? '\n        fix: ' + fix : '') + '\n'); };
-  const info = (m) => process.stdout.write('  info  ' + m + '\n');
-  process.stdout.write('CCRig v' + VERSION + ' doctor\n');
-  process.stdout.write('  script:  ' + __filename + '\n  profile: ' + CFG + '\n\n');
+  const ok = (m) => w('  ok    ' + m + '\n');
+  const bad = (m, fix) => { fails++; w('  FAIL  ' + m + (fix ? '\n        fix: ' + fix : '') + '\n'); };
+  const info = (m) => w('  info  ' + m + '\n');
+  w('CCRig v' + VERSION + ' doctor\n');
+  w('  script:  ' + __filename + '\n  profile: ' + CFG + '\n\n');
   // legacy conhost (no Windows Terminal, no VS Code) usually draws in Consolas, which lacks some of the bar's glyphs
   if (process.platform === 'win32' && !process.env.WT_SESSION && !process.env.TERM_PROGRAM && CONFIG.glyphs !== 'ascii' && isRefined()) info('this looks like the legacy Windows console; if the bar shows boxes, set "glyphs": "ascii" (or use Windows Terminal)');
   if (AMBIG_WIDE) info('box-drawing glyphs are counted 2 cells wide (ambiguousWidth: ' + CONFIG.ambiguousWidth + '); set "ambiguousWidth": "narrow" if the bar looks too short');
@@ -4675,8 +4679,81 @@ function runDoctor() {
   const elog = path.join(CFG, 'statusline-error.log');
   if (fs.existsSync(elog)) info('a previous run errored; see ' + elog + ' (delete it to clear this note)');
 
-  process.stdout.write(fails ? '\n' + fails + ' problem(s) found.\n' : '\nAll checks passed.\n');
+  w(fails ? '\n' + fails + ' problem(s) found.\n' : '\nAll checks passed.\n');
+  if (out) return fails;
   process.exit(fails ? 1 : 0);
+}
+
+// ---- doctor --report: a summary to paste into a bug report. It prints, and that is all: no network, no file. ----
+// pure: hide what a pasted report must not carry. ctx: { home, cfg, cwd, user }. The folder it was run from
+// becomes <cwd> (when it is not home), the home folder becomes ~, a profile dir that is not the default becomes <profile dir>, .claude-<name> becomes .claude-<profile>, a
+// transcript's project folder (projects/<cwd>) becomes projects/<project>, any uuid (session ids) becomes <id>,
+// and the user name as a folder name becomes <user>. A path is matched in either slash style and any case
+// (Windows), and only as a whole folder name, so /home/al never eats the start of /home/alex.
+function maskReport(text, ctx = {}) {
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const END = '(?=$|[\\\\/]|[^A-Za-z0-9._-])';
+  const swap = (s, p, to) => {
+    if (typeof p !== 'string' || p.length < 4) return s;
+    for (const v of [...new Set([p, p.replace(/\\/g, '/'), p.replace(/\//g, '\\')])]) s = s.replace(new RegExp(esc(v) + END, 'gi'), to);
+    return s;
+  };
+  let s = String(text == null ? '' : text);
+  const norm = (p) => (typeof p === 'string' ? p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() : '');
+  if (ctx.cwd && norm(ctx.cwd) !== norm(ctx.home)) s = swap(s, ctx.cwd, '<cwd>');
+  if (ctx.cfg && norm(ctx.cfg) !== norm(ctx.home) + '/.claude') s = swap(s, ctx.cfg, '<profile dir>');
+  s = swap(s, ctx.home, '~');
+  s = s.replace(/\.claude-[^\s\\/'"`),;:]+/g, '.claude-<profile>');
+  s = s.replace(/(projects[\\/])[^\\/\s'"`]+/g, '$1<project>');
+  s = s.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '<id>');
+  if (typeof ctx.user === 'string' && ctx.user.length > 1) s = s.replace(new RegExp('([\\\\/])' + esc(ctx.user) + END, 'gi'), '$1<user>');
+  return s;
+}
+// pure: the newest usage sample (the forecast's history) as one line: which windows Claude Code sent, and
+// when. Never the percentages: a report says whether the data arrives, not how much of a plan someone used.
+function reportSampleLine(smp, nowSec) {
+  if (!isPlainObject(smp) || typeof smp.t !== 'number') return 'usage data: none saved yet (the forecast is off, or Claude Code has not sent usage limits: it sends them on Pro, Max and Ultra plans after the first reply)';
+  const has = (v) => (typeof v === 'number' ? 'sent' : 'missing');
+  return 'usage data: last saved ' + ageText((nowSec - smp.t) * 1000) + '; session window ' + has(smp.s) + ', weekly window ' + has(smp.w);
+}
+function newestSample() {
+  let best = null;
+  try {
+    const d = cacheDir();
+    for (const f of fs.readdirSync(d)) {
+      if (!f.startsWith('ccbsl-usage-') || !f.endsWith('.jsonl')) continue;
+      try { const p = path.join(d, f), m = fs.statSync(p).mtimeMs; if (!best || m > best.m) best = { p, m }; } catch {}
+    }
+  } catch {}
+  if (!best) return null;
+  try { const ls = fs.readFileSync(best.p, 'utf8').split('\n').filter(Boolean); return parseJsonText(ls[ls.length - 1]); } catch { return null; }
+}
+function runReport() {
+  const doc = [];
+  try { runDoctor((t) => doc.push(t)); } catch (e) { doc.push('doctor crashed: ' + e.message + '\n'); }
+  let cc = null; try { cc = ccVersion(); } catch {}             // what the bar last saw (Windows), else claude --version
+  const mm = modMarker();
+  let keys = 'none (defaults in use)';
+  try {
+    const o = parseJsonText(fs.readFileSync(CONFIG_PATH, 'utf8'));
+    const k = isPlainObject(o) ? Object.keys(o).filter((x) => !x.startsWith('_')).sort() : [];
+    if (k.length) keys = k.join(', ') + ' (values not shown)';
+  } catch (e) { if (e && e.code !== 'ENOENT') keys = 'the file cannot be read'; }
+  const term = process.env.TERM_PROGRAM || (process.env.WT_SESSION ? 'Windows Terminal' : '') || process.env.TERM || 'unknown';
+  const body = [
+    'ccrig ' + VERSION + ' (' + installKind() + ' install)',
+    'node ' + process.versions.node + ', ' + process.platform + ' ' + os.release() + ' ' + process.arch + ', terminal ' + term,
+    'Claude Code ' + (cc || 'not found (' + claudeBin() + ' --version printed no version)'),
+    'mod: ' + (modFresh(mm) ? 'active, v' + mm.v : mm && typeof mm.at === 'number' ? 'last seen ' + ageText(Date.now() - mm.at) : 'not seen'),
+    'config keys set: ' + keys,
+    reportSampleLine(newestSample(), Math.floor(Date.now() / 1000)),
+    '',
+    doc.join('').replace(/\n+$/, ''),
+  ].join('\n');
+  let user = ''; try { user = os.userInfo().username; } catch {}
+  process.stdout.write('Copy the block below into your issue. Your home folder, profile names, project folders and session ids are masked; read it once before you post.\n\n' +
+    '```text\n' + maskReport(body, { home: HOME, cfg: CFG, cwd: process.cwd(), user }) + '\n```\n');
+  process.exit(0);
 }
 
 // what turning the board on or off did to the wired hooks, for the setter and the --config save
@@ -4747,7 +4824,7 @@ if (argv.includes('--install-guardian')) runInstallGuardian();
 if (argv.includes('--uninstall-guardian')) runUninstallGuardian();
 if (argv.includes('--uninstall')) runUninstall();
 if (argv.includes('--doctor')) {
-  try { runDoctor(); } catch (e) { process.stdout.write('doctor crashed: ' + e.message + '\n'); process.exit(1); }
+  try { if (argv.includes('--report')) runReport(); else runDoctor(); } catch (e) { process.stdout.write('doctor crashed: ' + e.message + '\n'); process.exit(1); }
 }
 
 if (argv.includes('--demo')) {
