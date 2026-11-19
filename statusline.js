@@ -72,7 +72,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const VERSION = '1.10.0';
+const VERSION = '1.10.1';
 
 // where updates come from. The npm registry's `latest` decides whether a newer RELEASE exists (a tag push
 // publishes it only after CI passes on all three OSes), and a standalone copy downloads that release's
