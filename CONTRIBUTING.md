@@ -4,6 +4,10 @@ Contributions are welcome: bug fixes, new segments, better platform support,
 docs. Anyone can contribute; you don't need to be a maintainer. The only rule is
 that every change lands through a pull request that a maintainer approves.
 
+Found a bug? Open an issue and paste what `ccrig doctor --report` prints. It
+lists your versions and the doctor's checks, with your home folder, profile names,
+project folders and session ids masked; read it once before you post.
+
 ## How to contribute
 
 1. Clone the repo (`git clone https://github.com/jordanallenlewis/ccrig.git`), or fork it,
