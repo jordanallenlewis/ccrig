@@ -2765,7 +2765,8 @@ function runHookStop(input) {
   const pending = (latestTodos(tp, true) || []).filter((x) => x && x.status !== 'completed'); // full-scan: don't miss todos past the tail
   if (!pending.length) { if (validSid) clearGuardCounters(sid); return emitHook({}); } // done -> allow
   // a trailing question or an explicit hand-off is a real human decision: never talk over it
-  const last = latestAssistantText(tp);
+  // Claude Code's transcript is written asynchronously and can lag when Stop fires; the payload carries the final text
+  const last = typeof input.last_assistant_message === 'string' ? input.last_assistant_message : latestAssistantText(tp);
   if (/\?\s*$/.test(last) || /\b(which would you|which one|should i|do you want|would you like|let me know|please (confirm|choose|decide|clarify|advise)|blocked:?|need (your|you to|a decision|input|clarification)|waiting for|up to you|your call|can't proceed|cannot proceed|awaiting)\b/i.test(last.slice(-320))) {
     if (validSid) clearGuardCounters(sid);                        // fresh burst starts clean after a hand-off
     return emitHook({});
