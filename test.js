@@ -836,6 +836,17 @@ test('keep-working: yields to a trailing question (human decision)', () => {
   assert.strictEqual(r.out.trim(), '', 'does not talk over a question');
 });
 
+test('keep-working: a question in last_assistant_message wins over a lagging transcript', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { keepWorking: true });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const tp = transcript(sb.dir, [todoEntry([{ content: 'B', status: 'pending' }]), asstEntry('working on B now.')]);
+  const r = hookRun('stop', { session_id: 's3', transcript_path: tp, last_assistant_message: 'Which database should I use?' }, { env, script });
+  assert.strictEqual(r.out.trim(), '', 'the payload text is newer than the transcript');
+  const r2 = hookRun('stop', { session_id: 's4', transcript_path: tp }, { env, script });
+  assert.strictEqual(JSON.parse(r2.out).decision, 'block', 'no field: falls back to the transcript');
+});
+
 test('keep-working: stops forcing once progress stalls (stuck guard)', () => {
   const sb = sandbox();
   const script = scriptCopy(sb.dir, { keepWorking: { maxStuck: 2 } });
