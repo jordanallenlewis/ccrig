@@ -4047,6 +4047,24 @@ test('StopFailure: wired with the guardian only on a Claude Code that has it (2.
   assert.ok(hasSlug(o, 'Stop', 'stop'), 'the rest of the guardian is still wired');
 });
 
+test('StopFailure: off Windows the install asks `claude --version` directly (no binary read) and wires it', { skip: process.platform === 'win32' && 'POSIX stub' }, () => {
+  const sb = sandbox();
+  const bin = path.join(sb.dir, 'bin'); fs.mkdirSync(bin, { recursive: true });
+  // a native build is not text: the old lookup read this whole file hunting for a .js path and gave up
+  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\necho "2.1.327 (Claude Code)"\n', { mode: 0o755 });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_CC_VERSION: '', PATH: bin + path.delimiter + process.env.PATH };
+  run(['--install', '--this-profile'], { env });
+  const s = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  assert.ok(hasSlug(s, 'StopFailure', 'stop-failure'), 'StopFailure wired from the CLI version');
+});
+
+test('a render records the Claude Code version on every platform, so install can use it', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_CC_VERSION: '' };
+  render(baseInput({ version: '2.1.329' }), { env });
+  assert.strictEqual(fs.readFileSync(path.join(sb.cfg, '.ccrig-cc-version'), 'utf8').trim(), '2.1.329');
+});
+
 test('StopFailure: a session that drew the bar is checkpointed and armed at the reset Claude Code reports', () => {
   const sb = sandbox();
   const script = scriptCopy(sb.dir, { autopilot: 'resume' });

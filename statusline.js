@@ -4144,20 +4144,30 @@ function migrateHooksToExec() {
   if (wiredBoard) addBoardHooks(raw.value);
   return writeJsonAtomic(settingsPathOf(), raw.value);
 }
+// Ask the claude CLI for its version, no shell. On Windows an npm shim runs through node (winLaunch);
+// elsewhere the binary starts directly (it may be a native executable, so it is never read as text).
+function cliVersion() {
+  let cmd, pre = [];
+  if (process.platform === 'win32') {
+    const L = winLaunch(claudeBin());
+    if (!L) return null;
+    cmd = L.cmd; pre = L.pre;
+  } else {
+    const b = claudeBin();
+    cmd = path.isAbsolute(b) ? b : findBin(b);
+    if (!cmd) return null;
+  }
+  const r = require('child_process').spawnSync(cmd, pre.concat(['--version']), { encoding: 'utf8', timeout: 15000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+  const m = /(\d+\.\d+\.\d+)/.exec(String(r.stdout || ''));
+  return m ? m[1] : null;
+}
 let CC_VERSION_CACHE;
 function ccVersion() {
   if (CC_VERSION_CACHE !== undefined) return CC_VERSION_CACHE;
   CC_VERSION_CACHE = null;
   try { const v = fs.readFileSync(ccVersionFile(), 'utf8').trim(); if (/^\d+\.\d+\.\d+$/.test(v)) return (CC_VERSION_CACHE = v); } catch {}
-  // never rendered under this profile yet: ask the CLI itself (no shell; an npm shim runs through node)
-  try {
-    const L = winLaunch(claudeBin());
-    if (L) {
-      const r = require('child_process').spawnSync(L.cmd, L.pre.concat(['--version']), { encoding: 'utf8', timeout: 15000, windowsHide: true });
-      const m = /(\d+\.\d+\.\d+)/.exec(String(r.stdout || ''));
-      if (m) CC_VERSION_CACHE = m[1];
-    }
-  } catch {}
+  // never rendered under this profile yet: ask the CLI itself
+  try { const v = cliVersion(); if (v) CC_VERSION_CACHE = v; } catch {}
   return CC_VERSION_CACHE;
 }
 function hookExecForm() {
@@ -4747,22 +4757,10 @@ function newestSample() {
   if (!best) return null;
   try { const ls = fs.readFileSync(best.p, 'utf8').split('\n').filter(Boolean); return parseJsonText(ls[ls.length - 1]); } catch { return null; }
 }
-// Claude Code's version for the report: on Windows what the bar last saw (or the CLI); elsewhere the CLI
-// itself, started directly with no shell
-function reportCcVersion() {
-  if (process.platform === 'win32') return ccVersion();
-  const b = claudeBin(), bin = path.isAbsolute(b) ? b : findBin(b);
-  if (!bin) return null;
-  try {
-    const r = require('child_process').spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] });
-    const m = /(\d+\.\d+\.\d+)/.exec(String(r.stdout || ''));
-    return m ? m[1] : null;
-  } catch { return null; }
-}
 function runReport() {
   const doc = [];
   try { runDoctor((t) => doc.push(t), true); } catch (e) { doc.push('doctor crashed: ' + e.message + '\n'); }
-  let cc = null; try { cc = reportCcVersion(); } catch {}
+  let cc = null; try { cc = cliVersion(); } catch {}
   const mm = modMarker();
   let keys = 'none (defaults in use)';
   try {
@@ -5052,9 +5050,9 @@ if (!argv.includes('--config')) {
     // JSON.parse('null')/'42'/'[]' all succeed and overwrite the {} fallback; render() reads
     // input.workspace etc, so coerce anything that is not a plain object back to {}.
     if (!input || typeof input !== 'object' || Array.isArray(input)) input = {};
-    // Windows: the Git Bash watchdog's evidence that the bar is drawing, and the Claude Code version
-    // that decides whether install can wire the hooks without a shell
-    if (process.platform === 'win32' && !MOD_HOST) { rememberCcVersion(input.version); markRendered(); }
+    // the Claude Code version decides which hooks install can wire (every platform); on Windows a draw is
+    // also the Git Bash watchdog's evidence that the bar is drawing
+    if (!MOD_HOST) { rememberCcVersion(input.version); if (process.platform === 'win32') markRendered(); }
     // the mod lays the segments out itself, so it can wrap them to the band and color them natively
     if (MOD_HOST) {
       const w = getWidth() - CONFIG.reserveCols;
