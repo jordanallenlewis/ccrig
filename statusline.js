@@ -2602,7 +2602,7 @@ function demoInput() {
   return {
     session_id: 'ccbsl-demo',
     workspace: { current_dir: '/Users/you/Desktop/my-project', project_dir: '/Users/you/Desktop/my-project' },
-    model: { id: 'claude-opus-4-8[1m]', display_name: 'Opus 4.8 (1M context)' },
+    model: { id: 'claude-opus-5-5[1m]', display_name: 'Opus 5.5 (1M context)' },
     effort: { level: 'high' },
     context_window: { used_percentage: 42 },
     fast_mode: true, thinking: { enabled: false },
@@ -4863,7 +4863,7 @@ if (argv.includes('--demo')) {
   const cols = ci >= 0 ? parseInt(argv[ci + 1], 10) : null;
   DEMO_UPDATE_LATEST = '2.9.9';        // showcase the ⬆ update badge in the preview
   DEMO_AGENTS = 3;                     // showcase the 🤖 subagents segment
-  DEMO_DOWNGRADE = ['Opus 4.8', 'Sonnet 5']; // showcase the ⬇ downgrade alert
+  DEMO_DOWNGRADE = ['Opus 5.5', 'Sonnet 5.5']; // showcase the ⬇ downgrade alert
   DEMO_FABLE = { fetchedAt: Date.now(), pct: 72, resetsAt: Math.floor(Date.now() / 1000) + 3 * 86400, name: 'Fable' }; // showcase the fable meter
   const demo = demoInput();
   // seed a short burn history so the ⏳ forecast segment shows in the preview
@@ -4893,22 +4893,22 @@ if (argv.includes('--selftest')) {
   const now = Math.floor(Date.now() / 1000);
   const cases = {
     'empty stdin': {},
-    'minimal': { model: { display_name: 'Sonnet 5' } },
-    'no upstream repo': { model: { id: 'claude-opus-4-8[1m]', display_name: 'Opus 4.8' }, context_window: { used_percentage: 5 } },
+    'minimal': { model: { display_name: 'Sonnet 5.5' } },
+    'no upstream repo': { model: { id: 'claude-opus-5-5[1m]', display_name: 'Opus 5.5' }, context_window: { used_percentage: 5 } },
     'full': {
       workspace: { current_dir: '/tmp/x', project_dir: '/tmp/x' },
-      model: { id: 'claude-opus-4-8[1m]', display_name: 'Opus 4.8 (1M context)' },
+      model: { id: 'claude-opus-5-5[1m]', display_name: 'Opus 5.5 (1M context)' },
       effort: { level: 'xhigh' }, context_window: { used_percentage: 99 },
       fast_mode: false, thinking: { enabled: false },
       rate_limits: { five_hour: { used_percentage: 10, resets_at: now + 3600 }, seven_day: { used_percentage: 50, resets_at: now + 3 * 86400 } },
     },
     'near-limit': {
-      model: { display_name: 'Sonnet 5' },
+      model: { display_name: 'Sonnet 5.5' },
       rate_limits: { five_hour: { used_percentage: 96, resets_at: now + 900 }, seven_day: { used_percentage: 40, resets_at: now + 4 * 86400 } },
     },
     'cjk names': {
       workspace: { current_dir: '/tmp/日本語プロジェクト', project_dir: '/tmp/日本語プロジェクト' },
-      model: { display_name: 'Opus 4.8' }, session_name: '中文会话名称一二三四五六七八',
+      model: { display_name: 'Opus 5.5' }, session_name: '中文会话名称一二三四五六七八',
       context_window: { used_percentage: 30 },
     },
   };
