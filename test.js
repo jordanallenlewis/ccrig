@@ -1151,6 +1151,29 @@ test('REGRESSION: burn-rate stays accurate at a short span (no epoch-cancellatio
   assert.ok(mins >= 1 && mins <= 5, 'ETA is sane (~2m), not garbage: got ' + mins + 'm'); // cancellation bug gave wild values
 });
 
+test('REGRESSION: a window that rolls over (new reset time) starts the burn history fresh, even when usage drops under 15 points', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const now = Math.floor(Date.now() / 1000);
+  const oldReset = now - 60;
+  // a steep climb in the old window (to 14%), then the window rolls and usage restarts at 6%
+  seedSamples('roll1', [{ t: now - 400, s: 2, rs: oldReset }, { t: now - 300, s: 6, rs: oldReset }, { t: now - 200, s: 10, rs: oldReset }, { t: now - 100, s: 14, rs: oldReset }]);
+  const input = baseInput({ session_id: 'roll1', rate_limits: { five_hour: { used_percentage: 6, resets_at: now + 5 * 3600 } } });
+  render(input, { env });
+  const lines = fs.readFileSync(path.join(CACHE, 'ccbsl-usage-' + strHash('roll1') + '.jsonl'), 'utf8').split('\n').filter(Boolean);
+  assert.strictEqual(lines.length, 1, 'only the new window sample is kept: ' + lines.join(' | '));
+});
+
+test('a reset time that only wobbles by seconds does not throw away the burn history', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const now = Math.floor(Date.now() / 1000);
+  seedSamples('wob1', [{ t: now - 400, s: 2, rs: now + 3600 }, { t: now - 300, s: 6, rs: now + 3600 }, { t: now - 200, s: 10, rs: now + 3601 }, { t: now - 100, s: 14, rs: now + 3600 }]);
+  render(baseInput({ session_id: 'wob1', rate_limits: { five_hour: { used_percentage: 18, resets_at: now + 3602 } } }), { env });
+  const lines = fs.readFileSync(path.join(CACHE, 'ccbsl-usage-' + strHash('wob1') + '.jsonl'), 'utf8').split('\n').filter(Boolean);
+  assert.strictEqual(lines.length, 5);
+});
+
 test('REGRESSION: no forecast for a window that has usage but no reset time', () => {
   const sb = sandbox();
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
