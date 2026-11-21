@@ -608,6 +608,43 @@ test('--doctor tells you keep-working needs the task tools when it is on', () =>
   assert.ok(!off.out.includes('CLAUDE_CODE_ENABLE_TODO_TOOLS'), 'no note when keep-working is off');
 });
 
+test("--doctor shows whether Claude Code's own continue at a usage limit is on", () => {
+  const sb = sandbox();
+  // a claudeBin that does not exist, so no doctor run here ever starts a real claude
+  const script = scriptCopy(sb.dir, { claudeBin: path.join(sb.dir, 'no-claude') });
+  const base = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  run(['--install'], { env: base, script });
+  const sp = path.join(sb.cfg, 'settings.json');
+  const setKey = (v) => {
+    const s = JSON.parse(fs.readFileSync(sp, 'utf8'));
+    if (v === undefined) delete s.autoContinueAtUsageLimit; else s.autoContinueAtUsageLimit = v;
+    fs.writeFileSync(sp, JSON.stringify(s, null, 2));
+  };
+  const line = (cc) => {
+    const out = run(['--doctor'], { env: { ...base, CCRIG_CC_VERSION: cc }, script }).out;
+    return out.split('\n').find((l) => /continue at a usage limit/.test(l)) || '';
+  };
+  setKey(undefined);
+  assert.match(line('2.1.330'), /: on \(Claude Code's default/);
+  setKey(true);
+  assert.match(line('2.1.330'), /: on \(autoContinueAtUsageLimit is true in settings\.json; managed settings can still turn it off\)/);
+  assert.match(line('2.1.234'), /: on \(/, 'the first version that has it');
+  setKey(false);
+  assert.match(line('2.1.330'), /: off \(autoContinueAtUsageLimit is false in settings\.json\)/);
+  setKey('no');
+  assert.match(line('2.1.330'), /is not true or false/);
+  // before 2.1.234 Claude Code has no such wait, whatever the setting says
+  setKey(true);
+  assert.match(line('2.1.233'), /not in Claude Code 2\.1\.233 \(2\.1\.234 or newer\)/);
+  // the version the status line saved is used when no override is set
+  fs.writeFileSync(path.join(sb.cfg, '.ccrig-cc-version'), '2.1.200\n');
+  assert.match(line(''), /not in Claude Code 2\.1\.200/);
+  // version unknown: on only if Claude Code is new enough, and doctor says so
+  fs.unlinkSync(path.join(sb.cfg, '.ccrig-cc-version'));
+  setKey(undefined);
+  assert.match(line(''), /: on if your Claude Code is 2\.1\.234 or newer \(Claude Code's default/);
+});
+
 test('--doctor fails with a fix hint when statusLine is unwired', () => {
   const sb = sandbox();
   fs.writeFileSync(path.join(sb.cfg, 'settings.json'), '{}');
