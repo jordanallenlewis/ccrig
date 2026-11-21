@@ -1,9 +1,11 @@
 name: attribution-guard
 # Jordan's hard rule (2026-11-19): no project of his credits Claude or any other AI, and his own PRs carry only his identity.
-# No secrets. Fails a PR whose title, body or commits carry AI/agent credit or an agent identity.
+# No secrets. Fails a PR (and every push to main) whose title, body or commits carry AI/agent credit or an agent identity.
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
+  push:
+    branches: [main]
 permissions:
   contents: read
 jobs:
@@ -17,50 +19,128 @@ jobs:
           persist-credentials: false
       - name: Check title, body and commits
         env:
+          EVENT: ${{ github.event_name }}
           TITLE: ${{ github.event.pull_request.title }}
           BODY: ${{ github.event.pull_request.body }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           #!/usr/bin/env bash
-          # attribution-guard (Jordan 2026-11-19): fail a PR that credits an AI/agent or carries someone else's identity.
-          # Inputs (env): BASE HEAD (shas), TITLE, BODY, PR_AUTHOR, HEAD_REF. Run inside a full checkout.
+          # attribution-guard (Jordan 2026-11-19): fail a PR or a push to main that credits an AI/agent or carries someone else's identity.
+          # Inputs (env): EVENT (pull_request|push) BASE HEAD (shas), TITLE, BODY, PR_AUTHOR, HEAD_REF. Run inside a full checkout.
+          # Fails closed: a git error, an unreachable base or an empty range is an error, never a pass.
           set -u +e
           JORDAN_RE='^(42820601\+jordanallenlewis@users\.noreply\.github\.com|jordanallenlewis@gmail\.com)$'
           COMMITTER_OK_RE='^(42820601\+jordanallenlewis@users\.noreply\.github\.com|jordanallenlewis@gmail\.com|noreply@github\.com)$'
-          TRAILER='^[[:space:]]*(Agent|Requested-by|Co-authored-by|Claude-Session|Generated-by)[[:space:]]*:'
-          OTHER='generated with[^a-z]{0,6}claude|claude\.ai/code|claude\.com/claude-code|noreply@anthropic\.com'
+          TRAILER='^[[:space:]]*(Agent|Requested-by|Co-authored-by|Claude-Session|Generated-by)[[:space:]]*:|^[[:space:]]*Signed-off-by[[:space:]]*:.*(claude|anthropic|agent|trinity|hq-)'
+          OTHER="generated (with|by)[^a-z]{0,6}claude|claude\.ai/code|claude\.com/claude-code|noreply@anthropic\.com|$(printf '\360\237\244\226')"
           IDENT='(@agent\.local|^hq-[a-z0-9_.-]*@|^trinity-agent@|\[bot\]@|noreply@anthropic\.com)'
+          NAMEBAD='claude|anthropic|(^|[^[:alpha:]])agent([^[:alpha:]]|$)|trinity|^hq-|\[bot\]'
+          JORDAN_NAME='Jordan Allen Lewis'
+          ZERO=0000000000000000000000000000000000000000
           fail=0
           bad() { echo "::error::attribution-guard: $1"; fail=1; }
+          G() { git -C "${REPO:-.}" "$@"; }
 
           scan() { # $1 label, stdin text
             t=$(cat)
-            printf '%s\n' "$t" | grep -Eiq "$TRAILER" && bad "$1 has an Agent:/Requested-by:/Co-authored-by:/Claude-Session:/Generated-by: line"
-            printf '%s\n' "$t" | grep -Eiq "$OTHER" && bad "$1 credits an AI (Generated with Claude, claude.ai/code link, noreply@anthropic.com)"
+            printf '%s\n' "$t" | grep -Eiq "$TRAILER" && bad "$1 has an Agent:/Requested-by:/Co-authored-by:/Claude-Session:/Generated-by:/AI Signed-off-by: line"
+            printf '%s\n' "$t" | grep -Eiq "$OTHER" && bad "$1 credits an AI (Generated with/by Claude, robot emoji, claude.ai/code link, noreply@anthropic.com)"
           }
 
-          scan "PR title" <<< "${TITLE:-}"
-          scan "PR body" <<< "${BODY:-}"
+          guard() {
+            fail=0
+            scan "PR title" <<< "${TITLE:-}"
+            scan "PR body" <<< "${BODY:-}"
 
-          # dependabot PRs are exempt as PRs (hq-automerge squashes them as Jordan); every other PR is judged per commit
-          dep=0
-          case "${PR_AUTHOR:-}" in dependabot*|renovate*) dep=1 ;; esac
-          case "${HEAD_REF:-}" in dependabot/*|renovate/*) dep=1 ;; esac
+            # dependabot PRs are exempt as PRs (hq-automerge squashes them as Jordan); every other PR is judged per commit
+            dep=0
+            case "${PR_AUTHOR:-}" in dependabot*|renovate*) dep=1 ;; esac
+            case "${HEAD_REF:-}" in dependabot/*|renovate/*) dep=1 ;; esac
 
-          for c in $(git rev-list "${BASE}..${HEAD}"); do
-            s=$(git log -1 --format=%h "$c")
-            scan "commit $s message" < <(git log -1 --format=%B "$c")
-            ae=$(git log -1 --format=%ae "$c"); ce=$(git log -1 --format=%ce "$c")
-            echo "$ae" | grep -Eiq "$IDENT" && [ "$dep" = 0 ] && bad "commit $s author is an agent/bot identity ($ae)"
-            echo "$ce" | grep -Eiq "$IDENT" && [ "$dep" = 0 ] && bad "commit $s committer is an agent/bot identity ($ce)"
-            # Jordan's own PRs: every commit is authored and committed as him
-            if [ "${PR_AUTHOR:-}" = "jordanallenlewis" ] && [ "$dep" = 0 ]; then
-              echo "$ae" | grep -Eq "$JORDAN_RE" || bad "commit $s author is not jordanallenlewis ($ae)"
-              echo "$ce" | grep -Eq "$COMMITTER_OK_RE" || bad "commit $s committer is not jordanallenlewis ($ce)"
-            fi
-          done
-          [ "$fail" = 0 ] && echo "attribution-guard: clean"
-          exit "$fail"
+            if [ -z "${BASE:-}" ] || [ -z "${HEAD:-}" ]; then bad "no commit range (BASE or HEAD is empty)"; return "$fail"; fi
+            if [ "$BASE" = "$ZERO" ]; then range="-1 $HEAD"; else range="$BASE..$HEAD"; fi # new branch: judge the tip only
+            commits=$(G rev-list $range) || { bad "git rev-list $range failed (base not reachable?)"; return "$fail"; }
+            [ -n "$commits" ] || { bad "no commits in range $range, nothing was checked"; return "$fail"; }
+
+            for c in $commits; do
+              s=$(G log -1 --format=%h "$c")
+              scan "commit $s message" < <(G log -1 --format=%B "$c")
+              ae=$(G log -1 --format=%ae "$c"); ce=$(G log -1 --format=%ce "$c")
+              an=$(G log -1 --format=%an "$c"); cn=$(G log -1 --format=%cn "$c")
+              [ -n "$s" ] && [ -n "$ae" ] && [ -n "$ce" ] && [ -n "$an" ] && [ -n "$cn" ] || bad "commit $c could not be read"
+              cdep=$dep
+              case "$an" in 'dependabot[bot]'|'renovate[bot]') [ "$EVENT" = push ] && cdep=1 ;; esac
+              echo "$ae" | grep -Eiq "$IDENT" && [ "$cdep" = 0 ] && bad "commit $s author is an agent/bot identity ($ae)"
+              echo "$ce" | grep -Eiq "$IDENT" && [ "$cdep" = 0 ] && bad "commit $s committer is an agent/bot identity ($ce)"
+              echo "$an" | grep -Eiq "$NAMEBAD" && [ "$cdep" = 0 ] && bad "commit $s author name is an agent/bot name ($an)"
+              echo "$cn" | grep -Eiq "$NAMEBAD" && [ "$cdep" = 0 ] && bad "commit $s committer name is an agent/bot name ($cn)"
+              # Jordan's own PRs: every commit is authored and committed as him
+              if [ "${PR_AUTHOR:-}" = "jordanallenlewis" ] && [ "$dep" = 0 ]; then
+                echo "$ae" | grep -Eq "$JORDAN_RE" || bad "commit $s author is not jordanallenlewis ($ae)"
+                echo "$ce" | grep -Eq "$COMMITTER_OK_RE" || bad "commit $s committer is not jordanallenlewis ($ce)"
+                [ "$an" = "$JORDAN_NAME" ] || bad "commit $s author name is not $JORDAN_NAME ($an)"
+                [ "$cn" = "$JORDAN_NAME" ] || [ "$cn" = GitHub ] || bad "commit $s committer name is not $JORDAN_NAME ($cn)"
+              fi
+            done
+            return "$fail"
+          }
+
+          selftest() { # builds a throwaway history with commit-tree and checks each rule fires (or stays quiet)
+            REPO=$(mktemp -d) && git init -q "$REPO" || { echo "::error::attribution-guard self-test: no scratch repo"; return 1; }
+            tree=$(G mktree < /dev/null)
+            J=42820601+jordanallenlewis@users.noreply.github.com
+            JN=$JORDAN_NAME
+            mk() { # message author-name author-email committer-name committer-email
+              GIT_AUTHOR_NAME=$2 GIT_AUTHOR_EMAIL=$3 GIT_COMMITTER_NAME=$4 GIT_COMMITTER_EMAIL=$5 G commit-tree "$tree" -p "$base" -m "$1"
+            }
+            base=$(GIT_AUTHOR_NAME=$JN GIT_AUTHOR_EMAIL=$J GIT_COMMITTER_NAME=$JN GIT_COMMITTER_EMAIL=$J G commit-tree "$tree" -m "base")
+            st=0
+            check() { # $1 label, $2 want (fail|pass); env for guard is set by the caller
+              guard > /dev/null 2>&1; rc=$?
+              if { [ "$2" = fail ] && [ "$rc" != 0 ]; } || { [ "$2" = pass ] && [ "$rc" = 0 ]; }; then echo "self-test ok:   $1 ($2)"; else echo "::error::attribution-guard self-test: '$1' should $2"; st=1; fi
+            }
+            expect() { # $1 label, $2 want, rest: message author-name author-email committer-name committer-email
+              local label=$1 want=$2; shift 2
+              HEAD=$(mk "$@"); BASE=$base; EVENT=pull_request; PR_AUTHOR=jordanallenlewis; HEAD_REF=x; TITLE=t; BODY=b
+              check "$label" "$want"
+            }
+            robot=$(printf '\360\237\244\226')
+            expect "clean commit" pass "Fix the status line" "$JN" "$J" "$JN" "$J"
+            expect "product mention" pass "Reads Claude Code status lines" "$JN" "$J" "$JN" "$J"
+            expect "Claude-Session trailer" fail $'x\n\nClaude-Session: abc' "$JN" "$J" "$JN" "$J"
+            expect "claude.ai/code link" fail $'x\n\nhttps://claude.ai/code/session_1' "$JN" "$J" "$JN" "$J"
+            expect "claude.com/claude-code link" fail $'x\n\nhttps://claude.com/claude-code' "$JN" "$J" "$JN" "$J"
+            expect "indented Agent trailer" fail $'x\n\n  Agent: hq-x' "$JN" "$J" "$JN" "$J"
+            expect "Co-authored-by (Jordan's own)" fail $'x\n\nCo-authored-by: Jordan Allen Lewis <'"$J"'>' "$JN" "$J" "$JN" "$J"
+            expect "Generated with [Claude Code]" fail $'x\n\nGenerated with [Claude Code]' "$JN" "$J" "$JN" "$J"
+            expect "Generated by Claude" fail $'x\n\nGenerated by Claude' "$JN" "$J" "$JN" "$J"
+            expect "robot emoji" fail "x $robot" "$JN" "$J" "$JN" "$J"
+            expect "Signed-off-by: Claude" fail $'x\n\nSigned-off-by: Claude <c@example.com>' "$JN" "$J" "$JN" "$J"
+            expect "author name Claude, Jordan's email" fail x Claude "$J" "$JN" "$J"
+            expect "committer name Claude, Jordan's email" fail x "$JN" "$J" Claude "$J"
+            expect "author name not Jordan's" fail x Someone "$J" "$JN" "$J"
+            expect "agent email" fail x "$JN" "hq-x@agent.local" "$JN" "$J"
+            good=$(mk "Fix the status line" "$JN" "$J" "$JN" "$J")
+            bad_sha=$(mk $'x\n\nClaude-Session: abc' "$JN" "$J" "$JN" "$J")
+            BASE=$base; HEAD=$good; EVENT=pull_request; PR_AUTHOR=jordanallenlewis; HEAD_REF=x; BODY=b
+            TITLE=$'a\nGenerated with [Claude Code]'; check "bad PR title" fail
+            TITLE=t; BODY=$'Agent: x'; check "bad PR body" fail
+            TITLE=t; BODY=b; BASE=1111111111111111111111111111111111111111; check "unreachable base, fail closed" fail
+            BASE=$good; HEAD=$good; check "empty range, fail closed" fail
+            EVENT=push; PR_AUTHOR=; HEAD_REF=; TITLE=; BODY=
+            BASE=$base; HEAD=$bad_sha; check "push with a bad message" fail
+            BASE=$ZERO; HEAD=$bad_sha; check "push, zero before, bad tip" fail
+            BASE=$base; HEAD=$good; check "clean push" pass
+            BASE=$ZERO; HEAD=$good; check "push, zero before, clean tip" pass
+            rm -rf "$REPO"; unset REPO
+            return "$st"
+          }
+
+          (selftest) || exit 1 # subshell: the test sets BASE, HEAD and friends
+          guard
+          rc=$?
+          [ "$rc" = 0 ] && echo "attribution-guard: clean"
+          exit "$rc"
