@@ -595,6 +595,19 @@ test('--doctor passes on a healthy install and exits 0', () => {
   assert.match(r.out, /All checks passed/);
 });
 
+test('--doctor tells you keep-working needs the task tools when it is on', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir);
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  run(['--install-guardian'], { env, script });
+  const on = run(['--doctor'], { env, script });
+  assert.match(on.out, /keep-working acts only in sessions that have Claude's task tools/);
+  assert.match(on.out, /CLAUDE_CODE_ENABLE_TODO_TOOLS=1/);
+  run(['--keep-working', 'off'], { env, script });
+  const off = run(['--doctor'], { env, script });
+  assert.ok(!off.out.includes('CLAUDE_CODE_ENABLE_TODO_TOOLS'), 'no note when keep-working is off');
+});
+
 test('--doctor fails with a fix hint when statusLine is unwired', () => {
   const sb = sandbox();
   fs.writeFileSync(path.join(sb.cfg, 'settings.json'), '{}');
