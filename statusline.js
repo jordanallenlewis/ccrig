@@ -4623,6 +4623,7 @@ function runDoctor(out, report) {
       // --install re-points every wired command at this copy without touching keep-working or autopilot
       if (hookMissing.length) bad('path(s) in guardian hook commands do not exist: ' + hookMissing.join(', '), 're-run: node "' + __filename + '" --install');
       info('  keep-working: ' + (cfgKeepWorking() ? 'on' : 'off') + '   autopilot: ' + cfgAutopilot());
+      if (cfgKeepWorking()) info('  keep-working acts only in sessions that have Claude\'s task tools. Current models leave them out unless you start Claude Code with CLAUDE_CODE_ENABLE_TODO_TOOLS=1');
     }
     // auto-resume arms from the render, hooks or not, so check the relaunch target whenever it is on
     if (cfgAutopilot() === 'resume') {
