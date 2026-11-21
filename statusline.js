@@ -4104,6 +4104,9 @@ function nodeForCommand() {
 // (exec form), which starts node.exe directly. The status line has no such form, so the Git Bash watchdog
 // below covers it. CCRIG_HOOK_FORM=exec|shell overrides the choice (tests, and an escape hatch).
 const EXEC_HOOKS_SINCE = '2.1.139';
+// Since Claude Code 2.1.234 an open session waits at a claude.ai usage limit and continues the task on its
+// own after the reset (autoContinueAtUsageLimit, on by default). --doctor reports it next to auto-resume.
+const AUTO_CONTINUE_SINCE = '2.1.234';
 function ccVersionFile() { return path.join(CFG, '.ccrig-cc-version'); }
 // the Claude Code version the status line last received, so install can tell what the hooks may use
 function rememberCcVersion(v) {
@@ -4630,6 +4633,17 @@ function runDoctor(out, report) {
       if (claudeResolves(claudeBin())) ok('"' + claudeBin() + '" found (auto-resume can relaunch)');
       else bad('autopilot is "resume" but "' + claudeBin() + '" was not found' + (process.platform === 'win32' ? ' as claude.exe or an npm shim' : ' on PATH'), 'set "claudeBin" in config to the full path of claude' + (process.platform === 'win32' ? '.exe' : ''));
     }
+    // Claude Code's own continue: read from user settings only here (managed settings and --settings
+    // can also set it, and a project file that sets it turns it off when neither user nor managed does)
+    const ac = raw.value.autoContinueAtUsageLimit;
+    const acv = ((process.env.CCRIG_CC_VERSION || ccVersion() || '').match(/^\d+\.\d+\.\d+/) || [])[0];
+    const acHead = 'Claude Code\'s own continue at a usage limit: ';
+    const acOld = acv ? '' : ' if your Claude Code is ' + AUTO_CONTINUE_SINCE + ' or newer';
+    if (acv && semverGt(AUTO_CONTINUE_SINCE, acv)) info(acHead + 'not in Claude Code ' + acv + ' (' + AUTO_CONTINUE_SINCE + ' or newer)');
+    else if (ac === true) info(acHead + 'on' + acOld + ' (autoContinueAtUsageLimit is true in settings.json; managed settings can still turn it off)');
+    else if (ac === false) info(acHead + 'off (autoContinueAtUsageLimit is false in settings.json)');
+    else if (ac !== undefined) info(acHead + 'autoContinueAtUsageLimit in settings.json is not true or false');
+    else info(acHead + 'on' + acOld + ' (Claude Code\'s default; managed settings or a project\'s .claude settings can turn it off)');
   }
   // session board: the lamp hooks, and the shared dir the rows are read from. The lamps need four events;
   // the guardian's own Stop hook stamps the done lamp, so it counts for Stop.
