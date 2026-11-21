@@ -1449,7 +1449,10 @@ function recordSample(sid, sPct, wPct, sReset, wReset) {
   try {
     const last = lines.length ? JSON.parse(lines[lines.length - 1]) : null;
     if (last) {
-      if ((sPct != null && typeof last.s === 'number' && sPct < last.s - 15) || (wPct != null && typeof last.w === 'number' && wPct < last.w - 15)) lines = [];
+      // a window rolls over when usage drops sharply OR its reset time jumps ahead by more than 10 minutes
+      // (a small drop, say 14% to 6%, is still a new window: the old climb must not feed the new forecast)
+      const rolled = (now_, prev) => typeof now_ === 'number' && typeof prev === 'number' && now_ > prev + 600;
+      if ((sPct != null && typeof last.s === 'number' && sPct < last.s - 15) || (wPct != null && typeof last.w === 'number' && wPct < last.w - 15) || rolled(sReset, last.rs) || rolled(wReset, last.rw)) lines = [];
       else if (now - last.t < 12) return; // throttle: at most one sample per 12s
     }
   } catch {}

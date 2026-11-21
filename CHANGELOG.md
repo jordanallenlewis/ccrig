@@ -11,6 +11,9 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+### Fixed
+- The pace forecast starts fresh when a window rolls over, not only when usage drops by more than 15 points. A new reset time more than 10 minutes later than the last one means a new window, so a small drop (say 14% to 6%) no longer lets the old window's climb feed the new window's forecast.
+
 ### Changed
 - `--doctor` shows whether Claude Code's own continue at a usage limit (`autoContinueAtUsageLimit`, Claude Code 2.1.234 or newer, on by default) is on, read from your user settings. The README explains what Claude Code now does by itself at a usage limit, what CCRig adds on top, and the one case to watch: after a sleep of more than about 30 minutes, Claude Code asks for Enter while the npm install's watcher may already have resumed the session (#30).
 - `--doctor` notes that keep-working acts only in sessions that have Claude's task tools, which current models leave out unless Claude Code starts with `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`; the README says the same (#31).
