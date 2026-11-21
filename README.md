@@ -11,7 +11,7 @@ CCRig is a status line and usage-limit guardian for [Claude Code](https://claude
 
 ```
 ▾ ccrig ───────────────────────────────────────────────────────────────────────────────────────
-● work │ my-project │ Opus 4.8 1M │ effort high │ git main ●3 ↑1
+● work │ my-project │ Opus 5.5 1M │ effort high │ git main ●3 ↑1
 ctx ━━━━────── 42% │ session ━━━━━━╸─── 63% ↺ 8:53a │ weekly ━━━━━━━━╸─ 88% ↺ Tue 6:53a
 ```
 
@@ -182,7 +182,7 @@ In the editor, `y` switches between the `refined` and `classic` looks with a liv
 Want the room back? Fold the section to one line with `/ccrig:toggle` inside a session (or `ccrig collapse` in a shell), and open it again the same way (`ccrig expand`):
 
 ```
-▸ ccrig  my-project · Opus 4.8 · ctx 42% · 5h 63% · 7d 21% ──────────────────────────────────
+▸ ccrig  my-project · Opus 5.5 · ctx 42% · 5h 63% · 7d 21% ──────────────────────────────────
 ```
 
 A window near its limit keeps its `▲` in the folded line, and at the critical threshold the limit warning still gets a line of its own.
