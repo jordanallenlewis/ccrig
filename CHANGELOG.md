@@ -11,6 +11,9 @@ In-progress work lives under `[Unreleased]` until it's cut.
 
 ## [Unreleased]
 
+### Changed
+- `--doctor` notes that keep-working acts only in sessions that have Claude's task tools, which current models leave out unless Claude Code starts with `CLAUDE_CODE_ENABLE_TODO_TOOLS=1`; the README says the same (#31).
+
 ### Added
 - `ccrig doctor --report` prints a summary to paste into a bug report: the CCRig, Node, OS and Claude Code versions, the terminal, whether the mod is active, which config keys are set (names only), whether Claude Code's last usage data had the session and weekly windows (not the percentages), and every doctor check. Your home folder, user name, profile names, project folders and session ids are masked, and so are another tool's status line command, the Fable numbers and the config parser's quote. It reads your setup, asks `claude --version`, and prints: it sends nothing, writes no file, and unlike `--doctor` it changes nothing on Windows (no stuck shells ended, no paused bar turned back on).
 
