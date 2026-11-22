@@ -1254,6 +1254,7 @@ const BLOCKED_NOTIFY = new Set(['permission_prompt', 'elicitation_dialog', 'elic
 // idle_prompt (Claude has sat waiting for the user) turns a stuck yellow lamp green: an Esc interrupt or
 // an API error ends a turn without any Stop hook
 const NOTIFY_MATCHER = 'permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|idle_prompt';
+const QUOTA_RESUME_MATCHER = 'quota_auto_resume_stale|quota_auto_resume_fired';
 const NOTIFY_WHY = { permission_prompt: 'perms', elicitation_dialog: 'form', elicitation_url_dialog: 'url', agent_needs_input: 'input' };
 
 function lampPath(sid) { return path.join(boardDir(), sid + '.lamp'); }
@@ -2746,7 +2747,7 @@ function clearGuardCounters(sid) {
 function clearSessionGuardState(sid) {
   if (!sid || !SID_RE.test(sid)) return;
   try { fs.unlinkSync(checkpointPath(sid)); } catch {}
-  for (const tag of ['checkpoint', 'notified', 'watch', 'continues', 'stuck', 'lastpending']) {
+  for (const tag of ['checkpoint', 'notified', 'watch', 'continues', 'stuck', 'lastpending', 'standdown']) {
     try { fs.unlinkSync(path.join(guardDir(), sid + '.' + tag)); } catch {}
   }
 }
@@ -3119,6 +3120,18 @@ function runHookStopFailure(input) {
   armAutopilot(input, lim.which, 100, lim.reset);
   emitHook({});
 }
+// Claude Code's own continue at a usage limit (Notification `quota_auto_resume_fired` / `_stale`): the open
+// session takes the task back (or waits for Enter in the same window), so the detached watcher must not start a
+// second run of it. Leaves the checkpoint and resume ticket alone; the watcher reads this marker and exits.
+function standdownPath(sid) { return path.join(guardDir(), sid + '.standdown'); }
+function runHookQuotaResume(input) {
+  const sid = input && input.session_id;
+  const t = String((input && (input.notification_type || input.notificationType)) || '');
+  if (typeof sid !== 'string' || !SID_RE.test(sid) || !/^quota_auto_resume_(stale|fired)$/.test(t)) return emitHook({});
+  const cp = readCheckpoint(sid);
+  if (cp && /limit/.test(cp.reason || '')) writeJsonAtomic(standdownPath(sid), { at: Date.now(), type: t });
+  emitHook({});
+}
 // Which window ran out and when it resets, from (in order): reset_after_seconds (not in Claude Code's documented payload, read if sent), the reset
 // written in the error text (error_details, or last_assistant_message, the error as the conversation shows it:
 // "resets 12:30pm (America/Los_Angeles)", "resets in 2h 5m"), and the reset this
@@ -3189,6 +3202,7 @@ function runHook(event, input) {
     if (event === 'session-end' || event === 'SessionEnd') return runHookSessionEnd(input);
     if (event === 'board-stop') return runHookBoardStop(input);
     if (event === 'stop-failure' || event === 'StopFailure') return runHookStopFailure(input);
+    if (event === 'quota-resume') return runHookQuotaResume(input);
     if (event === 'mod-resume') return runHookModResume(input);
     if (event === 'mod-exit') return runHookModExit(input);
   } catch {}
@@ -3328,8 +3342,19 @@ function runWatch(sid) {
     }
     watchLog(sid, why); return relaunchResume(cp, profileDir);
   };
+  // Claude Code reported (after this watcher started) that the open session continues itself: stand down
+  const startedAt = Date.now();
+  const claudeContinued = () => {
+    try { const m = JSON.parse(fs.readFileSync(standdownPath(sid), 'utf8')); return m && typeof m.at === 'number' && m.at >= startedAt ? String(m.type) : null; } catch { return null; }
+  };
+  // A watcher that wakes well after its target slept through the reset, and Claude Code's notification
+  // about it arrives at the same moment: wait one short grace period, look again, then fire.
+  const graceMs = Math.max(0, parseInt(process.env.CCBSL_QUOTA_GRACE_MS, 10) >= 0 ? parseInt(process.env.CCBSL_QUOTA_GRACE_MS, 10) : 20000);
+  let graceUntil = 0;
   const tick = () => {
     try {
+      const said = claudeContinued();
+      if (said) { watchLog(sid, 'Claude Code says the open session continues itself (' + said + '); standing down (checkpoint and ticket stay)'); process.exit(0); }
       // Re-read the checkpoint each tick: a refreshed schedule (a later window hitting critical) or an
       // autopilotBuffer change is honored WITHOUT re-arming; a vanished checkpoint means stand down.
       const fresh = readCheckpoint(sid);
@@ -3346,7 +3371,10 @@ function runWatch(sid) {
         const fo = pickFreshProfile(85, 6 * 3600);
         if (fo) return fireIfIdle(fo.dir, 'failover to ' + fo.profile + ' (' + Math.round(100 - fo.head) + '% free)');
       }
-      if (Date.now() >= target) return fireIfIdle(null, 'reset reached; relaunching');
+      if (Date.now() >= target) {
+        if (Date.now() - target > 5 * 60000 && !graceUntil) { graceUntil = Date.now() + graceMs; watchLog(sid, 'woke ' + Math.round((Date.now() - target) / 60000) + ' min after the reset (a sleep); waiting ' + Math.round(graceMs / 1000) + 's for Claude Code'); }
+        if (Date.now() >= graceUntil) return fireIfIdle(null, 'reset reached; relaunching');
+      }
     } catch (e) { watchLog(sid, 'tick error: ' + e.message); }
     setTimeout(tick, pollMs);
   };
@@ -4072,6 +4100,11 @@ const HOOK_EVENTS = [
   // limit another session or a background agent used up arrives with no warning render; this is the
   // signal that catches it. Claude Code 2.1.78 added the event; an older one never gets it wired.
   ['StopFailure', 'stop-failure', 'guardian', 'rate_limit', 0, '2.1.78'],
+  // Claude Code's own continue at a usage limit (2.1.234+) tells hooks what it did: it continued the task
+  // (`fired`) or the limit reset while the computer slept and it now waits for Enter (`stale`). Either way
+  // the open session takes the task back, so an armed watcher must not start a second run of it.
+  // `disabled` is left out: Claude Code gave up waiting, so the watcher is still the only resume.
+  ['Notification', 'quota-resume', 'guardian', QUOTA_RESUME_MATCHER, 0, '2.1.234'],
 ];
 // can this Claude Code run the hook? (an entry's 6th field is the first version that has its event)
 function hookSupported(e) {
