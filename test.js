@@ -4310,3 +4310,83 @@ test('spend limit: a passed reset reads "reset" and never warns; classic and col
   const hidden = strip(render(spendInput({ used_percentage: 63, resets_at: now + 9 * 86400 }), { env: R_ENV(sb), script: scriptCopy(sb.dir, { show: { spend: false } }), cols: '200' }).out);
   assert.ok(!/spend/.test(hidden), '"spend": false hides it: ' + hidden);
 });
+
+// ===========================================================================
+// Claude Code's own continue at a usage limit (Notification quota_auto_resume_*, 2.1.234+)
+// ===========================================================================
+// the hooks reference's Notification sample, with the type swapped
+const qrInput = (sid, type) => ({ session_id: sid, transcript_path: '', cwd: '/tmp/proj', hook_event_name: 'Notification',
+  message: 'Claude Code needs your attention', notification_type: type });
+const qrArm = (sb, sid, extra = {}) => {
+  const gd = path.join(sb.cfg, 'guardian'); fs.mkdirSync(gd, { recursive: true });
+  const cp = { session_id: sid, cwd: sb.dir, reason: 'session limit hit', window: 'session', resets_at: Math.floor(Date.now() / 1000) + 3600, ...extra };
+  fs.writeFileSync(path.join(gd, sid + '.checkpoint.json'), JSON.stringify(cp));
+  return gd;
+};
+
+test('quota_auto_resume stale and fired mark an armed session so its watcher stands down; checkpoint stays', () => {
+  for (const type of ['quota_auto_resume_stale', 'quota_auto_resume_fired']) {
+    const sb = sandbox(); const sid = 'qr-' + type.slice(-5);
+    const gd = qrArm(sb, sid);
+    const r = hookRun('quota-resume', qrInput(sid, type), { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
+    assert.strictEqual(r.code, 0);
+    assert.ok(fs.existsSync(path.join(gd, sid + '.standdown')), type + ' leaves the stand-down marker');
+    assert.ok(fs.existsSync(path.join(gd, sid + '.checkpoint.json')), 'the checkpoint stays');
+  }
+});
+
+test('quota_auto_resume_disabled, other types and sessions with nothing armed leave everything alone', () => {
+  const sb = sandbox(); const sid = 'qr-keep-1';
+  const gd = qrArm(sb, sid); const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  for (const t of ['quota_auto_resume_disabled', 'permission_prompt', 'idle_prompt', '']) hookRun('quota-resume', qrInput(sid, t), { env });
+  assert.ok(!fs.existsSync(path.join(gd, sid + '.standdown')), 'still armed');
+  hookRun('quota-resume', qrInput('qr-none-1', 'quota_auto_resume_stale'), { env });
+  assert.ok(!fs.existsSync(path.join(gd, 'qr-none-1.standdown')), 'no checkpoint, nothing to stand down');
+  assert.strictEqual(hookRun('quota-resume', { session_id: '../x', notification_type: 'quota_auto_resume_stale' }, { env }).code, 0);
+});
+
+test('a watcher stands down when the notification arrives while it waits; a late wake waits a grace period first', async () => {
+  const { spawn } = require('child_process');
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+  const go = async (sid, notifyAt) => {
+    const sb = sandbox();
+    const marker = path.join(sb.dir, 'RELAUNCH.txt');
+    const stub = path.join(sb.dir, 'claude-stub.sh');
+    fs.writeFileSync(stub, '#!/bin/sh\nprintf "%s\\n" "$@" > "' + marker + '"\n'); fs.chmodSync(stub, 0o755);
+    const script = scriptCopy(sb.dir, { autopilot: 'resume', autopilotBuffer: 0, updateCheck: false, claudeBin: stub });
+    // the reset passed 10 minutes ago (the machine slept): the watcher wakes late
+    const gd = qrArm(sb, sid, { resets_at: Math.floor(Date.now() / 1000) - 600 });
+    const env = { ...process.env, CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, USERPROFILE: sb.home, CCBSL_NO_ACT: '', CCBSL_NO_NOTIFY: '1',
+      CCBSL_WATCH_INTERVAL_MS: '100', CCBSL_QUOTA_GRACE_MS: '1500' };
+    const child = spawn(NODE, [script, '--watch', sid], { env, stdio: 'ignore' });
+    const exited = new Promise((res) => child.on('exit', res));
+    if (notifyAt) { await sleep(notifyAt); hookRun('quota-resume', qrInput(sid, 'quota_auto_resume_stale'), { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home }, script }); }
+    await exited; await sleep(300);
+    return { log: fs.readFileSync(path.join(gd, 'logs', sid + '.log'), 'utf8'), relaunched: fs.existsSync(marker), gd };
+  };
+  const stood = await go('qr-grace-1', 600);
+  assert.match(stood.log, /waiting 2s for Claude Code/);
+  assert.match(stood.log, /Claude Code says the open session continues itself \(quota_auto_resume_stale\); standing down/);
+  assert.ok(!stood.relaunched, 'no second run of the task');
+  assert.ok(fs.existsSync(path.join(stood.gd, 'qr-grace-1.checkpoint.json')), 'the checkpoint stays');
+  const fired = await go('qr-grace-2', 0);
+  assert.match(fired.log, /reset reached; relaunching/, 'no notification: it still resumes after the grace period');
+  assert.ok(fired.relaunched);
+});
+
+test('quota-resume hook is wired with the guardian from Claude Code 2.1.234, not before, and uninstall removes it', () => {
+  const sb = sandbox();
+  run(['--install', '--this-profile'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_CC_VERSION: '2.1.287' } });
+  const s = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  const g = s.hooks.Notification.find((x) => (x.hooks || []).some((h) => /--hook quota-resume$/.test(h.command || '')));
+  assert.ok(g, 'quota-resume wired');
+  assert.strictEqual(g.matcher, 'quota_auto_resume_stale|quota_auto_resume_fired');
+  run(['--uninstall', '--this-profile'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
+  const u = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  assert.ok(!hasSlug(u, 'Notification', 'quota-resume'), 'uninstall strips it');
+  const old = sandbox();
+  run(['--install', '--this-profile'], { env: { CLAUDE_CONFIG_DIR: old.cfg, HOME: old.home, CCRIG_CC_VERSION: '2.1.233' } });
+  const o = JSON.parse(fs.readFileSync(path.join(old.cfg, 'settings.json'), 'utf8'));
+  assert.ok(!hasSlug(o, 'Notification', 'quota-resume'), 'an older Claude Code never gets it');
+  assert.ok(hasSlug(o, 'Stop', 'stop'), 'the rest of the guardian is wired');
+});
