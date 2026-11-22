@@ -4371,7 +4371,7 @@ test('a watcher stands down when the notification arrives while it waits; a late
   assert.ok(fs.existsSync(path.join(stood.gd, 'qr-grace-1.checkpoint.json')), 'the checkpoint stays');
   const fired = await go('qr-grace-2', 0);
   assert.match(fired.log, /reset reached; relaunching/, 'no notification: it still resumes after the grace period');
-  assert.ok(fired.relaunched);
+  if (process.platform !== 'win32') assert.ok(fired.relaunched, 'the stub claude ran'); // a .sh stub cannot run on Windows
 });
 
 test('quota-resume hook is wired with the guardian from Claude Code 2.1.234, not before, and uninstall removes it', () => {
