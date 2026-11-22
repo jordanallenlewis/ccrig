@@ -207,6 +207,25 @@ test('context falls back to the transcript tail when context_window is absent', 
   assert.match(out, /ctx .*20%/); // 200002 of 1M
 });
 
+test('REGRESSION: after /compact the context bar drops the pre-compaction size when Claude Code sends no percentage', () => {
+  const sb = sandbox();
+  const tp = path.join(sb.dir, 'transcript.jsonl');
+  fs.writeFileSync(tp, [
+    JSON.stringify({ type: 'user', message: { role: 'user', content: 'work' } }),
+    JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 180000 } } }),
+    JSON.stringify({ type: 'system', subtype: 'compact_boundary', content: 'Conversation compacted' }),
+    JSON.stringify({ type: 'user', isCompactSummary: true, message: { role: 'user', content: 'This session is being continued...' } }),
+  ].join('\n') + '\n');
+  const cw = (extra) => ({ model: { id: 'claude-opus-4-8', display_name: 'Opus 4.8' }, transcript_path: tp, context_window: { context_window_size: 200000, current_usage: null, ...extra } });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const out = strip(render(cw({ used_percentage: null }), { env }).out);
+  assert.ok(!/9\d%|90%/.test(out), 'no stale pre-compaction size: ' + out);
+  assert.match(strip(render(cw({ used_percentage: 3 }), { env }).out), /3%/, 'a real percentage still shows');
+  // a reply written after the compaction counts again
+  fs.appendFileSync(tp, JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 20000 } } }) + '\n');
+  assert.match(strip(render(cw({ used_percentage: null }), { env }).out), /10%/, 'usage after the boundary is read');
+});
+
 // ===========================================================================
 // profile badge
 // ===========================================================================
