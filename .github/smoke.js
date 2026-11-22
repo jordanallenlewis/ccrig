@@ -134,7 +134,7 @@ try {
   const sp = path.join(home, '.claude', 'settings.json');
   let s = readJson(sp);
   const hooks = allCommands(s).filter((c) => c.ev !== 'statusLine');
-  ((hooks.length === 4 && hooks.every((c) => c.args && sameFile(c.args[0], js) && c.args[1] === '--hook')) ? PASS : FAIL)('exec-form hooks name node and pass the script as args', JSON.stringify(hooks).slice(0, 1500));
+  ((hooks.length === 5 && hooks.every((c) => c.args && sameFile(c.args[0], js) && c.args[1] === '--hook')) ? PASS : FAIL)('exec-form hooks name node and pass the script as args', JSON.stringify(hooks).slice(0, 1500));
   execCommands('exec-form', { hooks: s.hooks }, env);
   r = node([js, '--uninstall'], { env });
   s = readJson(sp);
