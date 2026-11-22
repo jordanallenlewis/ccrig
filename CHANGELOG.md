@@ -12,6 +12,7 @@ In-progress work lives under `[Unreleased]` until it's cut.
 ## [Unreleased]
 
 ### Fixed
+- Right after `/compact`, the context bar no longer shows the size from before the compaction when Claude Code sends no percentage yet. It shows no number until the next reply, as in a new session.
 - The pace forecast starts fresh when a window rolls over, not only when usage drops by more than 15 points. A new reset time more than 10 minutes later than the last one means a new window, so a small drop (say 14% to 6%) no longer lets the old window's climb feed the new window's forecast.
 
 ### Changed
