@@ -2218,6 +2218,9 @@ function contextPct(input) {
     const lines = buf.toString('utf8').split('\n').filter(Boolean);
     for (let i = lines.length - 1; i >= 0; i--) {
       let o; try { o = JSON.parse(lines[i]); } catch { continue; }
+      // a compaction empties the context: any reply above this line describes the size from before it, and
+      // nothing after it has usage yet, so show no number (as in a new session) until the next reply
+      if (o && (o.subtype === 'compact_boundary' || o.isCompactSummary === true)) return null;
       const u = o && o.message && o.message.usage;
       if (u && (u.input_tokens != null || u.cache_read_input_tokens != null)) {
         const used = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
