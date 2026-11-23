@@ -1051,6 +1051,20 @@ test('PostModelSwitch source auto: the alert shows Claude Code\'s own fallback a
   assert.match(within, /(↓|⬇) Opus 4\.8 \(was Opus 5\.5\)/, 'and inside one family');
 });
 
+test('REGRESSION: PostModelSwitch auto under opusplan or upward is no fallback alert', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const cool = { five_hour: { used_percentage: 10 } };
+  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), JSON.stringify({ model: 'opusplan' }));
+  render(baseInput({ session_id: 'ms5', model: { display_name: 'Opus 4.8' }, rate_limits: cool }), { env });
+  hookRun('model-switch', { session_id: 'ms5', from_model: 'claude-opus-4-8', to_model: 'claude-sonnet-5', source: 'auto' }, { env });
+  assert.ok(!/was Opus/.test(strip(render(baseInput({ session_id: 'ms5', model: { display_name: 'Sonnet 5' }, rate_limits: cool }), { env }).out)), 'opusplan toggle is by design');
+  const sb2 = sandbox();
+  const env2 = { CLAUDE_CONFIG_DIR: sb2.cfg, HOME: sb2.home };
+  hookRun('model-switch', { session_id: 'ms6', from_model: 'claude-sonnet-5', to_model: 'claude-opus-4-8', source: 'auto' }, { env: env2 });
+  assert.ok(!/was Sonnet/.test(strip(render(baseInput({ session_id: 'ms6', model: { display_name: 'Opus 4.8' }, rate_limits: cool }), { env: env2 }).out)), 'a move up is no drop');
+});
+
 test('PostModelSwitch: a user switch (command) clears the fallback alert and a /model drop at high usage is no alert; resume changes nothing', () => {
   const sb = sandbox();
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };

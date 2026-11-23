@@ -957,6 +957,9 @@ function prettyModelId(id) {
   const fam = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
   return m[2] ? fam + ' ' + m[2] + (m[3] ? '.' + m[3] : '') : fam;
 }
+// a sortable rank: tier first, then the version ("Opus 4.8" -> [3,4,8]); an unversioned name ranks as version 0
+function modelRank(name) { const m = String(name || '').match(/(\d+)(?:\.(\d+))?/); return [modelTier(name), m ? +m[1] : 0, m && m[2] ? +m[2] : 0]; }
+function modelIsLower(a, b) { const x = modelRank(a), y = modelRank(b); for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i]; return false; }
 function modelFamily(name) { return String(name || '').split(/[\s(]/)[0]; }
 let DEMO_DOWNGRADE = null; // [fromName, toName] set by --demo
 let DEMO_FABLE = null; // a fake Fable cache record set by --demo
@@ -3152,6 +3155,9 @@ function runHookModelSwitch(input) {
   const save = (o) => { fs.mkdirSync(guardDir(), { recursive: true, mode: 0o700 }); fs.writeFileSync(mf, JSON.stringify(o)); sweepGuardDir(); };
   if (input.source === 'auto') {
     if (!from || !to || from === to) return emitHook({});
+    // opusplan swaps Opus and Sonnet on every plan-mode toggle and reports it as "auto": by design, no fallback.
+    // A move up (a fallback ending) is no downgrade either.
+    if (/opusplan/i.test(String(settingsVal('model') || '')) || !modelIsLower(to, from)) return emitHook({});
     save({ tier: Math.max(cur.tier || 0, modelTier(from)), name: cur.name || from, fb: { from, to } });
   } else if (['command', 'picker', 'sdk'].includes(input.source)) {
     // the user's own pick is the new baseline and ends any fallback alert
