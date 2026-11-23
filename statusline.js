@@ -972,20 +972,18 @@ function downgradeSeg(input, live) {
   const cur = (input.model && (input.model.display_name || input.model.id)) || '';
   const tier = modelTier(cur);
   if (!tier || !sid || !SID_RE.test(sid)) return '';
-  // Claude Code 2.1.251+ tells the PostModelSwitch hook when it moved the session to another model by itself
-  // (source "auto": a safety fallback, at any usage level and within a family). That is exact, so it wins.
-  try {
-    const fb = JSON.parse(fs.readFileSync(path.join(guardDir(), sid + '.fallback'), 'utf8'));
-    if (fb && fb.from && fb.to && cur.toLowerCase().includes(modelFamily(fb.to).toLowerCase())) {
-      const sameFamily = modelFamily(fb.from) === modelFamily(fb.to);
-      return withWas(cBold(K.red, down + (sameFamily ? fb.to : modelFamily(fb.to))), sameFamily ? fb.from : modelFamily(fb.from));
-    }
-  } catch {}
+  // The session's `.model` file holds the highest tier seen and, when Claude Code 2.1.251+ told the PostModelSwitch
+  // hook it moved the session by itself (source "auto": a safety fallback, at any usage level and within a family),
+  // that fallback: `fb`. One file, one read, so a render stays inside its file system budget.
   const f = path.join(guardDir(), sid + '.model');
-  let top = 0, topName = '';
-  try { const o = JSON.parse(fs.readFileSync(f, 'utf8')); top = o.tier || 0; topName = o.name || ''; } catch {}
+  let top = 0, topName = '', fb = null;
+  try { const o = JSON.parse(fs.readFileSync(f, 'utf8')); top = o.tier || 0; topName = o.name || ''; fb = o.fb || null; } catch {}
+  if (fb && fb.from && fb.to && cur.toLowerCase().includes(modelFamily(fb.to).toLowerCase())) {
+    const sameFamily = modelFamily(fb.from) === modelFamily(fb.to);
+    return withWas(cBold(K.red, down + (sameFamily ? fb.to : modelFamily(fb.to))), sameFamily ? fb.from : modelFamily(fb.from));
+  }
   if (tier >= top) { // an equal-or-higher tier is the session's ceiling: record it
-    if (live && tier > top) { try { fs.mkdirSync(guardDir(), { recursive: true, mode: 0o700 }); fs.writeFileSync(f, JSON.stringify({ tier, name: cur })); sweepGuardDir(); } catch {} }
+    if (live && tier > top) { try { fs.mkdirSync(guardDir(), { recursive: true, mode: 0o700 }); fs.writeFileSync(f, JSON.stringify({ tier, name: cur, fb: fb || undefined })); sweepGuardDir(); } catch {} }
     return '';
   }
   // A drop below the ceiling. Only surface when usage is ELEVATED — that's when Claude Code
@@ -3149,15 +3147,15 @@ function runHookModelSwitch(input) {
   const sid = input && input.session_id;
   if (!input || typeof sid !== 'string' || !SID_RE.test(sid) || CONFIG.downgradeAlert === false) return emitHook({});
   const from = prettyModelId(input.from_model), to = prettyModelId(input.to_model);
-  const fbPath = path.join(guardDir(), sid + '.fallback');
+  const mf = path.join(guardDir(), sid + '.model');
+  let cur = {}; try { cur = JSON.parse(fs.readFileSync(mf, 'utf8')) || {}; } catch {}
+  const save = (o) => { fs.mkdirSync(guardDir(), { recursive: true, mode: 0o700 }); fs.writeFileSync(mf, JSON.stringify(o)); sweepGuardDir(); };
   if (input.source === 'auto') {
     if (!from || !to || from === to) return emitHook({});
-    fs.mkdirSync(guardDir(), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(fbPath, JSON.stringify({ from, to, at: nowSec() }));
-    sweepGuardDir();
+    save({ tier: Math.max(cur.tier || 0, modelTier(from)), name: cur.name || from, fb: { from, to } });
   } else if (['command', 'picker', 'sdk'].includes(input.source)) {
-    try { fs.unlinkSync(fbPath); } catch {}
-    if (to && modelTier(to)) { try { fs.mkdirSync(guardDir(), { recursive: true, mode: 0o700 }); fs.writeFileSync(path.join(guardDir(), sid + '.model'), JSON.stringify({ tier: modelTier(to), name: to })); } catch {} }
+    // the user's own pick is the new baseline and ends any fallback alert
+    if (to && modelTier(to)) save({ tier: modelTier(to), name: to }); else if (cur.fb) save({ tier: cur.tier, name: cur.name });
   }
   emitHook({});
 }
