@@ -2767,6 +2767,9 @@ function runHookStop(input) {
   if (process.env.CCBSL_UNATTENDED) return emitHook({});
   const kw = cfgKeepWorking();
   if (!kw) return emitHook({});                                   // disabled -> allow stop
+  // parked on in-flight background work or a scheduled wakeup: Claude Code resumes the session itself, so
+  // forcing a turn now only spends context. Allow the stop and leave the stuck counters as they are.
+  if ((Array.isArray(input.background_tasks) && input.background_tasks.length) || (Array.isArray(input.session_crons) && input.session_crons.length)) return emitHook({});
   const sid = input.session_id, tp = input.transcript_path;
   const validSid = sid && SID_RE.test(sid);
   const pending = (latestTodos(tp, true) || []).filter((x) => x && x.status !== 'completed'); // full-scan: don't miss todos past the tail
