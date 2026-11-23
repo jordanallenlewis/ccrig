@@ -1038,6 +1038,61 @@ test('downgrade alert stays quiet on a low-usage (deliberate) model switch', () 
   assert.ok(!sonnet.includes('⬇'), 'low usage -> assume deliberate, no false alarm');
 });
 
+// prompt cache: the docs' sample object (code.claude.com/docs/en/statusline, "prompt_cache"), word for word
+const DOCS_CACHE = () => ({
+  warm: true, caching_observed: true, ttl: '1h', expires_at: 1738429200, requests: 14, misses: 2,
+  expected_rebuilds: 1, hit_ratio: 0.91, cache_write_tokens: 352000, miss_recache_tokens: 310200,
+  last_miss_at: 1738425230, last_miss_cause: { causes: ['tools_changed'], tools_added: 2, tools_removed: 0 },
+  miss_causes: { tools_changed: 2 }, recache_tokens_if_cold: 45000,
+});
+const cacheOut = (pc, { env = {}, cols = '140', config } = {}) => {
+  const sb = sandbox();
+  const script = config ? scriptCopy(sb.dir, config) : SCRIPT;
+  const input = baseInput({ session_id: 'pc1', rate_limits: { five_hour: { used_percentage: 30, resets_at: Math.floor(Date.now() / 1000) + 7200 } } });
+  if (pc !== undefined) input.prompt_cache = pc;
+  return strip(render(input, { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, ...env }, cols, script }).out);
+};
+test('prompt cache: the docs sample (warm, expiry in the past) shows the cold segment with the token count', () => {
+  const t = cacheOut({ ...DOCS_CACHE(), recache_tokens_if_cold: 412000 });
+  assert.match(t, /cache cold · next reply re-caches 412k/, t);
+});
+test('prompt cache: a cache that expires in the future shows nothing', () => {
+  const t = cacheOut({ ...DOCS_CACHE(), expires_at: Math.floor(Date.now() / 1000) + 600, recache_tokens_if_cold: 412000 });
+  assert.ok(!/cache/.test(t), t);
+});
+test('prompt cache: warm false with caching_observed true shows the segment', () => {
+  const t = cacheOut({ ...DOCS_CACHE(), warm: false, expires_at: null, recache_tokens_if_cold: 250000 });
+  assert.match(t, /cache cold · next reply re-caches 250k/, t);
+});
+test('prompt cache: caching_observed false shows nothing (the provider reports no cache)', () => {
+  const t = cacheOut({ ...DOCS_CACHE(), warm: false, caching_observed: false, expires_at: null, recache_tokens_if_cold: 250000 });
+  assert.ok(!/cache/.test(t), t);
+});
+test('prompt cache: recache_tokens_if_cold null or under 100k shows nothing', () => {
+  assert.ok(!/cache/.test(cacheOut({ ...DOCS_CACHE(), recache_tokens_if_cold: null })));
+  assert.ok(!/cache/.test(cacheOut({ ...DOCS_CACHE(), recache_tokens_if_cold: 99999 })));
+  assert.match(cacheOut({ ...DOCS_CACHE(), recache_tokens_if_cold: 100000 }), /cache cold/);
+});
+test('prompt cache: no object (older Claude Code) shows nothing', () => {
+  assert.ok(!/cache/.test(cacheOut(undefined)));
+});
+test('prompt cache: a hostile object (strings, NaN) shows nothing and does not crash', () => {
+  assert.ok(!/cache/.test(cacheOut({ warm: 'no', caching_observed: true, expires_at: 'soon', recache_tokens_if_cold: 'lots' })));
+  assert.ok(!/cache/.test(cacheOut('cold')));
+});
+test('prompt cache: show.cache false turns it off; the threshold is configurable', () => {
+  const cold = { ...DOCS_CACHE(), recache_tokens_if_cold: 412000 };
+  assert.ok(!/cache/.test(cacheOut(cold, { config: { show: { cache: false } } })));
+  assert.ok(!/cache/.test(cacheOut(cold, { config: { cacheColdTokens: 500000 } })));
+  assert.match(cacheOut({ ...cold, recache_tokens_if_cold: 60000 }, { config: { cacheColdTokens: 50000 } }), /cache cold · next reply re-caches 60k/);
+});
+test('prompt cache: a narrow bar drops the segment before the usage meters; minimal mode keeps it off', () => {
+  const cold = { ...DOCS_CACHE(), recache_tokens_if_cold: 412000 };
+  const t = cacheOut(cold, { cols: '50' });
+  assert.ok(!/cache/.test(t) && /session|5h/.test(t), t);
+  assert.ok(!/cache/.test(cacheOut(cold, { config: { mode: 'minimal' } })));
+});
+
 test('PostModelSwitch source auto: the alert shows Claude Code\'s own fallback at any usage, across and within a family', () => {
   const sb = sandbox();
   const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
