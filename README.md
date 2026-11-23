@@ -146,7 +146,7 @@ Claude Code also continues on its own. Since version 2.1.234, an open session th
 
 Keep-working needs Claude's task list. Claude Code leaves the task tools out on current models unless you start it with `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` (they are on by default for Opus 4.7, Sonnet 4.6, Haiku 4.5 and earlier), so in a session without them there are no open todos for keep-working to see, and checkpoints carry no todo list. `ccrig --doctor` says so when keep-working is on.
 
-Keep-working applies to every session the hook runs in, including a `claude -p` script: with todos still open, its Stop hook asks for another turn (up to its limit). Turn it off for scripts with `--keep-working off`, or run them under a profile without the guardian. Cross-profile failover is for people who hold two plans of their own (work and personal, say); whether continuing on another account is allowed is between you and your plan's terms, which is why it is off unless you turn it on.
+Keep-working applies to every session the hook runs in, including a `claude -p` script: with todos still open, its Stop hook asks for another turn (up to its limit), except while Claude waits on background tasks or a scheduled wakeup, when it allows the stop. Turn it off for scripts with `--keep-working off`, or run them under a profile without the guardian. Cross-profile failover is for people who hold two plans of their own (work and personal, say); whether continuing on another account is allowed is between you and your plan's terms, which is why it is off unless you turn it on.
 
 ## The session board (opt-in)
 
