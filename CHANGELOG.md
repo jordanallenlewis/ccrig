@@ -12,6 +12,7 @@ In-progress work lives under `[Unreleased]` until it's cut.
 ## [Unreleased]
 
 ### Fixed
+- Keep-working no longer pushes extra turns while Claude is waiting on background tasks or a scheduled wakeup. When Claude Code reports either at a turn end, the stop is allowed and the stuck counter is left alone (#44).
 - Right after `/compact`, the context bar no longer shows the size from before the compaction when Claude Code sends no percentage yet. It shows no number until the next reply, as in a new session.
 - The pace forecast starts fresh when a window rolls over, not only when usage drops by more than 15 points. A new reset time more than 10 minutes later than the last one means a new window, so a small drop (say 14% to 6%) no longer lets the old window's climb feed the new window's forecast.
 

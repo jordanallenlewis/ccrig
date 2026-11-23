@@ -916,6 +916,23 @@ test('keep-working: a question in last_assistant_message wins over a lagging tra
   assert.strictEqual(JSON.parse(r2.out).decision, 'block', 'no field: falls back to the transcript');
 });
 
+test('keep-working: allows the stop while background work or a scheduled wakeup is in flight', () => {
+  const sb = sandbox();
+  const script = scriptCopy(sb.dir, { keepWorking: true });
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const tp = transcript(sb.dir, [todoEntry([{ content: 'A', status: 'pending' }, { content: 'B', status: 'pending' }]), asstEntry("The migration is running in the background; I'll pick up the docs when it reports back.")]);
+  const bg = [{ id: 'task-001', type: 'shell', status: 'running' }];
+  const cron = [{ id: 'cron-001', schedule: '*/10 * * * *' }];
+  const hit = (extra, sid) => hookRun('stop', Object.assign({ session_id: sid, transcript_path: tp }, extra), { env, script });
+  assert.strictEqual(hit({ background_tasks: bg }, 'bg1').out.trim(), '', 'background_tasks in flight: allow');
+  assert.strictEqual(hit({ background_tasks: [], session_crons: cron }, 'bg2').out.trim(), '', 'session_crons pending: allow');
+  assert.strictEqual(JSON.parse(hit({ background_tasks: [], session_crons: [] }, 'bg3').out).decision, 'block', 'empty arrays still block');
+  assert.strictEqual(JSON.parse(hit({}, 'bg4').out).decision, 'block', 'absent fields still block');
+  // the allowed stops leave the stuck counters alone: maxStuck 3 still gives 3 blocks afterwards
+  for (let i = 0; i < 3; i++) hit({ background_tasks: bg }, 'bg5');
+  assert.strictEqual(JSON.parse(hit({}, 'bg5').out).decision, 'block', 'parks did not use up the stuck allowance');
+});
+
 test('keep-working: stops forcing once progress stalls (stuck guard)', () => {
   const sb = sandbox();
   const script = scriptCopy(sb.dir, { keepWorking: { maxStuck: 2 } });
