@@ -93,6 +93,7 @@ The band is shared, so you can build on it. A mod of your own that lists `ccrig`
 
 - **Profile**: the active Claude account, when you run more than one
 - **A rule line** above the bar, so it reads apart from the conversation above it. It turns amber, then red, as a usage window nears its limit
+- **Cache cold**: `cache cold · next reply re-caches 412k` when Claude Code reports that the prompt cache has gone cold and the next reply has to re-process a long conversation. It shows nothing while the cache is warm, and nothing under 100k tokens (`"cacheColdTokens"` changes that; `"show": {"cache": false}` turns it off). It needs Claude Code 2.1.251 or newer, reads only what Claude Code hands the bar, and drops first on a narrow terminal.
 - **Folder, model, effort**: with a `1M` tag on 1M-context models, plus `fast` / `no-think` flags
 - **Context window**: a color-coded meter (green, yellow, red)
 - **Git**: branch, uncommitted count, unpushed/unpulled vs upstream
