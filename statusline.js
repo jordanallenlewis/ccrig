@@ -93,7 +93,7 @@ const UPDATE_PUBKEY = '';
 // DEFAULTS: generic, safe for anyone. Override in statusline.config.json
 // (next to this file); your overrides deep-merge over these and survive updates.
 // ===========================================================================
-const DEFAULT_ORDER = ['profile', 'update', 'folder', 'model', 'downgrade', 'effort', 'flags', 'context', 'git', 'agents', 'caveman', 'billing', 'session', 'weekly', 'fable', 'spend', 'forecast', 'resumeHint', 'cost', 'sessionName'];
+const DEFAULT_ORDER = ['profile', 'update', 'folder', 'model', 'downgrade', 'effort', 'flags', 'context', 'cache', 'git', 'agents', 'caveman', 'billing', 'session', 'weekly', 'fable', 'spend', 'forecast', 'resumeHint', 'cost', 'sessionName'];
 // what survives in minimal mode; the safety/attention segments stay on purpose
 const MINIMAL_KEEP = ['profile', 'update', 'folder', 'model', 'downgrade', 'context', 'git', 'agents', 'forecast', 'resumeHint'];
 const MODES = ['minimal', 'normal', 'expanded'];
@@ -112,6 +112,7 @@ const DEFAULTS = {
     flags: true,        // fast (when on) / no-think (when thinking is off)
     context: true,      // ctx: color-coded context-window bar
     agents: true,       // 🤖 count of subagents/Task running right now (workflow + subagent support)
+    cache: true,        // ⏸ shown only when the prompt cache has gone cold and the next reply re-caches a lot (Claude Code 2.1.251+)
     git: true,          // 🌿 branch ●uncommitted ↑unpushed ↓unpulled
     caveman: true,      // [CAVEMAN] badge if the caveman plugin is active
     billing: true,      // api when a key bills per token; refined shows sub only with "always" (classic: sub or api)
@@ -165,6 +166,7 @@ const DEFAULTS = {
   // Feature 4 (cross-profile hint): OFF by default — it writes to a shared ~/.claude-usage-ledger
   // outside your config dir, and cross-account use is a per-user judgement. Opt in with "ledger": true.
   ledger: false,
+  cacheColdTokens: 100000,   // the cache segment shows once the next reply would re-cache at least this many tokens
   downgradeAlert: true,      // ⬇ warn when Claude Code moves the session to a lower model by itself (exact on 2.1.251+; before that, a tier drop at 50%+ usage)
   // Opt-in: Fable's own weekly limit. Claude Code hands the status line only the 5-hour and all-models
   // weekly windows, so with this on a detached background check (at most once a minute, never during a
@@ -963,6 +965,25 @@ function modelIsLower(a, b) { const x = modelRank(a), y = modelRank(b); for (let
 function modelFamily(name) { return String(name || '').split(/[\s(]/)[0]; }
 let DEMO_DOWNGRADE = null; // [fromName, toName] set by --demo
 let DEMO_FABLE = null; // a fake Fable cache record set by --demo
+// Claude Code 2.1.251+ sends `prompt_cache`. Say so when the cache has gone cold and the next reply will re-process
+// a long conversation. Reads stdin only. Nothing shows while the cache is warm, when the provider reports no cache
+// tokens (`caching_observed` false), when Claude Code gave no size, or when the size is under `cacheColdTokens`.
+function cacheSeg(input, width) {
+  const pc = input && input.prompt_cache;
+  if (!pc || typeof pc !== 'object' || width < 70) return '';
+  if (pc.caching_observed !== true) return '';
+  const n = pc.recache_tokens_if_cold;
+  const min = Number.isFinite(CONFIG.cacheColdTokens) ? CONFIG.cacheColdTokens : 100000;
+  if (typeof n !== 'number' || !Number.isFinite(n) || n < min) return '';
+  const exp = pc.expires_at;
+  const expired = typeof exp === 'number' && Number.isFinite(exp) && exp * (exp < 1e12 ? 1000 : 1) <= Date.now();
+  if (!(pc.warm === false || expired)) return '';
+  const k = n >= 1e6 ? (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M' : Math.round(n / 1000) + 'k';
+  const head = 'cache cold';
+  return isRefined()
+    ? [c(K.yellow, head) + lbl(' · next reply re-caches ') + c(K.yellow, k), c(K.yellow, head + ' ' + k), c(K.yellow, head)]
+    : c(K.yellow, head) + c(K.dim, ' · next reply re-caches ') + c(K.yellow, k);
+}
 function downgradeSeg(input, live) {
   if (CONFIG.downgradeAlert === false) return '';
   const down = isRefined() ? '↓ ' : '⬇ ';
@@ -1267,7 +1288,7 @@ const LAMP_PRI = { blocked: 3, done: 2, working: 1 };
 const BOARD_LIVE_MS = 600000;      // a heartbeat this fresh means the bar is still redrawing
 const BOARD_STALE_MS = 3600000;    // older than this and the record is deleted
 // Notification types that mean Claude Code is waiting on a human. The installed matcher already
-// filters on the type, and the payload field is not documented, so the handler treats a MISSING
+// filters on the type (the payload's `notification_type`), so the handler treats a MISSING
 // type as blocked and only skips a type it positively recognises as something else.
 const BLOCKED_NOTIFY = new Set(['permission_prompt', 'elicitation_dialog', 'elicitation_url_dialog', 'agent_needs_input']);
 // idle_prompt (Claude has sat waiting for the user) turns a stuck yellow lamp green: an Esc interrupt or
@@ -2480,6 +2501,7 @@ function collectItems(input, width, gitOverride) {
     out.context = [`${lbl('ctx')} ${meter(ctx, 10, col)} ${P}`, `${lbl('ctx')} ${meter(ctx, 6, col)} ${P}`, `${lbl('ctx')} ${P}`];
   } else out.context = `${c(K.dim, 'ctx')} ${bar(ctx, 10, CONFIG.thresholds.context)} ${c(K.dim, ctx + '%')}`;
 
+  out.cache = cacheSeg(input, width);
   out.git = gitOverride != null ? gitOverride : gitSeg(cwd);
   const agentInfo = DEMO_AGENTS ? { size: 0, list: [] } : agentScan(input.transcript_path); // one scan per render
   out.agents = agentsSeg(agentInfo.list);
@@ -2874,7 +2896,7 @@ function runHookPreCompact(input) {
 // prompt, so this must stay silent and exit 0: emitHook({}) writes zero bytes.
 function runHookUserPrompt(input) { writeLamp(input, 'working', 'prompt'); emitHook({}); }
 // Board lamp: a notification that means Claude Code is waiting on a human decision. The install
-// wires a matcher on the notification type; the payload field carrying that type is not documented,
+// wires a matcher on the notification type (`notification_type` in the payload),
 // so a missing type is trusted (the matcher already filtered) and only a recognised non-blocking
 // type is skipped.
 function runHookNotification(input) {
