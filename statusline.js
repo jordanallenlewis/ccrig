@@ -165,7 +165,7 @@ const DEFAULTS = {
   // Feature 4 (cross-profile hint): OFF by default — it writes to a shared ~/.claude-usage-ledger
   // outside your config dir, and cross-account use is a per-user judgement. Opt in with "ledger": true.
   ledger: false,
-  downgradeAlert: true,      // ⬇ warn when the model silently downgrades tier mid-session (Opus→Sonnet)
+  downgradeAlert: true,      // ⬇ warn when Claude Code moves the session to a lower model by itself (exact on 2.1.251+; before that, a tier drop at 50%+ usage)
   // Opt-in: Fable's own weekly limit. Claude Code hands the status line only the 5-hour and all-models
   // weekly windows, so with this on a detached background check (at most once a minute, never during a
   // render) reads your Claude sign-in token and asks Anthropic's usage endpoint, the one /usage reads,
@@ -949,6 +949,18 @@ function agentsSeg(list) {
 // ⬇ segment: Claude Code silently drops a tier (Fable → Opus, Opus → Sonnet) when you approach a model's cap.
 // Track the highest model tier seen this session and shout if the current one is lower.
 function modelTier(name) { const n = String(name == null ? '' : name).toLowerCase(); return /fable/.test(n) ? 4 : /opus/.test(n) ? 3 : /sonnet/.test(n) ? 2 : /haiku/.test(n) ? 1 : 0; }
+// "claude-opus-4-8[1m]" -> "Opus 4.8", "claude-fable-5-2" -> "Fable 5.2", "opus" -> "Opus"; anything else comes back as given
+function prettyModelId(id) {
+  const s = String(id == null ? '' : id).trim().replace(/\[[^\]]*\]\s*$/, '');
+  const m = s.match(/^(?:claude-)?(fable|opus|sonnet|haiku)(?:-(\d+)(?:-(\d{1,2}))?)?(?:-\d{8})?$/i);
+  if (!m) return s.slice(0, 40);
+  const fam = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
+  return m[2] ? fam + ' ' + m[2] + (m[3] ? '.' + m[3] : '') : fam;
+}
+// a sortable rank: tier first, then the version ("Opus 4.8" -> [3,4,8]); an unversioned name ranks as version 0
+function modelRank(name) { const m = String(name || '').match(/(\d+)(?:\.(\d+))?/); return [modelTier(name), m ? +m[1] : 0, m && m[2] ? +m[2] : 0]; }
+function modelIsLower(a, b) { const x = modelRank(a), y = modelRank(b); for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i]; return false; }
+function modelFamily(name) { return String(name || '').split(/[\s(]/)[0]; }
 let DEMO_DOWNGRADE = null; // [fromName, toName] set by --demo
 let DEMO_FABLE = null; // a fake Fable cache record set by --demo
 function downgradeSeg(input, live) {
@@ -963,11 +975,18 @@ function downgradeSeg(input, live) {
   const cur = (input.model && (input.model.display_name || input.model.id)) || '';
   const tier = modelTier(cur);
   if (!tier || !sid || !SID_RE.test(sid)) return '';
+  // The session's `.model` file holds the highest tier seen and, when Claude Code 2.1.251+ told the PostModelSwitch
+  // hook it moved the session by itself (source "auto": a safety fallback, at any usage level and within a family),
+  // that fallback: `fb`. One file, one read, so a render stays inside its file system budget.
   const f = path.join(guardDir(), sid + '.model');
-  let top = 0, topName = '';
-  try { const o = JSON.parse(fs.readFileSync(f, 'utf8')); top = o.tier || 0; topName = o.name || ''; } catch {}
+  let top = 0, topName = '', fb = null;
+  try { const o = JSON.parse(fs.readFileSync(f, 'utf8')); top = o.tier || 0; topName = o.name || ''; fb = o.fb || null; } catch {}
+  if (fb && fb.from && fb.to && cur.toLowerCase().includes(modelFamily(fb.to).toLowerCase())) {
+    const sameFamily = modelFamily(fb.from) === modelFamily(fb.to);
+    return withWas(cBold(K.red, down + (sameFamily ? fb.to : modelFamily(fb.to))), sameFamily ? fb.from : modelFamily(fb.from));
+  }
   if (tier >= top) { // an equal-or-higher tier is the session's ceiling: record it
-    if (live && tier > top) { try { fs.mkdirSync(guardDir(), { recursive: true, mode: 0o700 }); fs.writeFileSync(f, JSON.stringify({ tier, name: cur })); sweepGuardDir(); } catch {} }
+    if (live && tier > top) { try { fs.mkdirSync(guardDir(), { recursive: true, mode: 0o700 }); fs.writeFileSync(f, JSON.stringify({ tier, name: cur, fb: fb || undefined })); sweepGuardDir(); } catch {} }
     return '';
   }
   // A drop below the ceiling. Only surface when usage is ELEVATED — that's when Claude Code
@@ -3123,6 +3142,29 @@ function runHookStopFailure(input) {
   armAutopilot(input, lim.which, 100, lim.reset);
   emitHook({});
 }
+// PostModelSwitch (Claude Code 2.1.251+): `source` "auto" is Claude Code's own fallback to another model, which the
+// bar then flags at any usage level. A switch the user asked for ("command", "picker", "sdk") clears it and makes the
+// new model the session's baseline, so the usage-based check does not call a deliberate /model a downgrade.
+// "resume" (the model a resumed session restored) changes nothing.
+function runHookModelSwitch(input) {
+  const sid = input && input.session_id;
+  if (!input || typeof sid !== 'string' || !SID_RE.test(sid) || CONFIG.downgradeAlert === false) return emitHook({});
+  const from = prettyModelId(input.from_model), to = prettyModelId(input.to_model);
+  const mf = path.join(guardDir(), sid + '.model');
+  let cur = {}; try { cur = JSON.parse(fs.readFileSync(mf, 'utf8')) || {}; } catch {}
+  const save = (o) => { fs.mkdirSync(guardDir(), { recursive: true, mode: 0o700 }); fs.writeFileSync(mf, JSON.stringify(o)); sweepGuardDir(); };
+  if (input.source === 'auto') {
+    if (!from || !to || from === to) return emitHook({});
+    // opusplan swaps Opus and Sonnet on every plan-mode toggle and reports it as "auto": by design, no fallback.
+    // A move up (a fallback ending) is no downgrade either.
+    if (/opusplan/i.test(String(settingsVal('model') || '')) || !modelIsLower(to, from)) return emitHook({});
+    save({ tier: Math.max(cur.tier || 0, modelTier(from)), name: cur.name || from, fb: { from, to } });
+  } else if (['command', 'picker', 'sdk'].includes(input.source)) {
+    // the user's own pick is the new baseline and ends any fallback alert
+    if (to && modelTier(to)) save({ tier: modelTier(to), name: to }); else if (cur.fb) save({ tier: cur.tier, name: cur.name });
+  }
+  emitHook({});
+}
 // Claude Code's own continue at a usage limit (Notification `quota_auto_resume_fired` / `_stale`): the open
 // session takes the task back (or waits for Enter in the same window), so the detached watcher must not start a
 // second run of it. Leaves the checkpoint and resume ticket alone; the watcher reads this marker and exits.
@@ -3205,6 +3247,7 @@ function runHook(event, input) {
     if (event === 'session-end' || event === 'SessionEnd') return runHookSessionEnd(input);
     if (event === 'board-stop') return runHookBoardStop(input);
     if (event === 'stop-failure' || event === 'StopFailure') return runHookStopFailure(input);
+    if (event === 'model-switch' || event === 'PostModelSwitch') return runHookModelSwitch(input);
     if (event === 'quota-resume') return runHookQuotaResume(input);
     if (event === 'mod-resume') return runHookModResume(input);
     if (event === 'mod-exit') return runHookModExit(input);
@@ -3814,7 +3857,7 @@ function runOptions() {
   o += '\nmore:\n';
   o += '  claudeBin:            ' + claudeBin() + '   the claude auto-resume relaunches\n';
   o += '  continuousCheckpoint: ' + (CONFIG.continuousCheckpoint !== false) + '   refresh the checkpoint every ~10s near a limit\n';
-  o += '  downgradeAlert:       ' + (CONFIG.downgradeAlert !== false) + '   flag a silent Fable -> Opus or Opus -> Sonnet drop\n';
+  o += '  downgradeAlert:       ' + (CONFIG.downgradeAlert !== false) + '   flag when Claude Code moves the session to another model by itself\n';
   o += '  fableLimit:           ' + (CONFIG.fableLimit === true) + '   show Fable\'s weekly limit (a background call to Anthropic with your sign-in)\n';
   o += '  reinjectOnCompact:    ' + JSON.stringify(CONFIG.reinjectOnCompact) + '   re-include a rules file after a compaction (true = CLAUDE.md)\n';
   o += '  autoUpdate:           ' + (CONFIG.autoUpdate === true) + '   install new releases from the daily check\n';
@@ -4108,6 +4151,9 @@ const HOOK_EVENTS = [
   // the open session takes the task back, so an armed watcher must not start a second run of it.
   // `disabled` is left out: Claude Code gave up waiting, so the watcher is still the only resume.
   ['Notification', 'quota-resume', 'guardian', QUOTA_RESUME_MATCHER, 0, '2.1.234'],
+  // Claude Code moved the session to another model by itself (a safety fallback, at any usage level), or the user
+  // switched: `source` tells them apart, so the downgrade alert is exact on 2.1.251+ and a guess from usage before.
+  ['PostModelSwitch', 'model-switch', 'guardian', '', 0, '2.1.251'],
 ];
 // can this Claude Code run the hook? (an entry's 6th field is the first version that has its event)
 function hookSupported(e) {

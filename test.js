@@ -1038,6 +1038,62 @@ test('downgrade alert stays quiet on a low-usage (deliberate) model switch', () 
   assert.ok(!sonnet.includes('⬇'), 'low usage -> assume deliberate, no false alarm');
 });
 
+test('PostModelSwitch source auto: the alert shows Claude Code\'s own fallback at any usage, across and within a family', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const cool = { five_hour: { used_percentage: 10 } };
+  render(baseInput({ session_id: 'ms1', model: { id: 'claude-fable-5-2', display_name: 'Fable 5.2' }, rate_limits: cool }), { env });
+  hookRun('model-switch', { session_id: 'ms1', from_model: 'claude-fable-5-2', to_model: 'claude-opus-5', source: 'auto' }, { env });
+  const across = strip(render(baseInput({ session_id: 'ms1', model: { id: 'claude-opus-5', display_name: 'Opus 5' }, rate_limits: cool }), { env }).out);
+  assert.match(across, /(↓|⬇) Opus \(was Fable\)/, 'a fallback shows at 10% usage');
+  hookRun('model-switch', { session_id: 'ms2', from_model: 'claude-opus-5-5[1m]', to_model: 'claude-opus-4-8', source: 'auto' }, { env });
+  const within = strip(render(baseInput({ session_id: 'ms2', model: { id: 'claude-opus-4-8', display_name: 'Opus 4.8' }, rate_limits: cool }), { env }).out);
+  assert.match(within, /(↓|⬇) Opus 4\.8 \(was Opus 5\.5\)/, 'and inside one family');
+});
+
+test('REGRESSION: PostModelSwitch auto under opusplan or upward is no fallback alert', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const cool = { five_hour: { used_percentage: 10 } };
+  fs.writeFileSync(path.join(sb.cfg, 'settings.json'), JSON.stringify({ model: 'opusplan' }));
+  render(baseInput({ session_id: 'ms5', model: { display_name: 'Opus 4.8' }, rate_limits: cool }), { env });
+  hookRun('model-switch', { session_id: 'ms5', from_model: 'claude-opus-4-8', to_model: 'claude-sonnet-5', source: 'auto' }, { env });
+  assert.ok(!/was Opus/.test(strip(render(baseInput({ session_id: 'ms5', model: { display_name: 'Sonnet 5' }, rate_limits: cool }), { env }).out)), 'opusplan toggle is by design');
+  const sb2 = sandbox();
+  const env2 = { CLAUDE_CONFIG_DIR: sb2.cfg, HOME: sb2.home };
+  hookRun('model-switch', { session_id: 'ms6', from_model: 'claude-sonnet-5', to_model: 'claude-opus-4-8', source: 'auto' }, { env: env2 });
+  assert.ok(!/was Sonnet/.test(strip(render(baseInput({ session_id: 'ms6', model: { display_name: 'Opus 4.8' }, rate_limits: cool }), { env: env2 }).out)), 'a move up is no drop');
+});
+
+test('PostModelSwitch: a user switch (command) clears the fallback alert and a /model drop at high usage is no alert; resume changes nothing', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const hot = { seven_day: { used_percentage: 88 } };
+  render(baseInput({ session_id: 'ms3', model: { display_name: 'Opus 4.8' }, rate_limits: hot }), { env });
+  hookRun('model-switch', { session_id: 'ms3', from_model: 'claude-opus-4-8', to_model: 'claude-sonnet-5', source: 'auto' }, { env });
+  assert.match(strip(render(baseInput({ session_id: 'ms3', model: { display_name: 'Sonnet 5' }, rate_limits: hot }), { env }).out), /Sonnet 5? ?\(was Opus\)|Sonnet \(was Opus\)/);
+  hookRun('model-switch', { session_id: 'ms3', from_model: 'claude-sonnet-5', to_model: 'claude-sonnet-5', source: 'resume' }, { env });
+  assert.match(strip(render(baseInput({ session_id: 'ms3', model: { display_name: 'Sonnet 5' }, rate_limits: hot }), { env }).out), /was Opus/, 'resume leaves it');
+  hookRun('model-switch', { session_id: 'ms3', from_model: 'claude-sonnet-5', to_model: 'claude-sonnet-5', source: 'command' }, { env });
+  assert.ok(!/was Opus/.test(strip(render(baseInput({ session_id: 'ms3', model: { display_name: 'Sonnet 5' }, rate_limits: hot }), { env }).out)), 'the user switch clears it');
+  render(baseInput({ session_id: 'ms4', model: { display_name: 'Opus 4.8' }, rate_limits: hot }), { env });
+  hookRun('model-switch', { session_id: 'ms4', from_model: 'claude-opus-4-8', to_model: 'claude-sonnet-5', source: 'command' }, { env });
+  assert.ok(!strip(render(baseInput({ session_id: 'ms4', model: { display_name: 'Sonnet 5' }, rate_limits: hot }), { env }).out).includes('was Opus'), '/model to a lower tier at 88% is deliberate');
+  assert.strictEqual(hookRun('model-switch', { session_id: '../x', to_model: 'opus', source: 'auto' }, { env }).code, 0);
+});
+
+test('model-switch hook is wired with the guardian from Claude Code 2.1.251, not before, and uninstall removes it', () => {
+  const sb = sandbox();
+  run(['--install', '--this-profile'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home, CCRIG_CC_VERSION: '2.1.287' } });
+  const s = JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8'));
+  assert.ok(hasSlug(s, 'PostModelSwitch', 'model-switch'), 'wired');
+  run(['--uninstall', '--this-profile'], { env: { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home } });
+  assert.ok(!hasSlug(JSON.parse(fs.readFileSync(path.join(sb.cfg, 'settings.json'), 'utf8')), 'PostModelSwitch', 'model-switch'), 'uninstall strips it');
+  const old = sandbox();
+  run(['--install', '--this-profile'], { env: { CLAUDE_CONFIG_DIR: old.cfg, HOME: old.home, CCRIG_CC_VERSION: '2.1.250' } });
+  assert.ok(!hasSlug(JSON.parse(fs.readFileSync(path.join(old.cfg, 'settings.json'), 'utf8')), 'PostModelSwitch', 'model-switch'), 'an older Claude Code never gets it');
+});
+
 test('--update verifies an Ed25519 signature when a key is pinned; rejects a bad one', () => {
   const crypto = require('crypto');
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
