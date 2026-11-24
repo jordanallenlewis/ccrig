@@ -3875,6 +3875,53 @@ test('refined: a reset later this week reads as a weekday', () => {
   assert.match(out, /weekly \S+ 10% ↺ (Sun|Mon|Tue|Wed|Thu|Fri|Sat) \d{1,2}:\d\d[ap]/);
 });
 
+test('a reset a week out is dated in the locale\'s day/month order (#52)', { skip: WIN && 'Node on Windows takes the locale from the system, not LANG' }, () => {
+  const sb = sandbox();
+  const at = R_NOW() + Math.round(6.5 * 86400);
+  const d = new Date(at * 1000); // the bar runs in UTC below
+  const input = baseInput({ rate_limits: { seven_day: { used_percentage: 40, resets_at: at } } });
+  const gb = strip(render(input, { env: R_ENV(sb, { LANG: 'en_GB.UTF-8', TZ: 'UTC' }) }).out);
+  assert.ok(gb.includes('↺ ' + d.getUTCDate() + '/' + (d.getUTCMonth() + 1) + ' '), 'en_GB: day/month: ' + gb);
+  const sb2 = sandbox();
+  const de = strip(render(input, { env: R_ENV(sb2, { LANG: 'de_DE.UTF-8', TZ: 'UTC' }) }).out);
+  assert.ok(de.includes('↺ ' + d.getUTCDate() + '.' + (d.getUTCMonth() + 1) + '. '), 'de_DE: day.month.: ' + de);
+  const sb3 = sandbox();
+  const us = strip(render(input, { env: R_ENV(sb3, { TZ: 'UTC' }) }).out);
+  assert.ok(us.includes('↺ ' + (d.getUTCMonth() + 1) + '/' + d.getUTCDate() + ' '), 'en_US: month/day: ' + us);
+});
+
+test('the mod host state carries the locale\'s date layout for the pane (#52)', { skip: WIN && 'Node on Windows takes the locale from the system, not LANG' }, () => {
+  const sb = sandbox();
+  const j = JSON.parse(render(fullInput(), { env: R_ENV(sb, { CCRIG_HOST: 'mod', CCRIG_PURE: '1', LANG: 'de_DE.UTF-8' }) }).out);
+  assert.deepStrictEqual(j.state.date, { first: 'd', sep: '.', end: '.' });
+  const sb2 = sandbox();
+  const us = JSON.parse(render(fullInput(), { env: R_ENV(sb2, { CCRIG_HOST: 'mod', CCRIG_PURE: '1' }) }).out);
+  assert.deepStrictEqual(us.state.date, { first: 'm', sep: '/', end: '' });
+  // an empty LC_ALL leaves ICU on its root locale (11-30); that is no locale, so month/day
+  const sb3 = sandbox();
+  const und = JSON.parse(render(fullInput(), { env: R_ENV(sb3, { CCRIG_HOST: 'mod', CCRIG_PURE: '1', LANG: 'en_GB.UTF-8', LC_ALL: '' }) }).out);
+  assert.deepStrictEqual(und.state.date, { first: 'm', sep: '/', end: '' });
+});
+
+test('a locale cache from an older version (no date layout) is rebuilt, not used as month/day', { skip: WIN && 'Node on Windows takes the locale from the system, not LANG' }, () => {
+  const sb = sandbox();
+  const tmp = path.join(sb.dir, 'tmp'); fs.mkdirSync(tmp);
+  const env = R_ENV(sb, { LANG: 'en_GB.UTF-8', TZ: 'UTC', TMPDIR: tmp, TEMP: tmp, TMP: tmp });
+  const at = R_NOW() + Math.round(6.5 * 86400);
+  const d = new Date(at * 1000);
+  const input = baseInput({ rate_limits: { seven_day: { used_percentage: 40, resets_at: at } } });
+  render(input, { env }); // writes the locale cache
+  const own = fs.readdirSync(tmp).find((n) => n.startsWith('ccrig-'));
+  const f = path.join(tmp, own || '-', 'ccsl-locale.json');
+  assert.ok(fs.existsSync(f), 'the locale cache sits in the cache dir');
+  const o = JSON.parse(fs.readFileSync(f, 'utf8'));
+  delete o.date;
+  fs.writeFileSync(f, JSON.stringify(o));
+  const out = strip(render(input, { env }).out);
+  assert.ok(out.includes('↺ ' + d.getUTCDate() + '/' + (d.getUTCMonth() + 1) + ' '), 'day/month after the rebuild: ' + out);
+  assert.ok(JSON.parse(fs.readFileSync(f, 'utf8')).date, 'the rebuilt cache carries the date layout');
+});
+
 test('refined: text labels, no emoji; the limit alert gets its own line at critical', () => {
   const sb = sandbox();
   const input = fullInput({ rate_limits: { five_hour: { used_percentage: 96, resets_at: R_NOW() + 900 } } });

@@ -24,6 +24,8 @@ export type ModState = {
   update?: { latest: string | null; hint: string }
   // Fable's weekly window from the opt-in background check ("fableLimit": true); Claude Code never reports it
   fable?: { pct: number; resetsAt?: string } | null
+  // the day/month layout of the user's locale, read by statusline.js (the mod's runtime may report en-US whatever the locale)
+  date?: DateParts
 }
 
 const BOM = String.fromCharCode(0xfeff)
@@ -164,6 +166,8 @@ function validState(x: unknown): ModState | null {
     update: s.update && typeof s.update === 'object' ? (s.update as ModState['update']) : undefined,
     // an older statusline.js sends no fable key: leave it out rather than add a null
     ...(s.fable === undefined ? {} : { fable: validFable(s.fable) }),
+    // an older statusline.js sends no date layout; an unsound one is dropped
+    ...(validDateParts(s.date) ? { date: { first: s.date.first, sep: s.date.sep, end: s.date.end } } : {}),
   }
 }
 
@@ -195,8 +199,62 @@ export function windowLabel(kind: string): string {
   return kind.replace(/_/g, ' ')
 }
 
-// the reset as CCRig's default clock style: 8:53a today, 7/22 6:53a on another day
-export function fmtReset(resetsAt: string | undefined, nowMs: number): string {
+// A date as day and month in the locale's own order and marks, as the status line writes it: 11/30 in en-US,
+// 30/11 in en-GB, 30.11. in de-DE. The digits stay ASCII; anything unsound falls back to month/day.
+export interface DateParts { first: 'm' | 'd'; sep: string; end: string }
+const DATE_MD: DateParts = { first: 'm', sep: '/', end: '' }
+
+function validDateParts(p: unknown): p is DateParts {
+  if (!p || typeof p !== 'object') return false
+  const o = p as Record<string, unknown>
+  return (o.first === 'm' || o.first === 'd') && typeof o.sep === 'string' && typeof o.end === 'string' &&
+    /^[^\d\p{Cc}\p{Cf}]{1,3}$/u.test(o.sep) && /^[^\d\p{Cc}\p{Cf}]{0,2}$/u.test(o.end)
+}
+
+export function fmtDayMonth(d: Date, parts?: unknown): string {
+  const p = validDateParts(parts) ? parts : DATE_MD
+  const m = d.getMonth() + 1
+  const day = d.getDate()
+  return (p.first === 'd' ? day + p.sep + m : m + p.sep + day) + p.end
+}
+
+export function localeDateParts(locale?: string): DateParts {
+  try {
+    const f = new Intl.DateTimeFormat(locale, { month: 'numeric', day: 'numeric' })
+    // an empty LC_ALL leaves ICU on its root locale, which writes 11-30: no locale means month/day
+    if (f.resolvedOptions().locale === 'und') return { ...DATE_MD }
+    const parts = f.formatToParts(new Date(2026, 10, 30, 12))
+    let first: 'm' | 'd' = 'm'
+    let sep = ''
+    let end = ''
+    let seen = 0
+    for (const x of parts) {
+      if (x.type === 'month' || x.type === 'day') {
+        if (!seen) first = x.type === 'month' ? 'm' : 'd'
+        seen++
+      } else if (x.type !== 'literal') return { ...DATE_MD }
+      else if (seen === 1) sep += x.value
+      else if (seen === 2) end += x.value
+    }
+    // bidi and other invisible marks (ar: U+200F before the slash) go; a trailing space has nothing to separate
+    const clean = (v: string) => v.replace(/[\p{Cc}\p{Cf}]/gu, '')
+    const o: DateParts = { first, sep: clean(sep), end: clean(end).trimEnd() }
+    return seen === 2 && validDateParts(o) ? o : { ...DATE_MD }
+  } catch {
+    return { ...DATE_MD }
+  }
+}
+
+let LOCALE_DATE: DateParts | null = null
+
+// the layout statusline.js read from the user's locale; until it arrives (or with no Node, as in the Desktop app)
+// the runtime's own locale decides
+export function useDateParts(p: unknown): void {
+  if (validDateParts(p)) LOCALE_DATE = { first: p.first, sep: p.sep, end: p.end }
+}
+
+// the reset as CCRig's default clock style: 8:53a today, 7/22 6:53a on another day (the date in the locale's order)
+export function fmtReset(resetsAt: string | undefined, nowMs: number, dateParts?: DateParts): string {
   if (!resetsAt) return ''
   const t = Date.parse(resetsAt)
   if (!Number.isFinite(t)) return ''
@@ -211,7 +269,7 @@ export function fmtReset(resetsAt: string | undefined, nowMs: number): string {
   if (sameDay) return clock
   // a reset inside the coming week reads as its weekday, the way the status line writes it
   if (t - nowMs < 6 * 86400000) return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()] + ' ' + clock
-  return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + clock
+  return fmtDayMonth(d, dateParts ?? (LOCALE_DATE ??= localeDateParts())) + ' ' + clock
 }
 
 // "claude-opus-5-5[1m]" reads as "Opus 5.5"; anything else is shown as given, minus the window tag
