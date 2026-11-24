@@ -15,7 +15,7 @@ import type { Span, Seg, Usage, RateLimit, ModState } from './lib'
 import {
   CHANGES_BAR, COLOR, HELP, USAGE_PLANS, alertFor, alertKey, ansiToSpans, classicResult, cliArgs, configFrom,
   crossings, detectWiring, fmtReset, liveLimits, nativeSegments, nodeFromSettings, packLines,
-  parseRigOutput, plainText, resumeCommand, splitArgs, statusInput, summaryLine, usageSeg,
+  parseRigOutput, plainText, resumeCommand, splitArgs, statusInput, summaryLine, usageSeg, useDateParts,
   windowLabel, withFable, xterm256,
 } from './lib'
 
@@ -206,7 +206,10 @@ async function refreshRig($: EngineInterface) {
         rig = parsed ? parsed.segs : null
         rigLines = parsed?.lines ?? null
         rigCols = parsed?.lines ? renderedCols : 0
-        if (parsed?.state) rigState = parsed.state
+        if (parsed?.state) {
+          rigState = parsed.state
+          useDateParts(parsed.state.date)
+        }
       } catch {
         // no Node on PATH, or an app where a mod cannot start processes: the native line takes over
         rig = null

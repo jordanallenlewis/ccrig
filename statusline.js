@@ -605,9 +605,43 @@ function fmtReset(epochSec) {
   if (sameDay) return clock;
   // refined: a reset inside the coming week reads as its weekday ("Mon 8:55a", "Di 14:40"), which is how people think about it
   if (week) return localeInfo().days[d.getDay()] + ' ' + clock;
-  return `${d.getMonth() + 1}/${d.getDate()} ${clock}`;
+  return fmtDayMonth(d, localeInfo().date) + ' ' + clock;
 }
-// The locale's clock (24-hour or not) and its short weekday names. The first Intl call in a process costs
+// A date as day and month in the locale's own order and marks: 11/30 in en-US, 30/11 in en-GB, 30.11. in de-DE.
+// Only the order and the marks come from the locale; the digits are always ASCII and the calendar Gregorian, so
+// the bar reads the same numbers everywhere. Anything that is not a sound layout falls back to month/day.
+const DATE_MD = { first: 'm', sep: '/', end: '' };
+function validDateParts(p) {
+  return !!p && (p.first === 'm' || p.first === 'd') && typeof p.sep === 'string' && typeof p.end === 'string' &&
+    /^[^\d\p{Cc}\p{Cf}]{1,3}$/u.test(p.sep) && /^[^\d\p{Cc}\p{Cf}]{0,2}$/u.test(p.end);
+}
+function fmtDayMonth(d, parts) {
+  const p = validDateParts(parts) ? parts : DATE_MD;
+  const m = d.getMonth() + 1, day = d.getDate();
+  return (p.first === 'd' ? day + p.sep + m : m + p.sep + day) + p.end;
+}
+// pure: the locale's short numeric day/month layout (for tests; the render reads it once a day through localeInfo)
+function localeDateParts(locale) {
+  try {
+    const f = new Intl.DateTimeFormat(locale, { month: 'numeric', day: 'numeric' });
+    // an empty LC_ALL leaves ICU on its root locale, which writes 11-30: no locale means month/day
+    if (f.resolvedOptions().locale === 'und') return { ...DATE_MD };
+    const parts = f.formatToParts(new Date(2026, 10, 30, 12));
+    const o = { first: '', sep: '', end: '' };
+    let seen = 0;
+    for (const x of parts) {
+      if (x.type === 'month' || x.type === 'day') { if (!seen) o.first = x.type === 'month' ? 'm' : 'd'; seen++; }
+      else if (x.type !== 'literal') return { ...DATE_MD };
+      else if (seen === 1) o.sep += x.value;
+      else if (seen === 2) o.end += x.value;
+    }
+    // bidi and other invisible marks (ar: U+200F before the slash) go; a trailing space has nothing to separate
+    const clean = (v) => v.replace(/[\p{Cc}\p{Cf}]/gu, '');
+    o.sep = clean(o.sep); o.end = clean(o.end).trimEnd();
+    return seen === 2 && validDateParts(o) ? o : { ...DATE_MD };
+  } catch { return { ...DATE_MD }; }
+}
+// The locale's clock (24-hour or not), its short weekday names and its day/month layout. The first Intl call in a process costs
 // about 11ms (it loads the locale data), too much for every render, so the answer is kept in the cache dir
 // for a day, keyed by the locale variables (Windows takes the locale from the system, so the day is the key).
 let LOCALE_INFO = null;
@@ -618,14 +652,16 @@ function localeInfo() {
   const f = path.join(cacheDir(), 'ccsl-locale.json'), now = Date.now();
   try {
     const o = JSON.parse(fs.readFileSync(f, 'utf8'));
-    if (o && o.key === key && o.at <= now && now - o.at < 86400000 && Array.isArray(o.days) && o.days.length === 7 && o.days.every((x) => typeof x === 'string' && x)) return (LOCALE_INFO = o);
+    if (o && o.key === key && o.at <= now && now - o.at < 86400000 && Array.isArray(o.days) && o.days.length === 7 && o.days.every((x) => typeof x === 'string' && x) && validDateParts(o.date)) return (LOCALE_INFO = o);
   } catch {}
-  const o = { key, at: now, h24: false, days: WEEKDAYS_EN.slice() };
+  // a cache written before the date layout existed is rebuilt, never read as month/day
+  const o = { key, at: now, h24: false, days: WEEKDAYS_EN.slice(), date: { ...DATE_MD } };
   try {
     const hc = new Intl.DateTimeFormat(undefined, { hour: 'numeric' }).resolvedOptions().hourCycle;
     o.h24 = hc === 'h23' || hc === 'h24';
     const wd = new Intl.DateTimeFormat(undefined, { weekday: 'short' });
     o.days = o.days.map((en, i) => cleanLabel(wd.format(new Date(2026, 9, 4 + i, 12)), 12) || en); // 2026-10-04 is a Sunday
+    o.date = localeDateParts(undefined);
   } catch {}
   try { fs.writeFileSync(f, JSON.stringify(o), { mode: 0o600 }); } catch {}
   return (LOCALE_INFO = o);
@@ -1750,6 +1786,8 @@ function modState(input) {
     resume: { armed, window: armed ? cp.window || '' : '', resetsAt: armed ? cp.resets_at : null },
     update: { latest, hint: latest ? MOD_UPDATE_CMD : '' },
     fable: fableState(),
+    // the day/month layout of the user's locale, so the pane dates a reset as the bar does (the mod's own runtime may not see the locale)
+    date: localeInfo().date,
   };
 }
 // the Fable window for the mod's pane, toasts and band alert (null when off, stale or unknown)
@@ -2687,7 +2725,7 @@ if (require.main !== module) {
     fetchText, httpGetText, VERSION,
     DEFAULTS, DEFAULT_ORDER, MODES, helpText, watcherCmdMatches, notifySpec, maybeCheckUpdate,
     cleanLabel, padCell, sessionLabel, lampSupersedes, lampFor, lampPings, winLaunch, parseJsonText, profileLabelOf,
-    NOTIFY_MATCHER, isUsageLimitFailure, burnSlope, parseResetText, limitFromFailure, resumeShell, resumeCmdLine, ambiguousMode, localeHour24, humanText,
+    NOTIFY_MATCHER, isUsageLimitFailure, burnSlope, parseResetText, limitFromFailure, resumeShell, resumeCmdLine, ambiguousMode, localeHour24, localeDateParts, fmtDayMonth, humanText,
     _setAmbiguous: (m) => { AMBIG_WIDE = m === 'wide'; },
   };
   return;

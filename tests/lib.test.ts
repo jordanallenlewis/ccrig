@@ -2,8 +2,8 @@
 import { expect, test } from 'claude-code/testing'
 import {
   alertFor, alertKey, ansiToSpans, classicResult, cliArgs, configFrom, crossings, detectWiring,
-  displayModel, fmtReset, nativeSegments, nodeFromSettings, packLines, parseRigOutput, plainText,
-  resumeCommand, splitArgs, statusInput, summaryLine, thresholdsFrom, withFable, xterm256, DEFAULT_THRESHOLDS,
+  displayModel, fmtDayMonth, fmtReset, localeDateParts, nativeSegments, nodeFromSettings, packLines, parseRigOutput, plainText,
+  resumeCommand, splitArgs, statusInput, summaryLine, thresholdsFrom, useDateParts, withFable, xterm256, DEFAULT_THRESHOLDS,
 } from '../hooks/lib'
 
 const NOW = Date.UTC(2026, 9, 1, 15, 0, 0)
@@ -61,7 +61,51 @@ test('fmtReset reads like the status line', () => {
   expect(fmtReset(IN_2H, NOW)).toMatch(/^\d{1,2}:\d\d[ap]$|^\d{1,2}\/\d{1,2} \d{1,2}:\d\d[ap]$/)
   // inside the coming week a reset reads as its weekday, later as a date, like the refined status line
   expect(fmtReset(IN_3D, NOW)).toMatch(/^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) \d{1,2}:\d\d[ap]$/)
-  expect(fmtReset(new Date(NOW + 6.5 * 86400 * 1000).toISOString(), NOW)).toMatch(/^\d{1,2}\/\d{1,2} \d{1,2}:\d\d[ap]$/)
+  expect(fmtReset(new Date(NOW + 6.5 * 86400 * 1000).toISOString(), NOW, localeDateParts('en-US'))).toMatch(/^\d{1,2}\/\d{1,2} \d{1,2}:\d\d[ap]$/)
+})
+
+test('fmtReset dates a reset a week out in the locale\'s day/month order, like the status line', () => {
+  const later = new Date(NOW + 6.5 * 86400 * 1000)
+  const iso = later.toISOString()
+  const m = later.getMonth() + 1
+  const d = later.getDate()
+  expect(fmtReset(iso, NOW, localeDateParts('en-US')).startsWith(m + '/' + d + ' ')).toBe(true)
+  expect(fmtReset(iso, NOW, localeDateParts('en-GB')).startsWith(d + '/' + m + ' ')).toBe(true)
+  expect(fmtReset(iso, NOW, localeDateParts('de-DE')).startsWith(d + '.' + m + '. ')).toBe(true)
+  const nov30 = new Date(2026, 10, 30, 20, 4)
+  expect(fmtDayMonth(nov30, localeDateParts('en-US'))).toBe('11/30')
+  expect(fmtDayMonth(nov30, localeDateParts('en-GB'))).toBe('30/11')
+  expect(fmtDayMonth(nov30, localeDateParts('de-DE'))).toBe('30.11.')
+  expect(fmtDayMonth(nov30, localeDateParts('ja-JP'))).toBe('11/30')
+})
+
+test('fmtDayMonth falls back to month/day for anything that is not a sound layout', () => {
+  const dec5 = new Date(2026, 11, 5, 9, 0)
+  for (const bad of [undefined, null, {}, { first: 'y', sep: '/', end: '' }, { first: 'd', sep: '', end: '' },
+    { first: 'd', sep: '1', end: '' }, { first: 'd', sep: '/', end: '\x1b[2J' }, { first: 'd', sep: 'abcd', end: '' }]) {
+    expect(fmtDayMonth(dec5, bad)).toBe('12/5')
+  }
+  expect(fmtDayMonth(dec5, { first: 'd', sep: '.', end: '.' })).toBe('5.12.')
+})
+
+test('the date layout statusline.js read from the locale reaches the pane', () => {
+  const thresholds = { green: 50, yellow: 80, warn: 85, critical: 93 }
+  const base = { thresholds, autopilot: 'notify', keepWorking: false, sessionBoard: false }
+  const gb = parseRigOutput(JSON.stringify({ segments: [], state: { ...base, date: { first: 'd', sep: '/', end: '' } } }))!.state!
+  expect(gb.date).toEqual({ first: 'd', sep: '/', end: '' })
+  // an older statusline.js sends none, and an unsound one is dropped, never drawn
+  expect('date' in parseRigOutput(JSON.stringify({ segments: [], state: base }))!.state!).toBe(false)
+  expect('date' in parseRigOutput(JSON.stringify({ segments: [], state: { ...base, date: { first: 'd', sep: '\x1b[2J', end: '' } } }))!.state!).toBe(false)
+  const later = new Date(NOW + 6.5 * 86400 * 1000)
+  const dm = later.getDate() + '/' + (later.getMonth() + 1) + ' '
+  try {
+    useDateParts(gb.date)
+    expect(fmtReset(later.toISOString(), NOW).startsWith(dm)).toBe(true)
+    useDateParts({ first: 'x' })
+    expect(fmtReset(later.toISOString(), NOW).startsWith(dm)).toBe(true)
+  } finally {
+    useDateParts(localeDateParts('en-US'))
+  }
 })
 
 test('thresholdsFrom reads thresholds.usage and ignores junk', () => {

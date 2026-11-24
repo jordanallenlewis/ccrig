@@ -12,6 +12,7 @@ In-progress work lives under `[Unreleased]` until it's cut.
 ## [Unreleased]
 
 ### Fixed
+- A reset more than six days out is dated in your locale's order: `30/11 20:04` in en-GB, `30.11. 20:04` in German, `11/30 8:04p` in en-US. The date used to read month/day everywhere, so `12/5` meant 12 May to a day-first reader. The `/ccrig` pane in Claude Code follows the same rule (#52).
 - The model-downgrade alert knows the Mythos models. A Mythos session that Claude Code moves to Opus or lower now shows `↓ Opus (was Mythos)`, as a Fable session does, and an automatic fallback from Mythos is recorded the same way. Mythos and Fable count as the same tier, so a move between them is no downgrade (#50).
 - The model-downgrade alert now shows Claude Code's automatic model fallback at any usage level and within a model family (`↓ Opus 4.8 (was Opus 5.5)`). On Claude Code 2.1.251 or newer the guardian wires the `PostModelSwitch` hook, which says whether Claude Code or you changed the model: a `/model` switch to a lower model never raises the alert. Older versions keep the check on usage of 50% or more (#46).
 - Keep-working no longer pushes extra turns while Claude is waiting on background tasks or a scheduled wakeup. When Claude Code reports either at a turn end, the stop is allowed and the stuck counter is left alone (#44).

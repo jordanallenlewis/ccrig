@@ -571,6 +571,29 @@ test('ambiguous width: CJK locales count box-drawing glyphs as two cells', () =>
   assert.strictEqual(SL.dispWidth('━━╸───'), 6);
 });
 
+// A reset more than a few days out carries its date; the day and month go in the locale's order with its own
+// marks (#52: it was month/day everywhere, so 12/5 read as 12 May in day-first locales).
+test('localeDateParts: the day/month order and marks of each locale', () => {
+  const d = new Date(2026, 10, 30, 20, 4);
+  const fmt = (loc) => SL.fmtDayMonth(d, SL.localeDateParts(loc));
+  assert.strictEqual(fmt('en-US'), '11/30');
+  assert.strictEqual(fmt('en-GB'), '30/11');
+  assert.strictEqual(fmt('de-DE'), '30.11.');
+  assert.strictEqual(fmt('ja-JP'), '11/30');
+  assert.strictEqual(fmt('fr-FR'), '30/11');
+  assert.strictEqual(fmt('ar-EG').replace(/[^0-9]/g, ''), '3011', 'ASCII digits whatever numbering the locale uses, no invisible marks: ' + JSON.stringify(fmt('ar-EG')));
+  assert.ok(!/[\u200e\u200f\u061c]/.test(fmt('ar-EG')), 'no bidi marks in the bar');
+});
+
+test('fmtDayMonth: anything that is not a sound date layout falls back to month/day', () => {
+  const d = new Date(2026, 11, 5, 9, 0);
+  for (const bad of [undefined, null, {}, { first: 'y', sep: '/', end: '' }, { first: 'd', sep: '', end: '' }, { first: 'd', sep: '1', end: '' },
+    { first: 'd', sep: '/', end: '\x1b[2J' }, { first: 'd', sep: 'abcd', end: '' }, { first: 'd', sep: '/', end: 7 }]) {
+    assert.strictEqual(SL.fmtDayMonth(d, bad), '12/5', 'fallback for ' + JSON.stringify(bad));
+  }
+  assert.strictEqual(SL.fmtDayMonth(d, { first: 'd', sep: '.', end: '.' }), '5.12.');
+});
+
 test('localeHour24: which locales write a 24-hour clock', () => {
   assert.strictEqual(SL.localeHour24('de-DE'), true);
   assert.strictEqual(SL.localeHour24('en-GB'), true);
