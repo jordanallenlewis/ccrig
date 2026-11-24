@@ -1038,6 +1038,19 @@ test('downgrade alert stays quiet on a low-usage (deliberate) model switch', () 
   assert.ok(!sonnet.includes('⬇'), 'low usage -> assume deliberate, no false alarm');
 });
 
+test('downgrade alert: a Mythos session that drops to Opus at high usage is flagged like Fable', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const hot = { five_hour: { used_percentage: 70 } };
+  const top = strip(render(baseInput({ session_id: 'my1', model: { id: 'claude-mythos-5-1', display_name: 'Mythos 5.1' }, rate_limits: hot }), { env }).out);
+  assert.ok(!/(↓|⬇)/.test(top), 'no alert at the ceiling model');
+  const opus = strip(render(baseInput({ session_id: 'my1', model: { id: 'claude-opus-5-5', display_name: 'Opus 5.5' }, rate_limits: hot }), { env }).out);
+  assert.match(opus, /(↓|⬇) Opus \(was Mythos\)/);
+  render(baseInput({ session_id: 'my2', model: { id: 'claude-mythos-5-1', display_name: 'Mythos 5.1' }, rate_limits: hot }), { env });
+  const fable = strip(render(baseInput({ session_id: 'my2', model: { id: 'claude-fable-5-1', display_name: 'Fable 5.1' }, rate_limits: hot }), { env }).out);
+  assert.ok(!/(↓|⬇)/.test(fable), 'Mythos -> Fable is the same tier, no alert');
+});
+
 // prompt cache: the docs' sample object (code.claude.com/docs/en/statusline, "prompt_cache"), word for word
 const DOCS_CACHE = () => ({
   warm: true, caching_observed: true, ttl: '1h', expires_at: 1738429200, requests: 14, misses: 2,
@@ -1104,6 +1117,22 @@ test('PostModelSwitch source auto: the alert shows Claude Code\'s own fallback a
   hookRun('model-switch', { session_id: 'ms2', from_model: 'claude-opus-5-5[1m]', to_model: 'claude-opus-4-8', source: 'auto' }, { env });
   const within = strip(render(baseInput({ session_id: 'ms2', model: { id: 'claude-opus-4-8', display_name: 'Opus 4.8' }, rate_limits: cool }), { env }).out);
   assert.match(within, /(↓|⬇) Opus 4\.8 \(was Opus 5\.5\)/, 'and inside one family');
+});
+
+test('PostModelSwitch source auto: a fallback from Mythos to Opus is recorded and flagged', () => {
+  const sb = sandbox();
+  const env = { CLAUDE_CONFIG_DIR: sb.cfg, HOME: sb.home };
+  const cool = { five_hour: { used_percentage: 10 } };
+  render(baseInput({ session_id: 'mm1', model: { id: 'claude-mythos-5-2', display_name: 'Mythos 5.2' }, rate_limits: cool }), { env });
+  hookRun('model-switch', { session_id: 'mm1', from_model: 'claude-mythos-5-2', to_model: 'claude-opus-5-5', source: 'auto' }, { env });
+  const out = strip(render(baseInput({ session_id: 'mm1', model: { id: 'claude-opus-5-5', display_name: 'Opus 5.5' }, rate_limits: cool }), { env }).out);
+  assert.match(out, /(↓|⬇) Opus \(was Mythos\)/, 'a Mythos fallback shows at 10% usage');
+  hookRun('model-switch', { session_id: 'mm2', from_model: 'claude-mythos-5-2', to_model: 'claude-fable-5-2', source: 'auto' }, { env });
+  const side = strip(render(baseInput({ session_id: 'mm2', model: { id: 'claude-fable-5-2', display_name: 'Fable 5.2' }, rate_limits: cool }), { env }).out);
+  assert.ok(!/(↓|⬇)/.test(side), 'Mythos -> Fable of the same version is no fallback alert');
+  hookRun('model-switch', { session_id: 'mm3', from_model: 'claude-mythos-5-2', to_model: 'claude-fable-5-1', source: 'auto' }, { env });
+  const older = strip(render(baseInput({ session_id: 'mm3', model: { id: 'claude-fable-5-1', display_name: 'Fable 5.1' }, rate_limits: cool }), { env }).out);
+  assert.ok(!/(↓|⬇)/.test(older), 'nor is Mythos -> an older Fable');
 });
 
 test('REGRESSION: PostModelSwitch auto under opusplan or upward is no fallback alert', () => {
