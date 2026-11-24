@@ -44,6 +44,28 @@ test('modelTier: Fable sits above Opus, so a Fable -> Opus drop is a downgrade',
   assert.ok(SL.modelTier('Fable') > SL.modelTier('Opus'));
 });
 
+test('modelTier: Mythos is the same tier as Fable, above Opus', () => {
+  assert.strictEqual(SL.modelTier('Mythos 5.1'), 4);
+  assert.strictEqual(SL.modelTier('claude-mythos-5-2'), 4);
+  assert.strictEqual(SL.modelTier('MYTHOS'), 4);
+  assert.strictEqual(SL.modelTier('Mythos'), SL.modelTier('Fable'));
+  assert.ok(SL.modelTier('Mythos 5') > SL.modelTier('Opus 5.5'));
+});
+
+test('prettyModelId reads Mythos ids; modelIsLower ranks Mythos with Fable', () => {
+  assert.strictEqual(SL.prettyModelId('claude-mythos-5-1'), 'Mythos 5.1');
+  assert.strictEqual(SL.prettyModelId('claude-mythos-5-2[1m]'), 'Mythos 5.2');
+  assert.strictEqual(SL.prettyModelId('mythos'), 'Mythos');
+  assert.strictEqual(SL.prettyModelId('claude-fable-5-2'), 'Fable 5.2', 'Fable unchanged');
+  assert.ok(SL.modelIsLower('Opus 5.5', 'Mythos 5.1'), 'Mythos -> Opus is a drop');
+  assert.ok(!SL.modelIsLower('Fable 5.1', 'Mythos 5.1'), 'Mythos -> Fable of the same version is no drop');
+  assert.ok(!SL.modelIsLower('Mythos 5.1', 'Fable 5.1'), 'and the other way round');
+  assert.ok(!SL.modelIsLower('Mythos 5.2', 'Opus 5.5'), 'Opus -> Mythos is a move up');
+  assert.ok(!SL.modelIsLower('Fable 5.1', 'Mythos 5.2'), 'Mythos -> Fable of an older version is sideways');
+  assert.ok(!SL.modelIsLower('Mythos 5.1', 'Fable 5.2'), 'Fable -> Mythos of an older version is sideways');
+  assert.ok(SL.modelIsLower('Mythos 5.1', 'Mythos 5.2'), 'inside Mythos an older version is lower');
+});
+
 test('parseFableUsage: reads the Fable weekly_scoped row from limits[]', () => {
   const body = { seven_day: { utilization: 55 }, limits: [
     { kind: 'weekly_all', group: 'weekly', percent: 55, resets_at: '2026-11-18T07:00:00+00:00', scope: null },
