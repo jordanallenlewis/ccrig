@@ -948,20 +948,27 @@ function agentsSeg(list) {
   if (!n) return '';
   return c(K.agents, (isRefined() ? '' : '🤖 ') + n + (n === 1 ? ' agent' : ' agents'));
 }
-// ⬇ segment: Claude Code silently drops a tier (Fable → Opus, Opus → Sonnet) when you approach a model's cap.
-// Track the highest model tier seen this session and shout if the current one is lower.
-function modelTier(name) { const n = String(name == null ? '' : name).toLowerCase(); return /fable/.test(n) ? 4 : /opus/.test(n) ? 3 : /sonnet/.test(n) ? 2 : /haiku/.test(n) ? 1 : 0; }
-// "claude-opus-4-8[1m]" -> "Opus 4.8", "claude-fable-5-2" -> "Fable 5.2", "opus" -> "Opus"; anything else comes back as given
+// ⬇ segment: Claude Code can move a session to a lower model (Fable or Mythos → Opus, Opus → Sonnet).
+// Track the highest model tier seen this session and shout if the current one is lower. The tiers follow the
+// Models API `family` values; Fable and Mythos share the top tier, so a move between them is no drop.
+function modelTier(name) { const n = String(name == null ? '' : name).toLowerCase(); return /fable|mythos/.test(n) ? 4 : /opus/.test(n) ? 3 : /sonnet/.test(n) ? 2 : /haiku/.test(n) ? 1 : 0; }
+// "claude-opus-4-8[1m]" -> "Opus 4.8", "claude-mythos-5-2" -> "Mythos 5.2", "opus" -> "Opus"; anything else comes back as given
 function prettyModelId(id) {
   const s = String(id == null ? '' : id).trim().replace(/\[[^\]]*\]\s*$/, '');
-  const m = s.match(/^(?:claude-)?(fable|opus|sonnet|haiku)(?:-(\d+)(?:-(\d{1,2}))?)?(?:-\d{8})?$/i);
+  const m = s.match(/^(?:claude-)?(fable|mythos|opus|sonnet|haiku)(?:-(\d+)(?:-(\d{1,2}))?)?(?:-\d{8})?$/i);
   if (!m) return s.slice(0, 40);
   const fam = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
   return m[2] ? fam + ' ' + m[2] + (m[3] ? '.' + m[3] : '') : fam;
 }
 // a sortable rank: tier first, then the version ("Opus 4.8" -> [3,4,8]); an unversioned name ranks as version 0
 function modelRank(name) { const m = String(name || '').match(/(\d+)(?:\.(\d+))?/); return [modelTier(name), m ? +m[1] : 0, m && m[2] ? +m[2] : 0]; }
-function modelIsLower(a, b) { const x = modelRank(a), y = modelRank(b); for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i]; return false; }
+function modelIsLower(a, b) {
+  const x = modelRank(a), y = modelRank(b);
+  // Fable and Mythos share a tier: a move between the two is sideways whatever the versions, never a drop
+  const fam = (n) => (String(n || '').toLowerCase().match(/fable|mythos|opus|sonnet|haiku/) || [''])[0];
+  if (x[0] === y[0] && fam(a) !== fam(b)) return false;
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i]; return false;
+}
 function modelFamily(name) { return String(name || '').split(/[\s(]/)[0]; }
 let DEMO_DOWNGRADE = null; // [fromName, toName] set by --demo
 let DEMO_FABLE = null; // a fake Fable cache record set by --demo
@@ -2674,7 +2681,7 @@ const argv = process.argv.slice(2);
 if (require.main !== module) {
   module.exports = {
     parseFableUsage, fableWindow, spendWindow, toEpochSec, maskReport, reportSampleLine,
-    semverGt, modelTier, parseRemoteVersion, parseChangelogTop, inflightAgents,
+    semverGt, modelTier, prettyModelId, modelIsLower, parseRemoteVersion, parseChangelogTop, inflightAgents,
     computeInflightAgents, latestTodos, latestUserText, dispWidth, glyphWidth, deepMerge,
     truncFolder, fmtReset, resumePromptFromCheckpoint, wrapSegments, bar,
     fetchText, httpGetText, VERSION,
