@@ -585,6 +585,27 @@ test('localeDateParts: the day/month order and marks of each locale', () => {
   assert.ok(!/[\u200e\u200f\u061c]/.test(fmt('ar-EG')), 'no bidi marks in the bar');
 });
 
+// LC_TIME is how people keep English messages but local dates and clocks; Node's ICU never reads it (#56)
+test('timeLocale: LC_TIME names the date and clock locale unless LC_ALL is set', () => {
+  assert.strictEqual(SL.timeLocale({ LANG: 'en_US.UTF-8', LC_TIME: 'en_GB.UTF-8' }, 'linux'), 'en-GB');
+  assert.strictEqual(SL.timeLocale({ LC_TIME: 'de_DE' }, 'darwin'), 'de-DE');
+  assert.strictEqual(SL.timeLocale({ LC_TIME: 'sr_RS.UTF-8@latin' }, 'linux'), 'sr-RS', 'codeset and modifier go');
+  assert.strictEqual(SL.timeLocale({ LC_TIME: 'fr' }, 'linux'), 'fr');
+  // LC_ALL overrides every category, and ICU already reads it
+  assert.strictEqual(SL.timeLocale({ LC_ALL: 'en_US.UTF-8', LC_TIME: 'en_GB.UTF-8' }, 'linux'), undefined);
+  // an empty LC_ALL counts as unset, as in the C library
+  assert.strictEqual(SL.timeLocale({ LC_ALL: '', LC_TIME: 'en_GB.UTF-8' }, 'linux'), 'en-GB');
+  // C and POSIX name no locale: the default (LANG) stays
+  for (const v of ['C', 'POSIX', 'C.UTF-8', 'C.utf8', '', undefined]) assert.strictEqual(SL.timeLocale({ LANG: 'en_US.UTF-8', LC_TIME: v }, 'linux'), undefined, String(v));
+  // a value that is not a locale, or one ICU does not know, keeps the default
+  for (const v of ['xx_YY.UTF-8', 'en_GB;rm -rf', '../../etc', 'de_DE.UTF-8 extra', 'x'.repeat(80)]) assert.strictEqual(SL.timeLocale({ LC_TIME: v }, 'linux'), undefined, v);
+  // Node on Windows takes the locale from the system, not from these variables
+  assert.strictEqual(SL.timeLocale({ LC_TIME: 'en_GB.UTF-8' }, 'win32'), undefined);
+  // the result is what the bar formats with
+  assert.strictEqual(SL.localeHour24(SL.timeLocale({ LANG: 'en_US.UTF-8', LC_TIME: 'en_GB.UTF-8' }, 'linux')), true);
+  assert.strictEqual(SL.fmtDayMonth(new Date(2026, 10, 30, 12), SL.localeDateParts(SL.timeLocale({ LC_TIME: 'de_DE.UTF-8' }, 'linux'))), '30.11.');
+});
+
 test('fmtDayMonth: anything that is not a sound date layout falls back to month/day', () => {
   const d = new Date(2026, 11, 5, 9, 0);
   for (const bad of [undefined, null, {}, { first: 'y', sep: '/', end: '' }, { first: 'd', sep: '', end: '' }, { first: 'd', sep: '1', end: '' },
