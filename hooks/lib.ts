@@ -26,6 +26,8 @@ export type ModState = {
   fable?: { pct: number; resetsAt?: string } | null
   // the day/month layout of the user's locale, read by statusline.js (the mod's runtime may report en-US whatever the locale)
   date?: DateParts
+  // how the bar writes a reset (its resetStyle, else the locale's clock) and the locale's short weekday names
+  clock?: ClockLook
 }
 
 const BOM = String.fromCharCode(0xfeff)
@@ -168,6 +170,8 @@ function validState(x: unknown): ModState | null {
     ...(s.fable === undefined ? {} : { fable: validFable(s.fable) }),
     // an older statusline.js sends no date layout; an unsound one is dropped
     ...(validDateParts(s.date) ? { date: { first: s.date.first, sep: s.date.sep, end: s.date.end } } : {}),
+    // the same for the clock: an older statusline.js sends none, an unsound one is dropped
+    ...(validClock(s.clock) ? { clock: { style: s.clock.style, days: s.clock.days.slice() } } : {}),
   }
 }
 
@@ -253,22 +257,60 @@ export function useDateParts(p: unknown): void {
   if (validDateParts(p)) LOCALE_DATE = { first: p.first, sep: p.sep, end: p.end }
 }
 
-// the reset as CCRig's default clock style: 8:53a today, 7/22 6:53a on another day (the date in the locale's order)
-export function fmtReset(resetsAt: string | undefined, nowMs: number, dateParts?: DateParts): string {
+// How the status line writes a reset: its resetStyle (or, on 'auto', the locale's clock) and the locale's short
+// weekday names, Sunday first. statusline.js reads them; the mod's runtime may not see the locale.
+export interface ClockLook { style: 'clock' | 'clock24' | 'relative'; days: string[] }
+const WEEKDAYS_EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+
+// a weekday name is 1 to 12 characters with no control character, line or paragraph separator, or invisible
+// format character other than the zero-width non-joiner and joiner (Persian writes one in Tuesday)
+function validClock(p: unknown): p is ClockLook {
+  if (!p || typeof p !== 'object') return false
+  const o = p as Record<string, unknown>
+  return (o.style === 'clock' || o.style === 'clock24' || o.style === 'relative') && Array.isArray(o.days) && o.days.length === 7 &&
+    o.days.every((x) => typeof x === 'string' && [...x].length >= 1 && [...x].length <= 12 && !/[\p{Cc}\p{Zl}\p{Zp}]|(?![\u200c\u200d])\p{Cf}/u.test(x))
+}
+
+let LOCALE_CLOCK: ClockLook | null = null
+
+// the clock statusline.js sent; until it arrives (or from an older statusline.js) a reset reads 8:53a with English days
+export function useClock(p: unknown): void {
+  if (validClock(p)) LOCALE_CLOCK = { style: p.style, days: p.days.slice() }
+}
+
+// the reset as the status line writes it: 8:53a (or 20:53, or 2h14m) today, Tue 8:53a this week, 7/22 6:53a later
+// (the date in the locale's order)
+export function fmtReset(resetsAt: string | undefined, nowMs: number, dateParts?: DateParts, clockLook?: ClockLook): string {
   if (!resetsAt) return ''
   const t = Date.parse(resetsAt)
   if (!Number.isFinite(t)) return ''
   if (t <= nowMs) return 'now'
+  const look = clockLook ?? LOCALE_CLOCK
+  if (look?.style === 'relative') {
+    let s = Math.floor((t - nowMs) / 1000)
+    const days = Math.floor(s / 86400)
+    s -= days * 86400
+    const h = Math.floor(s / 3600)
+    s -= h * 3600
+    const m = Math.floor(s / 60)
+    if (days > 0) return h ? days + 'd' + h + 'h' : days + 'd'
+    if (h > 0) return m ? h + 'h' + m + 'm' : h + 'h'
+    return m + 'm'
+  }
   const d = new Date(t)
   const now = new Date(nowMs)
   const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()
-  let h = d.getHours()
-  const ap = h >= 12 ? 'p' : 'a'
-  h = h % 12 || 12
-  const clock = h + ':' + String(d.getMinutes()).padStart(2, '0') + ap
+  let clock: string
+  if (look?.style === 'clock24') clock = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')
+  else {
+    let h = d.getHours()
+    const ap = h >= 12 ? 'p' : 'a'
+    h = h % 12 || 12
+    clock = h + ':' + String(d.getMinutes()).padStart(2, '0') + ap
+  }
   if (sameDay) return clock
   // a reset inside the coming week reads as its weekday, the way the status line writes it
-  if (t - nowMs < 6 * 86400000) return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()] + ' ' + clock
+  if (t - nowMs < 6 * 86400000) return (look?.days ?? WEEKDAYS_EN)[d.getDay()] + ' ' + clock
   return fmtDayMonth(d, dateParts ?? (LOCALE_DATE ??= localeDateParts())) + ' ' + clock
 }
 

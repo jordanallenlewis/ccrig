@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import {
   alertFor, alertKey, ansiToSpans, classicResult, cliArgs, configFrom, crossings, detectWiring,
   displayModel, fmtDayMonth, fmtReset, localeDateParts, nativeSegments, nodeFromSettings, packLines, parseRigOutput, plainText,
-  resumeCommand, splitArgs, statusInput, summaryLine, thresholdsFrom, useDateParts, withFable, xterm256, DEFAULT_THRESHOLDS,
+  resumeCommand, splitArgs, statusInput, summaryLine, thresholdsFrom, useClock, useDateParts, withFable, xterm256, DEFAULT_THRESHOLDS,
 } from '../hooks/lib'
 
 const NOW = Date.UTC(2026, 9, 1, 15, 0, 0)
@@ -106,6 +106,54 @@ test('the date layout statusline.js read from the locale reaches the pane', () =
   } finally {
     useDateParts(localeDateParts('en-US'))
   }
+})
+
+test('the bar\'s clock and weekday names reach the pane (#58)', () => {
+  const thresholds = { green: 50, yellow: 80, warn: 85, critical: 93 }
+  const base = { thresholds, autopilot: 'notify', keepWorking: false, sessionBoard: false }
+  const DE = ['So.', 'Mo.', 'Di.', 'Mi.', 'Do.', 'Fr.', 'Sa.']
+  const EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+  const st = (clock: unknown) => parseRigOutput(JSON.stringify({ segments: [], state: { ...base, clock } }))!.state!
+  expect(st({ style: 'clock24', days: DE }).clock).toEqual({ style: 'clock24', days: DE })
+  // an older statusline.js sends none, and an unsound one is dropped, never drawn
+  expect('clock' in parseRigOutput(JSON.stringify({ segments: [], state: base }))!.state!).toBe(false)
+  for (const bad of [null, 'clock24', { style: 'auto', days: EN }, { style: 'clock24' }, { style: 'clock24', days: EN.slice(1) },
+    { style: 'clock24', days: [...EN.slice(1), ''] }, { style: 'clock24', days: [...EN.slice(1), '\x1b[2J'] },
+    { style: 'clock24', days: [...EN.slice(1), 'Saturday-long-name'] }, { style: 'clock24', days: [...EN.slice(1), 6] },
+    { style: 'clock24', days: [...EN.slice(1), 'Sa\u202e'] }, { style: 'clock24', days: [...EN.slice(1), '\ufeffSa'] },
+    { style: 'clock24', days: [...EN.slice(1), 'S\u2028a'] }]) {
+    expect('clock' in st(bad)).toBe(false)
+  }
+  // Persian writes a zero-width non-joiner inside Tuesday: kept
+  const FA = ['یکشنبه', 'دوشنبه', 'سه\u200cشنبه', 'چهارشنبه', 'پنجشنبه', 'جمعه', 'شنبه']
+  expect(st({ style: 'clock24', days: FA }).clock).toEqual({ style: 'clock24', days: FA })
+  const at = new Date(2026, 9, 6, 20, 5) // a Tuesday, 20:05 local
+  const now = at.getTime() - 3 * 86400000
+  const later = new Date(at.getTime() + 4 * 86400000) // 7 days out: dated
+  const iso = at.toISOString()
+  // no clock: today's output (an older statusline.js)
+  expect(fmtReset(iso, now)).toBe('Tue 8:05p')
+  expect(fmtReset(iso, now, undefined, { style: 'clock24', days: DE })).toBe('Di. 20:05')
+  expect(fmtReset(iso, now, undefined, { style: 'clock24', days: EN })).toBe('Tue 20:05')
+  expect(fmtReset(iso, now, undefined, { style: 'clock', days: DE })).toBe('Di. 8:05p')
+  expect(fmtReset(later.toISOString(), now, { first: 'd', sep: '/', end: '' }, { style: 'clock24', days: EN }))
+    .toBe(later.getDate() + '/' + (later.getMonth() + 1) + ' 20:05')
+  expect(fmtReset(new Date(now + 2 * 3600000 + 14 * 60000).toISOString(), now, undefined, { style: 'relative', days: EN })).toBe('2h14m')
+  expect(fmtReset(iso, now, undefined, { style: 'relative', days: EN })).toBe('3d')
+  expect(fmtReset(new Date(now + 40 * 60000).toISOString(), now, undefined, { style: 'relative', days: EN })).toBe('40m')
+  expect(fmtReset(new Date(now - 1000).toISOString(), now, undefined, { style: 'relative', days: EN })).toBe('now')
+  // the state's clock is kept for every later reset; an unsound one leaves the last good one
+  try {
+    useClock({ style: 'clock24', days: DE })
+    expect(fmtReset(iso, now)).toBe('Di. 20:05')
+    useClock({ style: 'nope' })
+    expect(fmtReset(iso, now)).toBe('Di. 20:05')
+    useClock(undefined)
+    expect(fmtReset(iso, now)).toBe('Di. 20:05')
+  } finally {
+    useClock({ style: 'clock', days: EN })
+  }
+  expect(fmtReset(iso, now)).toBe('Tue 8:05p')
 })
 
 test('thresholdsFrom reads thresholds.usage and ignores junk', () => {
