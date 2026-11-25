@@ -641,18 +641,22 @@ function localeDateParts(locale) {
     return seen === 2 && validDateParts(o) ? o : { ...DATE_MD };
   } catch { return { ...DATE_MD }; }
 }
-// pure: the locale dates and clocks follow when it is not Node's default. Node's ICU reads LC_ALL, then LC_MESSAGES,
-// then LANG, and never LC_TIME, the variable people set to keep English messages with local dates and a 24-hour
-// clock. So LC_TIME (unless a non-empty LC_ALL overrides every category, as in the C library) is turned into a
-// BCP 47 tag (en_GB.UTF-8 -> en-GB). C, POSIX, anything that is not a locale name, and a locale ICU does not have
-// keep the default. Windows takes the locale from the system, so the variables are not read there.
+// pure: the locale dates and clocks follow. Node's ICU picks its default from LC_ALL, then LC_MESSAGES, then LANG,
+// takes an empty LC_ALL as set (the root locale, 11-30), and never reads LC_TIME. The C library, which is what
+// people set these for, decides time formats by the first non-empty one of LC_ALL, LC_TIME and LANG. So that
+// variable is turned into a BCP 47 tag (en_GB.UTF-8 -> en-GB, sr_RS@latin -> sr-Latn-RS) and handed to Intl:
+// LC_TIME=en_GB keeps English messages with British dates, LANG=de_DE with LC_MESSAGES=en_US keeps German dates.
+// C, POSIX, anything that is not a locale name, and a locale ICU does not have give undefined (Node's default).
+// Windows takes the locale from the system, so the variables are not read there.
+const LOCALE_SCRIPT = { latin: 'Latn', cyrillic: 'Cyrl', devanagari: 'Deva' };
 function timeLocale(env, platform) {
-  if (platform === 'win32' || env.LC_ALL) return undefined;
-  const v = env.LC_TIME;
+  if (platform === 'win32') return undefined;
+  const v = env.LC_ALL || env.LC_TIME || env.LANG;
   if (typeof v !== 'string' || v.length > 40) return undefined;
-  const m = /^([A-Za-z]{2,3})(?:_([A-Za-z]{2}|\d{3}))?(?:\.[\w-]+)?(?:@\w+)?$/.exec(v);
+  const m = /^([A-Za-z]{2,3})(?:_([A-Za-z]{2}|\d{3}))?(?:\.[\w-]+)?(?:@(\w+))?$/.exec(v);
   if (!m) return undefined; // C, POSIX, C.UTF-8 and junk
-  const tag = m[1].toLowerCase() + (m[2] ? '-' + m[2].toUpperCase() : '');
+  const script = m[3] && LOCALE_SCRIPT[m[3].toLowerCase()];
+  const tag = m[1].toLowerCase() + (script ? '-' + script : '') + (m[2] ? '-' + m[2].toUpperCase() : '');
   try { return Intl.DateTimeFormat.supportedLocalesOf(tag).length ? tag : undefined; } catch { return undefined; }
 }
 // The locale's clock (24-hour or not), its short weekday names and its day/month layout. The first Intl call in a process costs
@@ -662,7 +666,8 @@ let LOCALE_INFO = null;
 const WEEKDAYS_EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 function localeInfo() {
   if (LOCALE_INFO) return LOCALE_INFO;
-  const key = ['LC_ALL', 'LC_TIME', 'LC_MESSAGES', 'LANG', 'LANGUAGE'].map((k) => process.env[k] || '').join('|');
+  // an empty variable is not an unset one to ICU (LC_ALL= gives the root locale), so the key tells them apart
+  const key = ['LC_ALL', 'LC_TIME', 'LC_MESSAGES', 'LANG', 'LANGUAGE'].map((k) => (process.env[k] === undefined ? '-' : '=' + process.env[k])).join('|');
   const f = path.join(cacheDir(), 'ccsl-locale.json'), now = Date.now();
   try {
     const o = JSON.parse(fs.readFileSync(f, 'utf8'));

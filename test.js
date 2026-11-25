@@ -3897,9 +3897,10 @@ test('the mod host state carries the locale\'s date layout for the pane (#52)', 
   const sb2 = sandbox();
   const us = JSON.parse(render(fullInput(), { env: R_ENV(sb2, { CCRIG_HOST: 'mod', CCRIG_PURE: '1' }) }).out);
   assert.deepStrictEqual(us.state.date, { first: 'm', sep: '/', end: '' });
-  // an empty LC_ALL leaves ICU on its root locale (11-30); that is no locale, so month/day
+  // an empty LC_ALL with no other locale leaves ICU on its root locale (11-30); that is no locale, so month/day
+  // (since #56 a LANG beside the empty LC_ALL names the locale, so LANG is empty here too)
   const sb3 = sandbox();
-  const und = JSON.parse(render(fullInput(), { env: R_ENV(sb3, { CCRIG_HOST: 'mod', CCRIG_PURE: '1', LANG: 'en_GB.UTF-8', LC_ALL: '' }) }).out);
+  const und = JSON.parse(render(fullInput(), { env: R_ENV(sb3, { CCRIG_HOST: 'mod', CCRIG_PURE: '1', LANG: '', LC_ALL: '' }) }).out);
   assert.deepStrictEqual(und.state.date, { first: 'm', sep: '/', end: '' });
 });
 
@@ -3921,22 +3922,31 @@ test('LC_TIME alone sets the clock and the date order (#56)', { skip: WIN && 'No
   // a reset later this week takes LC_TIME's weekday names
   const wk = strip(render(baseInput({ rate_limits: { seven_day: { used_percentage: 10, resets_at: R_NOW() + 3 * 86400 } } }), { env: R_ENV(sandbox(), { LANG: 'en_US.UTF-8', LC_TIME: 'de_DE.UTF-8', TZ: 'UTC' }) }).out);
   assert.match(wk, /weekly \S+ 10% ↺ (So|Mo|Di|Mi|Do|Fr|Sa)\.? \d\d:\d\d/, 'LC_TIME=de_DE: German weekday, 24-hour: ' + wk);
+  // German dates with English messages: ICU alone would read LC_MESSAGES
+  const msg = strip(render(input, { env: R_ENV(sandbox(), { LANG: 'de_DE.UTF-8', LC_MESSAGES: 'en_US.UTF-8', TZ: 'UTC' }) }).out);
+  assert.ok(msg.includes('↺ ' + d.getUTCDate() + '.' + (d.getUTCMonth() + 1) + '. '), 'LANG=de_DE, LC_MESSAGES=en_US: day.month.: ' + msg);
+  // an empty LC_ALL counts as unset: LANG decides (ICU alone would take its root locale)
+  const empty = strip(render(input, { env: R_ENV(sandbox(), { LANG: 'en_GB.UTF-8', LC_ALL: '', TZ: 'UTC' }) }).out);
+  assert.ok(empty.includes('↺ ' + d.getUTCDate() + '/' + (d.getUTCMonth() + 1) + ' ' + clock24), 'LC_ALL empty, LANG=en_GB: ' + empty);
   // the pane gets the same layout through the mod state
   const j = JSON.parse(render(fullInput(), { env: R_ENV(sandbox(), { CCRIG_HOST: 'mod', CCRIG_PURE: '1', LANG: 'en_US.UTF-8', LC_TIME: 'de_DE.UTF-8' }) }).out);
   assert.deepStrictEqual(j.state.date, { first: 'd', sep: '.', end: '.' });
 });
 
-test('a locale cache is not reused when LC_MESSAGES changes (#56)', { skip: WIN && 'Node on Windows takes the locale from the system, not LANG' }, () => {
+test('the locale cache key tells an empty LC_ALL from an unset one and includes LC_MESSAGES (#56)', { skip: WIN && 'Node on Windows takes the locale from the system, not LANG' }, () => {
   const sb = sandbox();
   const tmp = path.join(sb.dir, 'tmp'); fs.mkdirSync(tmp);
   const at = R_NOW() + Math.round(6.5 * 86400);
   const d = new Date(at * 1000);
   const input = baseInput({ rate_limits: { seven_day: { used_percentage: 40, resets_at: at } } });
-  const base = { LANG: 'en_US.UTF-8', TZ: 'UTC', TMPDIR: tmp, TEMP: tmp, TMP: tmp };
-  render(input, { env: R_ENV(sb, base) }); // caches en_US
-  // ICU reads LC_MESSAGES before LANG, so the same LANG with a new LC_MESSAGES is a new locale
-  const out = strip(render(input, { env: R_ENV(sb, { ...base, LC_MESSAGES: 'en_GB.UTF-8' }) }).out);
-  assert.ok(out.includes('↺ ' + d.getUTCDate() + '/' + (d.getUTCMonth() + 1) + ' '), 'LC_MESSAGES=en_GB: day/month: ' + out);
+  // no time variable names a locale, so Node's own default decides: ICU reads LC_MESSAGES, and an empty LC_ALL means its root locale
+  const base = { LANG: undefined, TZ: 'UTC', TMPDIR: tmp, TEMP: tmp, TMP: tmp, LC_MESSAGES: 'en_GB.UTF-8' };
+  const und = strip(render(input, { env: R_ENV(sb, { ...base, LC_ALL: '' }) }).out); // caches the root locale's month/day
+  assert.ok(und.includes('↺ ' + (d.getUTCMonth() + 1) + '/' + d.getUTCDate() + ' '), 'LC_ALL empty: month/day: ' + und);
+  const gb = strip(render(input, { env: R_ENV(sb, base) }).out);
+  assert.ok(gb.includes('↺ ' + d.getUTCDate() + '/' + (d.getUTCMonth() + 1) + ' '), 'LC_ALL unset, LC_MESSAGES=en_GB: day/month, not the cached root locale: ' + gb);
+  const us = strip(render(input, { env: R_ENV(sb, { ...base, LC_MESSAGES: 'en_US.UTF-8' }) }).out);
+  assert.ok(us.includes('↺ ' + (d.getUTCMonth() + 1) + '/' + d.getUTCDate() + ' '), 'LC_MESSAGES=en_US: month/day, not the cached en_GB: ' + us);
 });
 
 test('a locale cache from an older version (no date layout) is rebuilt, not used as month/day', { skip: WIN && 'Node on Windows takes the locale from the system, not LANG' }, () => {
