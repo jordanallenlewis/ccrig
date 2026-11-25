@@ -585,6 +585,40 @@ test('localeDateParts: the day/month order and marks of each locale', () => {
   assert.ok(!/[\u200e\u200f\u061c]/.test(fmt('ar-EG')), 'no bidi marks in the bar');
 });
 
+// Dates and clocks follow the C library's time locale (LC_ALL, then LC_TIME, then LANG, the first non-empty one).
+// Node's ICU never reads LC_TIME, reads LC_MESSAGES before LANG and takes an empty LC_ALL as the root locale (#56).
+test('timeLocale: the time locale is the first non-empty of LC_ALL, LC_TIME and LANG', () => {
+  assert.strictEqual(SL.timeLocale({ LANG: 'en_US.UTF-8', LC_TIME: 'en_GB.UTF-8' }, 'linux'), 'en-GB');
+  assert.strictEqual(SL.timeLocale({ LC_TIME: 'de_DE' }, 'darwin'), 'de-DE');
+  assert.strictEqual(SL.timeLocale({ LC_TIME: 'fr' }, 'linux'), 'fr');
+  assert.strictEqual(SL.timeLocale({ LC_TIME: 'es_419.UTF-8' }, 'linux'), 'es-419');
+  assert.strictEqual(SL.timeLocale({ LC_TIME: 'en_US.ISO-8859-1' }, 'linux'), 'en-US', 'the codeset goes');
+  // a script modifier names the script; any other modifier goes
+  assert.strictEqual(SL.timeLocale({ LC_TIME: 'sr_RS.UTF-8@latin' }, 'linux'), 'sr-Latn-RS');
+  assert.strictEqual(SL.timeLocale({ LC_TIME: 'uz_UZ@cyrillic' }, 'linux'), 'uz-Cyrl-UZ');
+  assert.strictEqual(SL.timeLocale({ LC_TIME: 'ca_ES@valencia' }, 'linux'), 'ca-ES');
+  // LC_ALL overrides every category
+  assert.strictEqual(SL.timeLocale({ LC_ALL: 'en_US.UTF-8', LC_TIME: 'en_GB.UTF-8' }, 'linux'), 'en-US');
+  assert.strictEqual(SL.timeLocale({ LC_ALL: 'C', LC_TIME: 'en_GB.UTF-8', LANG: 'en_GB.UTF-8' }, 'linux'), undefined);
+  // an empty LC_ALL counts as unset, as in the C library (ICU would take the root locale)
+  assert.strictEqual(SL.timeLocale({ LC_ALL: '', LC_TIME: 'en_GB.UTF-8' }, 'linux'), 'en-GB');
+  assert.strictEqual(SL.timeLocale({ LC_ALL: '', LANG: 'en_GB.UTF-8' }, 'linux'), 'en-GB');
+  // LC_MESSAGES is for messages: German dates with English messages stay German (ICU would read en_US)
+  assert.strictEqual(SL.timeLocale({ LANG: 'de_DE.UTF-8', LC_MESSAGES: 'en_US.UTF-8' }, 'linux'), 'de-DE');
+  // no LC_TIME: LANG
+  for (const v of ['', undefined]) assert.strictEqual(SL.timeLocale({ LANG: 'en_US.UTF-8', LC_TIME: v }, 'linux'), 'en-US', String(v));
+  // C and POSIX name no locale: Node's default stays
+  for (const v of ['C', 'POSIX', 'C.UTF-8', 'C.utf8']) assert.strictEqual(SL.timeLocale({ LANG: 'en_US.UTF-8', LC_TIME: v }, 'linux'), undefined, v);
+  assert.strictEqual(SL.timeLocale({}, 'linux'), undefined);
+  // a value that is not a locale, or one ICU does not know, keeps the default
+  for (const v of ['xx_YY.UTF-8', 'en_GB;rm -rf', '../../etc', 'de_DE.UTF-8 extra', 'en_GB:en', 'x'.repeat(80)]) assert.strictEqual(SL.timeLocale({ LC_TIME: v }, 'linux'), undefined, v);
+  // Node on Windows takes the locale from the system, not from these variables
+  assert.strictEqual(SL.timeLocale({ LC_TIME: 'en_GB.UTF-8' }, 'win32'), undefined);
+  // the result is what the bar formats with
+  assert.strictEqual(SL.localeHour24(SL.timeLocale({ LANG: 'en_US.UTF-8', LC_TIME: 'en_GB.UTF-8' }, 'linux')), true);
+  assert.strictEqual(SL.fmtDayMonth(new Date(2026, 10, 30, 12), SL.localeDateParts(SL.timeLocale({ LC_TIME: 'de_DE.UTF-8' }, 'linux'))), '30.11.');
+});
+
 test('fmtDayMonth: anything that is not a sound date layout falls back to month/day', () => {
   const d = new Date(2026, 11, 5, 9, 0);
   for (const bad of [undefined, null, {}, { first: 'y', sep: '/', end: '' }, { first: 'd', sep: '', end: '' }, { first: 'd', sep: '1', end: '' },

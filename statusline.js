@@ -641,14 +641,33 @@ function localeDateParts(locale) {
     return seen === 2 && validDateParts(o) ? o : { ...DATE_MD };
   } catch { return { ...DATE_MD }; }
 }
+// pure: the locale dates and clocks follow. Node's ICU picks its default from LC_ALL, then LC_MESSAGES, then LANG,
+// takes an empty LC_ALL as set (the root locale, 11-30), and never reads LC_TIME. The C library, which is what
+// people set these for, decides time formats by the first non-empty one of LC_ALL, LC_TIME and LANG. So that
+// variable is turned into a BCP 47 tag (en_GB.UTF-8 -> en-GB, sr_RS@latin -> sr-Latn-RS) and handed to Intl:
+// LC_TIME=en_GB keeps English messages with British dates, LANG=de_DE with LC_MESSAGES=en_US keeps German dates.
+// C, POSIX, anything that is not a locale name, and a locale ICU does not have give undefined (Node's default).
+// Windows takes the locale from the system, so the variables are not read there.
+const LOCALE_SCRIPT = { latin: 'Latn', cyrillic: 'Cyrl', devanagari: 'Deva' };
+function timeLocale(env, platform) {
+  if (platform === 'win32') return undefined;
+  const v = env.LC_ALL || env.LC_TIME || env.LANG;
+  if (typeof v !== 'string' || v.length > 40) return undefined;
+  const m = /^([A-Za-z]{2,3})(?:_([A-Za-z]{2}|\d{3}))?(?:\.[\w-]+)?(?:@(\w+))?$/.exec(v);
+  if (!m) return undefined; // C, POSIX, C.UTF-8 and junk
+  const script = m[3] && LOCALE_SCRIPT[m[3].toLowerCase()];
+  const tag = m[1].toLowerCase() + (script ? '-' + script : '') + (m[2] ? '-' + m[2].toUpperCase() : '');
+  try { return Intl.DateTimeFormat.supportedLocalesOf(tag).length ? tag : undefined; } catch { return undefined; }
+}
 // The locale's clock (24-hour or not), its short weekday names and its day/month layout. The first Intl call in a process costs
 // about 11ms (it loads the locale data), too much for every render, so the answer is kept in the cache dir
-// for a day, keyed by the locale variables (Windows takes the locale from the system, so the day is the key).
+// for a day, keyed by every variable ICU or timeLocale reads (Windows takes the locale from the system, so the day is the key).
 let LOCALE_INFO = null;
 const WEEKDAYS_EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 function localeInfo() {
   if (LOCALE_INFO) return LOCALE_INFO;
-  const key = ['LC_ALL', 'LC_TIME', 'LANG', 'LANGUAGE'].map((k) => process.env[k] || '').join('|');
+  // an empty variable is not an unset one to ICU (LC_ALL= gives the root locale), so the key tells them apart
+  const key = ['LC_ALL', 'LC_TIME', 'LC_MESSAGES', 'LANG', 'LANGUAGE'].map((k) => (process.env[k] === undefined ? '-' : '=' + process.env[k])).join('|');
   const f = path.join(cacheDir(), 'ccsl-locale.json'), now = Date.now();
   try {
     const o = JSON.parse(fs.readFileSync(f, 'utf8'));
@@ -657,11 +676,12 @@ function localeInfo() {
   // a cache written before the date layout existed is rebuilt, never read as month/day
   const o = { key, at: now, h24: false, days: WEEKDAYS_EN.slice(), date: { ...DATE_MD } };
   try {
-    const hc = new Intl.DateTimeFormat(undefined, { hour: 'numeric' }).resolvedOptions().hourCycle;
+    const loc = timeLocale(process.env, process.platform);
+    const hc = new Intl.DateTimeFormat(loc, { hour: 'numeric' }).resolvedOptions().hourCycle;
     o.h24 = hc === 'h23' || hc === 'h24';
-    const wd = new Intl.DateTimeFormat(undefined, { weekday: 'short' });
+    const wd = new Intl.DateTimeFormat(loc, { weekday: 'short' });
     o.days = o.days.map((en, i) => cleanLabel(wd.format(new Date(2026, 9, 4 + i, 12)), 12) || en); // 2026-10-04 is a Sunday
-    o.date = localeDateParts(undefined);
+    o.date = localeDateParts(loc);
   } catch {}
   try { fs.writeFileSync(f, JSON.stringify(o), { mode: 0o600 }); } catch {}
   return (LOCALE_INFO = o);
@@ -2725,7 +2745,7 @@ if (require.main !== module) {
     fetchText, httpGetText, VERSION,
     DEFAULTS, DEFAULT_ORDER, MODES, helpText, watcherCmdMatches, notifySpec, maybeCheckUpdate,
     cleanLabel, padCell, sessionLabel, lampSupersedes, lampFor, lampPings, winLaunch, parseJsonText, profileLabelOf,
-    NOTIFY_MATCHER, isUsageLimitFailure, burnSlope, parseResetText, limitFromFailure, resumeShell, resumeCmdLine, ambiguousMode, localeHour24, localeDateParts, fmtDayMonth, humanText,
+    NOTIFY_MATCHER, isUsageLimitFailure, burnSlope, parseResetText, limitFromFailure, resumeShell, resumeCmdLine, ambiguousMode, localeHour24, localeDateParts, timeLocale, fmtDayMonth, humanText,
     _setAmbiguous: (m) => { AMBIG_WIDE = m === 'wide'; },
   };
   return;
