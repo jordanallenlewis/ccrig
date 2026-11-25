@@ -577,6 +577,12 @@ function nowSec() { return Math.floor(Date.now() / 1000); }
 // your next message), so we stop showing a stale time and a stale warning.
 function windowActive(reset) { return reset == null || reset > nowSec(); }
 
+// how a reset reads: 'relative' (2h14m), 'clock24' (14:40) or 'clock' (2:40p). 'auto' (the default) follows the
+// locale: 14:40 where clocks run to 24, 2:40p where they do not. The mod gets the answer in its state (modState).
+function resetClockStyle() {
+  if (CONFIG.resetStyle === 'relative') return 'relative';
+  return CONFIG.resetStyle === 'clock24' || (CONFIG.resetStyle === 'auto' && localeInfo().h24) ? 'clock24' : 'clock';
+}
 // reset time: absolute clock (dated when not today) or relative countdown
 function fmtReset(epochSec) {
   if (epochSec <= nowSec()) return 'now'; // reset time has passed; quota refreshes on the next message
@@ -593,8 +599,7 @@ function fmtReset(epochSec) {
   const d = new Date(epochSec * 1000), now = new Date();
   const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
   const week = isRefined() && !sameDay && epochSec - nowSec() < 6 * 86400;
-  // 'auto' (the default) follows the locale: 14:40 where clocks run to 24, 2:40p where they do not
-  const h24 = CONFIG.resetStyle === 'clock24' || (CONFIG.resetStyle === 'auto' && localeInfo().h24);
+  const h24 = resetClockStyle() === 'clock24';
   let clock;
   if (h24) clock = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   else {
@@ -1808,6 +1813,8 @@ function modState(input) {
     fable: fableState(),
     // the day/month layout of the user's locale, so the pane dates a reset as the bar does (the mod's own runtime may not see the locale)
     date: localeInfo().date,
+    // the bar's clock (resetStyle, else the locale's) and the locale's weekday names, so the pane writes a reset as the bar does
+    clock: { style: resetClockStyle(), days: localeInfo().days.slice() },
   };
 }
 // the Fable window for the mod's pane, toasts and band alert (null when off, stale or unknown)

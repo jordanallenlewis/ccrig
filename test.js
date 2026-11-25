@@ -3904,6 +3904,29 @@ test('the mod host state carries the locale\'s date layout for the pane (#52)', 
   assert.deepStrictEqual(und.state.date, { first: 'm', sep: '/', end: '' });
 });
 
+test('the mod host state carries the bar\'s clock and weekday names for the pane (#58)', { skip: WIN && 'Node on Windows takes the locale from the system, not LANG' }, () => {
+  const state = (env, config) => {
+    const sb = sandbox();
+    const script = config ? scriptCopy(sb.dir, config) : SCRIPT;
+    return JSON.parse(render(fullInput(), { env: R_ENV(sb, { CCRIG_HOST: 'mod', CCRIG_PURE: '1', ...env }), script }).out).state;
+  };
+  // en_GB: a 24-hour clock, English weekday names
+  const gb = state({ LANG: 'en_GB.UTF-8' });
+  assert.strictEqual(gb.clock.style, 'clock24');
+  assert.deepStrictEqual(gb.clock.days, ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']);
+  // de_DE: German weekday names, as the bar writes them
+  const de = state({ LANG: 'de_DE.UTF-8' });
+  assert.strictEqual(de.clock.style, 'clock24');
+  assert.strictEqual(de.clock.days.length, 7);
+  assert.match(de.clock.days[2], /^Di\.?$/, 'German Tuesday: ' + de.clock.days[2]);
+  // en_US: the 12-hour clock
+  assert.strictEqual(state({ LANG: 'en_US.UTF-8' }).clock.style, 'clock');
+  // resetStyle wins over the locale, as on the bar
+  assert.strictEqual(state({ LANG: 'en_GB.UTF-8' }, { resetStyle: 'clock' }).clock.style, 'clock');
+  assert.strictEqual(state({ LANG: 'en_US.UTF-8' }, { resetStyle: 'clock24' }).clock.style, 'clock24');
+  assert.strictEqual(state({ LANG: 'en_GB.UTF-8' }, { resetStyle: 'relative' }).clock.style, 'relative');
+});
+
 test('LC_TIME alone sets the clock and the date order (#56)', { skip: WIN && 'Node on Windows takes the locale from the system, not LC_TIME' }, () => {
   const at = R_NOW() + Math.round(6.5 * 86400);
   const d = new Date(at * 1000); // the bar runs in UTC below
